@@ -8,10 +8,12 @@ mod app;
 mod history;
 mod hop_table;
 mod icmp;
+mod latency_bars;
 mod names;
 mod route;
 mod stats;
 mod sync;
+mod timeline;
 mod tracer;
 
 use anyhow::anyhow;
@@ -24,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let host = std::env::args().nth(1);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("ping-watch").with_inner_size([1000.0, 560.0]),
+        viewport: egui::ViewportBuilder::default().with_title("ping-watch").with_inner_size([1200.0, 760.0]),
         ..Default::default()
     };
     eframe::run_native(

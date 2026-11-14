@@ -52,7 +52,6 @@ pub enum HistoryError {
 }
 
 /// Probe statistics of one time bucket.
-#[cfg_attr(not(test), expect(dead_code, reason = "read by the timeline pane, step 4"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bucket {
     /// Start of the bucket, Unix time in milliseconds.
@@ -86,7 +85,6 @@ pub fn unix_ms(time: SystemTime) -> i64 {
 }
 
 /// Converts an optional SQL integer of microseconds to a duration.
-#[cfg_attr(not(test), expect(dead_code, reason = "read by the timeline pane, step 4"))]
 fn micros(value: Option<i64>) -> Option<Duration> {
     value.and_then(|us| u64::try_from(us).ok()).map(Duration::from_micros)
 }
@@ -168,7 +166,6 @@ impl Store {
         Ok(self.connection.execute("DELETE FROM samples WHERE ts_ms < ?1", [before_ms])?)
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the timeline pane, step 4"))]
     /// Statistics of hop `ttl` of target `target_id` in `[from_ms, to_ms)`, grouped into buckets of
     /// `bucket_ms` aligned to `from_ms`. Buckets without samples are omitted.
     ///

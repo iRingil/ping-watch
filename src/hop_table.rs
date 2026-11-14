@@ -1,10 +1,12 @@
 //! Pane 1: the hop table — the route to the target with live per-hop statistics, in PingPlotter style.
+//! Its last column holds pane 2, the latency bars ([`latency_bars`]).
 
 use std::time::Duration;
 
-use eframe::egui::{Align, Align2, Color32, FontId, Layout, RichText, Sense, Ui, Vec2};
+use eframe::egui::{Align, Align2, Color32, FontId, Layout, Pos2, RichText, Sense, Ui, Vec2};
 use egui_extras::{Column, TableBuilder, TableRow};
 
+use crate::latency_bars;
 use crate::names::NameCache;
 use crate::route::{Hop, Route};
 use crate::stats::HopStats;
@@ -62,35 +64,50 @@ impl LossLevel {
     }
 }
 
-/// Draws the hop table of `route`; hop names come from `names`.
-pub fn show(ui: &mut Ui, route: &Route, names: &NameCache) {
+/// Draws the hop table of `route` with the latency bars; hop names come from `names`, the `selected` hop is
+/// highlighted. Returns the TTL of the hop row clicked in this frame.
+pub fn show(ui: &mut Ui, route: &Route, names: &NameCache, selected: Option<u8>) -> Option<u8> {
     let target_hop = route.hops().last().filter(|hop| hop.address == Some(route.target()));
+    let scale_ms = latency_bars::scale_ms(route.hops().iter().map(|hop| &hop.stats));
+    let mut averages: Vec<Pos2> = Vec::new();
+    let mut clicked = None;
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
+        .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center))
         .column(Column::exact(40.0))
         .column(Column::exact(NUMBER_WIDTH))
         .column(Column::initial(120.0).at_least(80.0))
-        .column(Column::remainder().at_least(120.0).clip(true))
+        .column(Column::initial(150.0).at_least(80.0).clip(true))
         .columns(Column::exact(NUMBER_WIDTH), 6)
+        .column(Column::remainder().at_least(200.0).clip(true))
         .header(ROW_HEIGHT, |mut header| {
             for (title, numeric) in HEADERS {
                 header.col(|ui| cell(ui, numeric, RichText::new(title).strong()));
             }
+            header.col(|ui| latency_bars::header(ui, scale_ms));
         })
         .body(|mut body| {
             for hop in route.hops() {
-                body.row(ROW_HEIGHT, |mut row| hop_row(&mut row, hop, names));
+                body.row(ROW_HEIGHT, |mut row| {
+                    row.set_selected(selected == Some(hop.ttl));
+                    averages.extend(hop_row(&mut row, hop, names, scale_ms));
+                    if row.response().clicked() {
+                        clicked = Some(hop.ttl);
+                    }
+                });
             }
             if let Some(hop) = target_hop {
                 body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats));
             }
         });
+    latency_bars::connect(ui, &averages);
+    clicked
 }
 
-/// Fills the row of one hop.
-fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache) {
+/// Fills the row of one hop; returns the position of its average latency marker, if drawn.
+fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f64) -> Option<Pos2> {
     row.col(|ui| badge(ui, hop));
     row.col(|ui| cell(ui, true, hop.stats.sent().to_string()));
     match hop.address {
@@ -105,6 +122,9 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache) {
         }
     }
     stat_cols(row, &hop.stats);
+    let mut average = None;
+    row.col(|ui| average = latency_bars::cell(ui, &hop.stats, hop.address.is_some(), scale_ms));
+    average
 }
 
 /// Fills the summary row of the whole round trip (the target hop).
@@ -114,6 +134,7 @@ fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats) {
     row.col(|_| {});
     row.col(|ui| cell(ui, true, RichText::new("Round Trip (ms)").strong()));
     stat_cols(row, stats);
+    row.col(|_| {});
 }
 
 /// Fills the Avg, Min, Max, Cur, Jitter and PL% columns.
