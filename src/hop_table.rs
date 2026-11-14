@@ -179,7 +179,7 @@ fn cell(ui: &mut Ui, numeric: bool, text: impl Into<RichText>) {
 }
 
 /// Formats a duration as milliseconds with one decimal, `-` for none.
-fn format_ms(value: Option<Duration>) -> String {
+pub fn format_ms(value: Option<Duration>) -> String {
     value.map_or_else(|| "-".to_owned(), |duration| format!("{:.1}", duration.as_secs_f64() * 1000.0))
 }
 

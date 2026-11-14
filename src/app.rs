@@ -1,323 +1,234 @@
-//! Main window: toolbar (target input, pause with its menu, interval) and the panes showing the running trace.
+//! Main window: a tab bar ("All Targets", one tab per target, "+"), the All Targets overview and the active
+//! target tab. Keyboard shortcuts act on the active tab.
 
-use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use eframe::egui::{self, Align, Button, Color32, Key, KeyboardShortcut, Layout, Modifiers, RichText, TextEdit};
+use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
+use egui_extras::{Column, TableBuilder};
 
-use crate::focus::Focus;
-use crate::history::{self, Recorder, Store};
-use crate::hop_table;
-use crate::names::{NameCache, resolve};
-use crate::route::Route;
-use crate::timeline::Timeline;
-use crate::tracer::{TraceConfig, Tracer};
+use crate::history::{self, Store};
+use crate::hop_table::format_ms;
+use crate::names::NameCache;
+use crate::tab::{self, Action, Tab};
 
 /// How often the window redraws to show fresh numbers.
 const REFRESH: Duration = Duration::from_millis(250);
-/// Probe intervals offered in the toolbar.
-const INTERVALS: [(Duration, &str); 7] = [
-    (Duration::from_millis(500), "0.5 seconds"),
-    (Duration::from_secs(1), "1 second"),
-    (Duration::from_millis(2_500), "2.5 seconds"),
-    (Duration::from_secs(5), "5 seconds"),
-    (Duration::from_secs(10), "10 seconds"),
-    (Duration::from_secs(30), "30 seconds"),
-    (Duration::from_secs(60), "60 seconds"),
-];
-/// Restarts the trace with fresh statistics.
-const RESTART_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
-/// Starts entering a new target.
-const NEW_TARGET_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::N);
-/// Stops and closes the trace.
-const CLOSE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Q);
+/// Height of an overview table row.
+const ROW_HEIGHT: f32 = 22.0;
 
-/// What the user asked for in the toolbar or with a shortcut; applied after drawing.
+/// Which page the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
-    /// Trace the host in the input field.
-    Start,
-    /// Restart the current trace with fresh statistics.
-    Restart,
-    /// Clear and focus the input field for a new target.
-    NewTarget,
-    /// Stop the current trace.
-    Close,
-}
-
-/// Menu label of a probe interval.
-fn interval_label(interval: Duration) -> String {
-    INTERVALS
-        .iter()
-        .find(|(known, _)| *known == interval)
-        .map_or_else(|| format!("{:.1} seconds", interval.as_secs_f64()), |(_, label)| (*label).to_owned())
-}
-
-/// A running trace of one target.
-#[derive(Debug)]
-struct Session {
-    /// Host as the user entered it.
-    host: String,
-    /// Resolved address being traced.
-    target: IpAddr,
-    /// Id of the target in the history, `None` if history is off.
-    target_id: Option<i64>,
-    /// Background tracer; dropping the session stops it. Declared before `recorder` so it stops first and the
-    /// recorder can flush everything the tracer sent.
-    tracer: Tracer,
-    /// History writer, `None` if the database is unavailable.
-    #[expect(dead_code, reason = "held only to keep recording until the session is dropped")]
-    recorder: Option<Recorder>,
+enum Page {
+    /// Overview of all targets.
+    AllTargets,
+    /// The target tab at this index.
+    Target(usize),
 }
 
 /// Application state.
 #[derive(Debug)]
 pub struct PingWatchApp {
-    /// Contents of the target input field.
-    host_input: String,
-    /// Running trace, `None` when stopped.
-    session: Option<Session>,
-    /// Last start error, shown next to the input.
-    error: Option<String>,
-    /// Reverse-DNS cache for hop names.
+    /// Target tabs in display order.
+    tabs: Vec<Tab>,
+    /// Page shown.
+    page: Page,
+    /// Reverse-DNS cache for hop names, shared by all tabs.
     names: NameCache,
     /// History database file, `None` if there is no place for it.
     history_path: Option<PathBuf>,
-    /// Read connection to the history for the timeline, `None` if history is off.
+    /// Read connection to the history for the timelines, `None` if history is off.
     reader: Option<Store>,
-    /// Hop chosen for the timeline by clicking its row; `None` means the target hop.
-    selected_ttl: Option<u8>,
-    /// Timeline pane state.
-    timeline: Timeline,
-    /// Probe interval for the running and new traces.
-    interval: Duration,
-    /// Period the hop table summarizes.
-    focus: Focus,
-    /// Move keyboard focus to the target input on the next frame.
-    focus_input: bool,
 }
 
 impl PingWatchApp {
-    /// Creates the app; starts tracing `host` right away if given.
-    pub fn new(host: Option<String>) -> Self {
+    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab.
+    pub fn new(hosts: Vec<String>) -> Self {
         let history_path = history::default_path().inspect_err(|error| log::warn!("{error}")).ok();
         let reader = history_path
             .as_deref()
             .and_then(|path| Store::open(path).inspect_err(|error| log::warn!("{error}")).ok());
-        let mut app = Self {
-            host_input: host.unwrap_or_default(),
-            session: None,
-            error: None,
-            names: NameCache::default(),
-            history_path,
-            reader,
-            selected_ttl: None,
-            timeline: Timeline::default(),
-            interval: Duration::from_secs(1),
-            focus: Focus::default(),
-            focus_input: false,
-        };
-        if !app.host_input.is_empty() {
-            app.start(app.host_input.trim().to_owned());
+        let mut tabs: Vec<Tab> = hosts.into_iter().map(Tab::tracing).collect();
+        if tabs.is_empty() {
+            tabs.push(Tab::new());
         }
-        app
+        Self { tabs, page: Page::Target(0), names: NameCache::default(), history_path, reader }
     }
 
-    /// (Re)starts tracing `host`; on failure keeps the error for display.
-    /// Without a history database the trace still runs, and the error says history is off.
-    fn start(&mut self, host: String) {
-        // Stop the old trace first, so it doesn't keep probing while the new one starts.
-        self.session = None;
-        let target = match resolve(&host) {
-            Ok(target) => target,
-            Err(error) => return self.fail(error.to_string()),
-        };
-        self.selected_ttl = None;
-        let target_id = self
-            .reader
-            .as_ref()
-            .and_then(|reader| reader.target_id(&history_key(&host)).inspect_err(|error| log::warn!("{error}")).ok());
-        let (recorder, history_error) = match self.start_recorder(&host) {
-            Ok(recorder) => (Some(recorder), None),
-            Err(error) => (None, Some(error)),
-        };
-        let config = TraceConfig { interval: self.interval, ..TraceConfig::default() };
-        match Tracer::start(target, config, recorder.as_ref().and_then(Recorder::sender)) {
-            Ok(tracer) => {
-                self.session = Some(Session { host, target, target_id, tracer, recorder });
-                self.error = history_error;
-            }
-            Err(error) => self.fail(error.to_string()),
-        }
-    }
-
-    /// Logs a start failure and keeps it for display.
-    fn fail(&mut self, error: String) {
-        log::warn!("{error}");
-        self.error = Some(error);
-    }
-
-    /// Starts the history recorder for `host`; the error text says history is off.
-    fn start_recorder(&self, host: &str) -> Result<Recorder, String> {
-        let path = self.history_path.as_ref().ok_or_else(|| "history is off: no data folder".to_owned())?;
-        Recorder::start(path, &history_key(host)).map_err(|error| {
-            log::warn!("{error}");
-            format!("history is off: {error}")
-        })
-    }
-
-    /// Carries out `action`.
+    /// Carries out `action` on the active tab.
     fn apply(&mut self, action: Action) {
         match action {
-            Action::Start => self.start(self.host_input.trim().to_owned()),
+            Action::NewTarget => {
+                self.tabs.push(Tab::new());
+                self.page = Page::Target(self.tabs.len().saturating_sub(1));
+            }
             Action::Restart => {
-                if let Some(host) = self.session.as_ref().map(|session| session.host.clone()) {
-                    self.start(host);
+                if let Some(tab) = self.active_tab() {
+                    tab.restart();
                 }
             }
-            Action::NewTarget => {
-                self.host_input.clear();
-                self.focus_input = true;
+            Action::Close => {
+                if let Page::Target(index) = self.page {
+                    self.close(index);
+                }
             }
-            Action::Close => self.session = None,
         }
     }
 
-    /// Top bar: target input, Start, pause with its menu, interval and the last error. Returns the action asked.
-    fn toolbar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        let mut action = None;
+    /// The target tab shown, if any.
+    fn active_tab(&mut self) -> Option<&mut Tab> {
+        match self.page {
+            Page::Target(index) => self.tabs.get_mut(index),
+            Page::AllTargets => None,
+        }
+    }
+
+    /// Closes (and stops) tab `index`, showing its neighbour, or the overview after the last tab.
+    fn close(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(index);
+        self.page = match self.page {
+            _ if self.tabs.is_empty() => Page::AllTargets,
+            Page::Target(shown) if shown > index => Page::Target(shown.saturating_sub(1)),
+            Page::Target(shown) if shown == index => Page::Target(index.min(self.tabs.len().saturating_sub(1))),
+            page => page,
+        };
+    }
+
+    /// Tab bar: All Targets, the target tabs with close buttons, and "+".
+    fn tab_bar(&mut self, ui: &mut Ui) {
+        let mut close = None;
         ui.horizontal(|ui| {
-            ui.label("Target:");
-            let input = ui.add(TextEdit::singleline(&mut self.host_input).hint_text("host or IP").desired_width(260.0));
-            if std::mem::take(&mut self.focus_input) {
-                input.request_focus();
+            if ui.selectable_label(self.page == Page::AllTargets, "All Targets").clicked() {
+                self.page = Page::AllTargets;
             }
-            let enter_pressed = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-            if ui.button("Start").clicked() || enter_pressed {
-                action = Some(Action::Start);
-            }
-            if let Some(session) = &self.session {
+            for (index, tab) in self.tabs.iter().enumerate() {
                 ui.separator();
-                let paused = session.tracer.is_paused();
-                let pause =
-                    ui.add(Button::new(if paused { "\u{25b6} Resume" } else { "\u{23f8} Pause" }).selected(paused));
-                if pause.clicked() {
-                    session.tracer.set_paused(!paused);
+                if ui.selectable_label(self.page == Page::Target(index), tab.title()).clicked() {
+                    self.page = Page::Target(index);
                 }
-                ui.menu_button("\u{25bc}", |ui| {
-                    let items = [
-                        ("Reset and Restart", RESTART_SHORTCUT, Action::Restart),
-                        ("New Target", NEW_TARGET_SHORTCUT, Action::NewTarget),
-                        ("Close (and stop)", CLOSE_SHORTCUT, Action::Close),
-                    ];
-                    for (label, shortcut, item) in items {
-                        let shortcut = ui.ctx().format_shortcut(&shortcut);
-                        if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
-                            action = Some(item);
-                        }
-                    }
-                });
-                ui.label("Interval");
-                let before = self.interval;
-                egui::ComboBox::from_id_salt("interval").selected_text(interval_label(self.interval)).show_ui(
-                    ui,
-                    |ui| {
-                        for (interval, label) in INTERVALS {
-                            ui.selectable_value(&mut self.interval, interval, label);
-                        }
-                    },
-                );
-                if self.interval != before {
-                    session.tracer.set_interval(self.interval);
+                if ui.small_button("\u{2716}").on_hover_text("Close (and stop)").clicked() {
+                    close = Some(index);
                 }
-                ui.label("Focus");
-                egui::ComboBox::from_id_salt("focus").selected_text(self.focus.label()).show_ui(ui, |ui| {
-                    for focus in Focus::ALL {
-                        ui.selectable_value(&mut self.focus, focus, focus.label());
-                    }
-                });
             }
-            if let Some(error) = &self.error {
-                ui.colored_label(Color32::LIGHT_RED, error);
+            ui.separator();
+            if ui.button("+").on_hover_text("New target").clicked() {
+                self.apply(Action::NewTarget);
             }
         });
-        action
+        if let Some(index) = close {
+            self.close(index);
+        }
+    }
+
+    /// All Targets overview: one row per target with its final-hop numbers; a click opens the tab.
+    fn overview(&mut self, ui: &mut Ui) {
+        if self.tabs.is_empty() {
+            ui.label("No targets. Press + or Ctrl+N to add one.");
+            return;
+        }
+        let overviews: Vec<_> = self.tabs.iter().map(Tab::overview).collect();
+        let mut open = None;
+        TableBuilder::new(ui)
+            .striped(true)
+            .sense(Sense::click())
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .column(Column::initial(220.0).at_least(120.0).clip(true))
+            .column(Column::initial(200.0).at_least(100.0).clip(true))
+            .column(Column::initial(160.0).at_least(80.0).clip(true))
+            .columns(Column::exact(70.0), 6)
+            .header(ROW_HEIGHT, |mut header| {
+                for title in ["Target", "IP", "Status", "Hops", "Avg", "Min", "Max", "Cur", "PL%"] {
+                    header.col(|ui| {
+                        ui.strong(title);
+                    });
+                }
+            })
+            .body(|mut body| {
+                for (index, overview) in overviews.iter().enumerate() {
+                    body.row(ROW_HEIGHT, |mut row| {
+                        row.col(|ui| {
+                            ui.label(RichText::new(&overview.title).strong());
+                        });
+                        row.col(|ui| {
+                            ui.label(overview.target.map(|ip| ip.to_string()).unwrap_or_default());
+                        });
+                        row.col(|ui| {
+                            ui.label(&overview.status);
+                        });
+                        row.col(|ui| {
+                            ui.label(overview.hops.map(|hops| hops.to_string()).unwrap_or_default());
+                        });
+                        let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
+                        for value in [
+                            stats.and_then(|stats| stats.average()),
+                            stats.and_then(|stats| stats.best()),
+                            stats.and_then(|stats| stats.worst()),
+                            stats.and_then(|stats| stats.last()),
+                        ] {
+                            row.col(|ui| {
+                                ui.label(format_ms(value));
+                            });
+                        }
+                        row.col(|ui| {
+                            ui.label(stats.map(|stats| format!("{:.1}", stats.loss_percent())).unwrap_or_default());
+                        });
+                        if row.response().clicked() {
+                            open = Some(index);
+                        }
+                    });
+                }
+            });
+        if let Some(index) = open {
+            self.page = Page::Target(index);
+        }
     }
 }
 
 /// The action of a pressed keyboard shortcut, if any (consumed so widgets don't see it).
 fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
+    let shortcuts = [
+        (tab::RESTART_SHORTCUT, Action::Restart),
+        (tab::NEW_TARGET_SHORTCUT, Action::NewTarget),
+        (tab::CLOSE_SHORTCUT, Action::Close),
+    ];
     ctx.input_mut(|input| {
-        [(RESTART_SHORTCUT, Action::Restart), (NEW_TARGET_SHORTCUT, Action::NewTarget), (CLOSE_SHORTCUT, Action::Close)]
+        shortcuts
             .into_iter()
             .find(|(shortcut, _)| input.consume_shortcut(shortcut))
             .map(|(_, action)| action)
     })
 }
 
-/// Local wall-clock time `HH:MM:SS` of Unix milliseconds.
-fn clock(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .map(|time| time.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
-        .unwrap_or_default()
-}
-
-/// Name under which a host's history is stored.
-fn history_key(host: &str) -> String {
-    host.to_lowercase()
-}
-
-/// Timeline title of hop `ttl`: name, address and hop number, as in PingPlotter.
-fn hop_title(route: &Route, ttl: u8, names: &NameCache) -> String {
-    let address = route.hops().iter().find(|hop| hop.ttl == ttl).and_then(|hop| hop.address);
-    match address {
-        Some(ip) => {
-            let name = names.get(ip).unwrap_or_else(|| ip.to_string());
-            format!("{name} ({ip}) hop {ttl}")
-        }
-        None => format!("hop {ttl} (no response)"),
-    }
-}
-
 impl eframe::App for PingWatchApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let shortcut = shortcut_action(ui.ctx());
-        let clicked = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui)).inner;
-        if let Some(action) = shortcut.or(clicked) {
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if let Some(action) = shortcut_action(ui.ctx()) {
             self.apply(action);
         }
-        let Some(session) = &self.session else {
-            egui::CentralPanel::default().show(ui, |ui| ui.label("Enter a host and press Start."));
-            return;
+        egui::Panel::top("tab-bar").show(ui, |ui| self.tab_bar(ui));
+        let context = tab::Context {
+            names: &self.names,
+            reader: self.reader.as_ref(),
+            history_path: self.history_path.as_deref(),
         };
-        let route = session.tracer.snapshot(self.focus.window(self.timeline.period_length()));
-        // The clicked hop while it's still on the route, otherwise the target (last) hop.
-        let ttl = self
-            .selected_ttl
-            .filter(|ttl| route.hops().iter().any(|hop| hop.ttl == *ttl))
-            .or_else(|| route.hops().last().map(|hop| hop.ttl));
-        if let Some(ttl) = ttl {
-            let title = hop_title(&route, ttl, &self.names);
-            egui::Panel::bottom("timeline").resizable(true).default_size(300.0).show(ui, |ui| {
-                self.timeline.show(ui, self.reader.as_ref(), session.target_id, ttl, &title);
-            });
+        for tab in &mut self.tabs {
+            tab.poll(context);
         }
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} / {}", session.target, session.host)).strong());
-                if let Some(from_ms) = route.focus_start_ms() {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let now_ms = history::unix_ms(SystemTime::now());
-                        ui.label(format!("Focus: {} - {}", clock(from_ms), clock(now_ms)));
-                    });
-                }
-            });
-            ui.separator();
-            if let Some(clicked) = hop_table::show(ui, &route, &self.names, ttl) {
-                self.selected_ttl = Some(clicked);
+        let action = match self.page {
+            Page::AllTargets => {
+                egui::CentralPanel::default().show(ui, |ui| self.overview(ui));
+                None
             }
-        });
+            Page::Target(index) => self
+                .tabs
+                .get_mut(index)
+                .and_then(|tab| egui::CentralPanel::default().show(ui, |ui| tab.ui(ui, context)).inner),
+        };
+        if let Some(action) = action {
+            self.apply(action);
+        }
         ui.ctx().request_repaint_after(REFRESH);
     }
 }

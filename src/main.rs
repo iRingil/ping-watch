@@ -1,6 +1,6 @@
 //! `ping-watch` — traceroute monitor in the style of PingPlotter.
 //!
-//! Usage: `ping-watch [host]` — opens the window and, if a host is given, starts tracing it.
+//! Usage: `ping-watch [host...]` — opens the window with one tab per given host, each tracing right away.
 // Release builds are GUI-only; debug builds keep the console for `RUST_LOG` output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -14,6 +14,7 @@ mod names;
 mod route;
 mod stats;
 mod sync;
+mod tab;
 mod timeline;
 mod tracer;
 
@@ -25,7 +26,7 @@ use crate::app::PingWatchApp;
 /// Program entry point.
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    let host = std::env::args().nth(1);
+    let hosts: Vec<String> = std::env::args().skip(1).collect();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("ping-watch").with_inner_size([1200.0, 760.0]),
         ..Default::default()
@@ -35,7 +36,7 @@ fn main() -> anyhow::Result<()> {
         options,
         Box::new(move |creation| {
             creation.egui_ctx.set_theme(egui::Theme::Dark);
-            Ok(Box::new(PingWatchApp::new(host)))
+            Ok(Box::new(PingWatchApp::new(hosts)))
         }),
     )
     // `eframe::Error` isn't `Send + Sync`, so it can't go into `anyhow` directly.
