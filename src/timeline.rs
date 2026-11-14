@@ -247,6 +247,11 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    /// Length of the period the timeline shows.
+    pub fn period_length(&self) -> Duration {
+        Duration::from_secs(self.period.seconds())
+    }
+
     /// Draws the pane for hop `ttl` (described by `title`) of target `target_id`, from `store`.
     pub fn show(&mut self, ui: &mut Ui, store: Option<&Store>, target_id: Option<i64>, ttl: u8, title: &str) {
         ui.horizontal(|ui| {

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::history::unix_ms;
 use crate::icmp::{IcmpError, Pinger};
-use crate::route::{Route, Sample};
+use crate::route::{Route, RouteState, Sample};
 use crate::sync::lock;
 
 /// Tracing parameters.
@@ -56,7 +56,7 @@ struct Control {
 #[derive(Debug)]
 struct Shared {
     /// Route being built.
-    route: Mutex<Route>,
+    route: Mutex<RouteState>,
     /// Current settings.
     control: Mutex<Control>,
     /// Wakes waiting workers when `control` changes.
@@ -110,7 +110,7 @@ impl Tracer {
     /// [`TraceError`] if an ICMP handle can't be opened or a thread can't be started.
     pub fn start(target: IpAddr, config: TraceConfig, history: Option<Sender<Sample>>) -> Result<Self, TraceError> {
         let shared = Arc::new(Shared {
-            route: Mutex::new(Route::new(target, config.max_hops)),
+            route: Mutex::new(RouteState::new(target, config.max_hops)),
             control: Mutex::new(Control { stop: false, paused: false, interval: config.interval }),
             wake: Condvar::new(),
         });
@@ -128,9 +128,9 @@ impl Tracer {
         Ok(tracer)
     }
 
-    /// Copy of the current route state.
-    pub fn snapshot(&self) -> Route {
-        lock(&self.shared.route).clone()
+    /// Current route with statistics over the last `focus`, or since the start if `None`.
+    pub fn snapshot(&self, focus: Option<Duration>) -> Route {
+        lock(&self.shared.route).snapshot(focus, unix_ms(SystemTime::now()))
     }
 
     /// Pauses or resumes probing; statistics are kept.
@@ -177,7 +177,7 @@ fn probe_loop(
                 Ok(outcome) => {
                     let in_route = {
                         let mut route = lock(&shared.route);
-                        route.record(ttl, outcome);
+                        route.record(ttl, at_ms, outcome);
                         route.should_probe(ttl)
                     };
                     // Before the route length is known every TTL is probed once; TTLs that turn out to lie beyond
@@ -206,7 +206,7 @@ mod tests {
 
     /// Probes sent to the first hop so far.
     fn sent(tracer: &Tracer) -> u64 {
-        tracer.snapshot().hops().first().map_or(0, |hop| hop.stats.sent())
+        tracer.snapshot(None).hops().first().map_or(0, |hop| hop.stats.sent())
     }
 
     /// Runs against the loopback address, so it needs no network.

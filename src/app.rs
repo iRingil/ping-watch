@@ -2,10 +2,11 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use eframe::egui::{self, Button, Color32, Key, KeyboardShortcut, Modifiers, RichText, TextEdit};
+use eframe::egui::{self, Align, Button, Color32, Key, KeyboardShortcut, Layout, Modifiers, RichText, TextEdit};
 
+use crate::focus::Focus;
 use crate::history::{self, Recorder, Store};
 use crate::hop_table;
 use crate::names::{NameCache, resolve};
@@ -91,6 +92,8 @@ pub struct PingWatchApp {
     timeline: Timeline,
     /// Probe interval for the running and new traces.
     interval: Duration,
+    /// Period the hop table summarizes.
+    focus: Focus,
     /// Move keyboard focus to the target input on the next frame.
     focus_input: bool,
 }
@@ -112,6 +115,7 @@ impl PingWatchApp {
             selected_ttl: None,
             timeline: Timeline::default(),
             interval: Duration::from_secs(1),
+            focus: Focus::default(),
             focus_input: false,
         };
         if !app.host_input.is_empty() {
@@ -227,6 +231,12 @@ impl PingWatchApp {
                 if self.interval != before {
                     session.tracer.set_interval(self.interval);
                 }
+                ui.label("Focus");
+                egui::ComboBox::from_id_salt("focus").selected_text(self.focus.label()).show_ui(ui, |ui| {
+                    for focus in Focus::ALL {
+                        ui.selectable_value(&mut self.focus, focus, focus.label());
+                    }
+                });
             }
             if let Some(error) = &self.error {
                 ui.colored_label(Color32::LIGHT_RED, error);
@@ -244,6 +254,13 @@ fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
             .find(|(shortcut, _)| input.consume_shortcut(shortcut))
             .map(|(_, action)| action)
     })
+}
+
+/// Local wall-clock time `HH:MM:SS` of Unix milliseconds.
+fn clock(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|time| time.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .unwrap_or_default()
 }
 
 /// Name under which a host's history is stored.
@@ -274,7 +291,7 @@ impl eframe::App for PingWatchApp {
             egui::CentralPanel::default().show(ui, |ui| ui.label("Enter a host and press Start."));
             return;
         };
-        let route = session.tracer.snapshot();
+        let route = session.tracer.snapshot(self.focus.window(self.timeline.period_length()));
         // The clicked hop while it's still on the route, otherwise the target (last) hop.
         let ttl = self
             .selected_ttl
@@ -287,7 +304,15 @@ impl eframe::App for PingWatchApp {
             });
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.label(RichText::new(format!("{} / {}", session.target, session.host)).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} / {}", session.target, session.host)).strong());
+                if let Some(from_ms) = route.focus_start_ms() {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let now_ms = history::unix_ms(SystemTime::now());
+                        ui.label(format!("Focus: {} - {}", clock(from_ms), clock(now_ms)));
+                    });
+                }
+            });
             ui.separator();
             if let Some(clicked) = hop_table::show(ui, &route, &self.names, ttl) {
                 self.selected_ttl = Some(clicked);

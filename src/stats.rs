@@ -27,6 +27,18 @@ pub struct HopStats {
 }
 
 impl HopStats {
+    /// Statistics of `probes` in order: the round trip of each, `None` for a lost one.
+    pub fn from_probes(probes: impl IntoIterator<Item = Option<Duration>>) -> Self {
+        let mut stats = Self::default();
+        for probe in probes {
+            match probe {
+                Some(rtt) => stats.record_reply(rtt),
+                None => stats.record_loss(),
+            }
+        }
+        stats
+    }
+
     /// Records a probe that was answered after `rtt`.
     pub fn record_reply(&mut self, rtt: Duration) {
         self.sent = self.sent.saturating_add(1);

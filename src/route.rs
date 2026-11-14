@@ -1,9 +1,15 @@
-//! State of the route to one target: per-hop addresses and statistics, and how many hops the route has.
+//! State of the route to one target: per-hop addresses, statistics and recent probes, and how many hops the route
+//! has. [`RouteState`] is what the tracer updates; [`Route`] is a snapshot of it for the UI, with statistics over
+//! the chosen focus period.
 
+use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::stats::HopStats;
+
+/// How far back each hop keeps individual probes: the longest focus period that isn't "all".
+pub const RECENT_WINDOW: Duration = Duration::from_secs(60 * 60);
 
 /// Result of one probe sent with a given TTL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,38 +36,74 @@ pub struct Sample {
     pub outcome: ProbeOutcome,
 }
 
-/// One hop of the route.
+/// One hop of a route snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hop {
     /// TTL the hop is probed with; also its position in the route, starting at 1.
     pub ttl: u8,
     /// Address that answered most recently, `None` if the hop never answered.
     pub address: Option<IpAddr>,
-    /// Accumulated statistics.
+    /// Statistics over the snapshot's focus period.
     pub stats: HopStats,
 }
 
-/// Route to one target, built from probe outcomes.
-#[derive(Debug, Clone)]
+/// Snapshot of a route for display.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Route {
     /// Address being traced.
     target: IpAddr,
-    /// One entry per TTL from 1 to the maximum hop count.
+    /// Hops up to the target, or all hops while the target hasn't answered yet.
     hops: Vec<Hop>,
-    /// Smallest TTL at which the target itself answered: the route length.
-    target_ttl: Option<u8>,
+    /// Start of the period the statistics cover, Unix ms; `None` before the first probe.
+    from_ms: Option<i64>,
 }
 
 impl Route {
-    /// Creates an empty route to `target` that probes TTLs `1..=max_hops`.
-    pub fn new(target: IpAddr, max_hops: u8) -> Self {
-        let hops = (1..=max_hops).map(|ttl| Hop { ttl, address: None, stats: HopStats::default() }).collect();
-        Self { target, hops, target_ttl: None }
-    }
-
     /// Address being traced.
     pub fn target(&self) -> IpAddr {
         self.target
+    }
+
+    /// Hops up to the target, or all hops while the target hasn't answered yet.
+    pub fn hops(&self) -> &[Hop] {
+        &self.hops
+    }
+
+    /// Start of the period the statistics cover, Unix ms; `None` before the first probe.
+    pub fn focus_start_ms(&self) -> Option<i64> {
+        self.from_ms
+    }
+}
+
+/// Live state of one hop.
+#[derive(Debug, Clone)]
+struct HopState {
+    /// Address that answered most recently.
+    address: Option<IpAddr>,
+    /// Statistics since the trace started.
+    total: HopStats,
+    /// Probes of the last [`RECENT_WINDOW`]: send time (Unix ms) and round trip, `None` if lost. Oldest first.
+    recent: VecDeque<(i64, Option<Duration>)>,
+}
+
+/// Live state of the route to one target, built from probe outcomes.
+#[derive(Debug, Clone)]
+pub struct RouteState {
+    /// Address being traced.
+    target: IpAddr,
+    /// One entry per TTL from 1 to the maximum hop count.
+    hops: Vec<HopState>,
+    /// Smallest TTL at which the target itself answered: the route length.
+    target_ttl: Option<u8>,
+    /// Send time of the first recorded probe, Unix ms.
+    started_ms: Option<i64>,
+}
+
+impl RouteState {
+    /// Creates an empty route to `target` that probes TTLs `1..=max_hops`.
+    pub fn new(target: IpAddr, max_hops: u8) -> Self {
+        let hop = HopState { address: None, total: HopStats::default(), recent: VecDeque::new() };
+        Self { target, hops: vec![hop; usize::from(max_hops)], target_ttl: None, started_ms: None }
     }
 
     /// Whether probes with `ttl` are still useful: TTLs beyond the target are not.
@@ -69,21 +111,16 @@ impl Route {
         self.target_ttl.is_none_or(|target_ttl| ttl <= target_ttl)
     }
 
-    /// Hops up to the target, or all hops while the target hasn't answered yet.
-    pub fn hops(&self) -> &[Hop] {
-        let len = self.target_ttl.map_or(self.hops.len(), usize::from);
-        self.hops.get(..len).unwrap_or(&self.hops)
-    }
-
-    /// Records the outcome of a probe sent with `ttl`; TTLs outside the route are ignored.
-    pub fn record(&mut self, ttl: u8, outcome: ProbeOutcome) {
+    /// Records the outcome of a probe sent with `ttl` at `at_ms` (Unix ms); TTLs outside the route are ignored.
+    pub fn record(&mut self, ttl: u8, at_ms: i64, outcome: ProbeOutcome) {
         let Some(hop) = usize::from(ttl).checked_sub(1).and_then(|index| self.hops.get_mut(index)) else {
             return;
         };
-        match outcome {
+        self.started_ms = Some(self.started_ms.map_or(at_ms, |started| started.min(at_ms)));
+        let rtt = match outcome {
             ProbeOutcome::Reply { from, rtt } => {
                 hop.address = Some(from);
-                hop.stats.record_reply(rtt);
+                hop.total.record_reply(rtt);
                 if from == self.target {
                     // The target answered: the route is at most this long.
                     self.target_ttl = Some(self.target_ttl.map_or(ttl, |known| known.min(ttl)));
@@ -91,10 +128,52 @@ impl Route {
                     // A router answers where the target used to: the route got longer.
                     self.target_ttl = None;
                 }
+                Some(rtt)
             }
-            ProbeOutcome::Lost => hop.stats.record_loss(),
+            ProbeOutcome::Lost => {
+                hop.total.record_loss();
+                None
+            }
+        };
+        hop.recent.push_back((at_ms, rtt));
+        let horizon = at_ms.saturating_sub(millis(RECENT_WINDOW));
+        while hop.recent.front().is_some_and(|(sent_ms, _)| *sent_ms < horizon) {
+            hop.recent.pop_front();
         }
     }
+
+    /// Snapshot with statistics over the last `focus` before `now_ms` (Unix ms), or since the start if `None`.
+    /// A focus longer than [`RECENT_WINDOW`] only covers that window.
+    pub fn snapshot(&self, focus: Option<Duration>, now_ms: i64) -> Route {
+        let len = self.target_ttl.map_or(self.hops.len(), usize::from);
+        let since_ms = focus.map(|focus| now_ms.saturating_sub(millis(focus.min(RECENT_WINDOW))));
+        let hops = self
+            .hops
+            .iter()
+            .take(len)
+            .zip(1..)
+            .map(|(hop, ttl)| {
+                let stats = match since_ms {
+                    None => hop.total.clone(),
+                    Some(since) => HopStats::from_probes(
+                        hop.recent.iter().filter(|(sent_ms, _)| *sent_ms >= since).map(|(_, rtt)| *rtt),
+                    ),
+                };
+                Hop { ttl, address: hop.address, stats }
+            })
+            .collect();
+        let from_ms = match (since_ms, self.started_ms) {
+            (Some(since), Some(started)) => Some(since.max(started)),
+            (None, started) => started,
+            (Some(_), None) => None,
+        };
+        Route { target: self.target, hops, from_ms }
+    }
+}
+
+/// Duration in whole milliseconds, saturating.
+fn millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -108,53 +187,64 @@ mod tests {
     /// Address of an intermediate router in tests.
     const ROUTER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
 
+    /// Reply outcome from `from` with a round trip of `ms` milliseconds.
+    fn reply_ms(from: IpAddr, ms: u64) -> ProbeOutcome {
+        ProbeOutcome::Reply { from, rtt: Duration::from_millis(ms) }
+    }
+
     /// Reply outcome from `from` with a 10 ms round trip.
     fn reply(from: IpAddr) -> ProbeOutcome {
-        ProbeOutcome::Reply { from, rtt: Duration::from_millis(10) }
+        reply_ms(from, 10)
+    }
+
+    /// Snapshot with all-time statistics.
+    fn all(route: &RouteState) -> Route {
+        route.snapshot(None, 0)
     }
 
     #[test]
     fn all_hops_visible_until_target_answers() {
-        let mut route = Route::new(TARGET, 30);
-        route.record(1, reply(ROUTER));
-        assert_eq!(route.hops().len(), 30);
+        let mut route = RouteState::new(TARGET, 30);
+        route.record(1, 0, reply(ROUTER));
+        assert_eq!(all(&route).hops().len(), 30);
         assert!(route.should_probe(30));
     }
 
     #[test]
     fn target_reply_cuts_route() {
-        let mut route = Route::new(TARGET, 30);
-        route.record(5, reply(TARGET));
+        let mut route = RouteState::new(TARGET, 30);
+        route.record(5, 0, reply(TARGET));
         // Later TTLs also reach the target; they must not extend the route.
-        route.record(7, reply(TARGET));
-        assert_eq!(route.hops().len(), 5);
+        route.record(7, 0, reply(TARGET));
+        assert_eq!(all(&route).hops().len(), 5);
         assert!(route.should_probe(5));
         assert!(!route.should_probe(6));
     }
 
     #[test]
     fn shorter_route_replaces_longer() {
-        let mut route = Route::new(TARGET, 30);
-        route.record(7, reply(TARGET));
-        route.record(5, reply(TARGET));
-        assert_eq!(route.hops().len(), 5);
+        let mut route = RouteState::new(TARGET, 30);
+        route.record(7, 0, reply(TARGET));
+        route.record(5, 0, reply(TARGET));
+        assert_eq!(all(&route).hops().len(), 5);
     }
 
     #[test]
     fn router_at_target_ttl_reopens_route() {
-        let mut route = Route::new(TARGET, 30);
-        route.record(5, reply(TARGET));
-        route.record(5, reply(ROUTER));
-        assert_eq!(route.hops().len(), 30);
+        let mut route = RouteState::new(TARGET, 30);
+        route.record(5, 0, reply(TARGET));
+        route.record(5, 0, reply(ROUTER));
+        assert_eq!(all(&route).hops().len(), 30);
         assert!(route.should_probe(30));
     }
 
     #[test]
     fn records_go_to_their_hop() {
-        let mut route = Route::new(TARGET, 3);
-        route.record(2, reply(ROUTER));
-        route.record(2, ProbeOutcome::Lost);
-        let hop = route.hops().get(1).expect("route has 3 hops");
+        let mut route = RouteState::new(TARGET, 3);
+        route.record(2, 0, reply(ROUTER));
+        route.record(2, 0, ProbeOutcome::Lost);
+        let snapshot = all(&route);
+        let hop = snapshot.hops().get(1).expect("route has 3 hops");
         assert_eq!(hop.ttl, 2);
         assert_eq!(hop.address, Some(ROUTER));
         assert_eq!(hop.stats.sent(), 2);
@@ -163,9 +253,44 @@ mod tests {
 
     #[test]
     fn out_of_range_ttl_is_ignored() {
-        let mut route = Route::new(TARGET, 3);
-        route.record(0, ProbeOutcome::Lost);
-        route.record(4, ProbeOutcome::Lost);
-        assert!(route.hops().iter().all(|hop| hop.stats.sent() == 0));
+        let mut route = RouteState::new(TARGET, 3);
+        route.record(0, 0, ProbeOutcome::Lost);
+        route.record(4, 0, ProbeOutcome::Lost);
+        assert!(all(&route).hops().iter().all(|hop| hop.stats.sent() == 0));
+    }
+
+    #[test]
+    fn focus_limits_statistics_to_recent_probes() {
+        let mut route = RouteState::new(TARGET, 1);
+        route.record(1, 1_000, reply_ms(TARGET, 100));
+        route.record(1, 9_000, reply_ms(TARGET, 10));
+        route.record(1, 10_000, ProbeOutcome::Lost);
+
+        let recent = route.snapshot(Some(Duration::from_secs(5)), 10_000);
+        let stats = &recent.hops().first().expect("one hop").stats;
+        assert_eq!((stats.sent(), stats.received()), (2, 1));
+        assert_eq!(stats.worst(), Some(Duration::from_millis(10)));
+        assert_eq!(recent.focus_start_ms(), Some(5_000));
+
+        let everything = route.snapshot(None, 10_000);
+        assert_eq!(everything.hops().first().map(|hop| hop.stats.sent()), Some(3));
+        assert_eq!(everything.focus_start_ms(), Some(1_000));
+    }
+
+    #[test]
+    fn focus_never_starts_before_the_first_probe() {
+        let mut route = RouteState::new(TARGET, 1);
+        route.record(1, 9_000, reply(TARGET));
+        assert_eq!(route.snapshot(Some(Duration::from_secs(60)), 10_000).focus_start_ms(), Some(9_000));
+    }
+
+    #[test]
+    fn old_probes_leave_the_recent_window() {
+        let mut route = RouteState::new(TARGET, 1);
+        let window = millis(RECENT_WINDOW);
+        route.record(1, 0, ProbeOutcome::Lost);
+        route.record(1, window.saturating_add(1), reply(TARGET));
+        let snapshot = route.snapshot(Some(RECENT_WINDOW.saturating_mul(2)), window.saturating_add(1));
+        assert_eq!(snapshot.hops().first().map(|hop| hop.stats.sent()), Some(1));
     }
 }
