@@ -7,13 +7,19 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use eframe::egui::{self, Align, Button, Color32, Key, KeyboardShortcut, Layout, Modifiers, RichText, TextEdit, Ui};
+use eframe::egui::{
+    self, Align, Button, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Rect, RichText, Stroke, TextEdit, Ui,
+    pos2,
+};
 
 use crate::focus::Focus;
 use crate::history::{self, Recorder, Store};
 use crate::hop_table;
+use crate::latency_bars;
 use crate::names::{NameCache, resolve};
+use crate::presets;
 use crate::route::{Hop, Route};
+use crate::theme;
 use crate::timeline::Timeline;
 use crate::tracer::{TraceConfig, Tracer};
 
@@ -27,6 +33,14 @@ const INTERVALS: [(Duration, &str); 7] = [
     (Duration::from_secs(30), "30 seconds"),
     (Duration::from_secs(60), "60 seconds"),
 ];
+/// Share of the pane area the hop table gets at first; the timeline gets the rest.
+const TABLE_SHARE: f32 = 0.66;
+/// Limits of the table's share when the splitter is dragged, so neither pane disappears.
+const TABLE_SHARE_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.85;
+/// Height of the draggable bar between the panes.
+const SPLITTER_HEIGHT: f32 = 10.0;
+/// Gap between the panes and the window edge.
+const PANE_GAP: f32 = 10.0;
 /// Restarts the trace with fresh statistics.
 pub const RESTART_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
 /// Opens a tab for a new target.
@@ -118,6 +132,8 @@ pub struct Tab {
     focus: Focus,
     /// Move keyboard focus to the host input on the next frame.
     focus_input: bool,
+    /// Share of the pane area taken by the hop table, changed by dragging the splitter.
+    table_share: f32,
 }
 
 impl Tab {
@@ -133,6 +149,7 @@ impl Tab {
             interval: Duration::from_secs(1),
             focus: Focus::default(),
             focus_input: true,
+            table_share: TABLE_SHARE,
         }
     }
 
@@ -244,102 +261,85 @@ impl Tab {
         }
     }
 
-    /// Draws the tab; returns the action asked for in its menu.
+    /// Draws the tab: toolbar, the hop table pane and the timeline pane. The panes keep their frames and the table
+    /// its header even before a trace runs, so an empty tab shows where everything will appear. Returns the action
+    /// asked for in the menu.
     pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>) -> Option<Action> {
-        match &self.state {
-            State::Editing(error) => {
-                let error = error.clone();
-                self.editor(ui, error.as_deref());
-                None
-            }
-            State::Resolving(_) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(format!("Resolving {}…", self.host));
-                });
-                None
-            }
-            State::Running(_) => self.running(ui, context),
-        }
-    }
+        let route = self.route();
+        let toolbar_frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::symmetric(10, 8));
+        let action = egui::Panel::top("tab-toolbar").frame(toolbar_frame).show(ui, |ui| self.toolbar(ui)).inner;
+        // The clicked hop while it's still on the route, otherwise the target (last) hop.
+        let ttl = route.as_ref().and_then(|route| {
+            self.selected_ttl
+                .filter(|ttl| route.hops().iter().any(|hop| hop.ttl == *ttl))
+                .or_else(|| route.hops().last().map(|hop| hop.ttl))
+        });
+        let area = ui.available_rect_before_wrap().shrink2(egui::vec2(PANE_GAP, 0.0));
+        ui.allocate_rect(area, egui::Sense::hover());
+        let (table_rect, splitter_rect, timeline_rect) = self.split(area);
+        self.splitter(ui, splitter_rect, area);
 
-    /// Host entry of an editing tab.
-    fn editor(&mut self, ui: &mut Ui, error: Option<&str>) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Target:");
-            let input = ui.add(TextEdit::singleline(&mut self.host_input).hint_text("host or IP").desired_width(320.0));
-            if std::mem::take(&mut self.focus_input) {
-                input.request_focus();
-            }
-            let enter_pressed = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-            if ui.button("Trace").clicked() || enter_pressed {
-                let host = self.host_input.clone();
-                self.begin(host);
+        pane(ui, table_rect, Margin::same(1), |ui| {
+            let focus = route.as_ref().and_then(focus_label);
+            if let Some(clicked) = hop_table::show(ui, route.as_ref(), context.names, ttl, focus.as_deref()) {
+                self.selected_ttl = Some(clicked);
             }
         });
-        if let Some(error) = error {
-            ui.colored_label(Color32::LIGHT_RED, error);
-        }
-    }
-
-    /// Toolbar and panes of a running tab.
-    fn running(&mut self, ui: &mut Ui, context: Context<'_>) -> Option<Action> {
-        let route = self.route()?;
-        let action = egui::Panel::top("tab-toolbar").show(ui, |ui| self.toolbar(ui, &route)).inner;
-        let State::Running(session) = &self.state else {
-            return action;
-        };
-        // The clicked hop while it's still on the route, otherwise the target (last) hop.
-        let ttl = self
-            .selected_ttl
-            .filter(|ttl| route.hops().iter().any(|hop| hop.ttl == *ttl))
-            .or_else(|| route.hops().last().map(|hop| hop.ttl));
-        if let Some(ttl) = ttl {
-            let title = hop_title(&route, ttl, context.names);
-            egui::Panel::bottom("timeline").resizable(true).default_size(420.0).show(ui, |ui| {
+        pane(ui, timeline_rect, Margin::same(8), |ui| match (&self.state, &route, ttl) {
+            (State::Running(session), Some(route), Some(ttl)) => {
+                let title = hop_title(route, ttl, context.names);
                 self.timeline.show(ui, context.history_path, session.target_id, ttl, &title);
-                // The panel remembers the height its content used; claim it all, or a short frame (history still
-                // loading, graph hidden) would shrink the panel for good.
-                ui.take_available_space();
-            });
-        }
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(clicked) = hop_table::show(ui, &route, context.names, ttl) {
-                self.selected_ttl = Some(clicked);
+            }
+            _ => {
+                ui.weak("The history of the selected hop appears here once a trace runs.");
             }
         });
         action
     }
 
-    /// Target line with pause and its menu, interval, focus and the focus range. Returns the action asked.
-    fn toolbar(&mut self, ui: &mut Ui, route: &Route) -> Option<Action> {
-        let State::Running(session) = &self.state else {
-            return None;
-        };
+    /// Splits the pane area into the hop table (top, `table_share` of the height), the splitter and the timeline
+    /// (the rest). Computed from the window size every frame, so the panes are in place from the first frame.
+    fn split(&self, area: Rect) -> (Rect, Rect, Rect) {
+        let usable = area.height() - SPLITTER_HEIGHT - PANE_GAP;
+        let splitter_top = area.top() + usable * self.table_share;
+        let timeline_top = splitter_top + SPLITTER_HEIGHT;
+        let table = Rect::from_min_max(area.min, pos2(area.right(), splitter_top));
+        let splitter = Rect::from_min_max(pos2(area.left(), splitter_top), pos2(area.right(), timeline_top));
+        let timeline =
+            Rect::from_min_max(pos2(area.left(), timeline_top), pos2(area.right(), area.bottom() - PANE_GAP));
+        (table, splitter, timeline)
+    }
+
+    /// The bar between the panes: dragging it moves the border; it lights up under the pointer.
+    fn splitter(&mut self, ui: &mut Ui, rect: Rect, area: Rect) {
+        let response = ui
+            .interact(rect, ui.scope_id().with("pane-splitter"), egui::Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        let usable = (area.height() - SPLITTER_HEIGHT - PANE_GAP).max(1.0);
+        if response.dragged() {
+            let share = self.table_share + response.drag_delta().y / usable;
+            self.table_share = share.clamp(*TABLE_SHARE_RANGE.start(), *TABLE_SHARE_RANGE.end());
+        }
+        let active = response.hovered() || response.dragged();
+        let color = if active { theme::SIGNAL } else { theme::RULE };
+        let center = rect.center();
+        // A full-width hairline with a thicker grip in the middle shows where to grab.
+        ui.painter().hline(rect.x_range(), center.y, Stroke::new(1.0, color));
+        ui.painter().hline((center.x - 24.0)..=(center.x + 24.0), center.y, Stroke::new(4.0, color));
+    }
+
+    /// Toolbar: the target field (or the traced target with pause and its menu), interval, focus, problems and the
+    /// latency zone legend. Returns the action asked.
+    fn toolbar(&mut self, ui: &mut Ui) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} / {}", session.target, self.host)).strong());
-            ui.separator();
-            let paused = session.tracer.is_paused();
-            let pause = ui.add(Button::new(if paused { "\u{25b6} Resume" } else { "\u{23f8} Pause" }).selected(paused));
-            if pause.clicked() {
-                session.tracer.set_paused(!paused);
+            if matches!(self.state, State::Running(_)) {
+                action = self.trace_controls(ui);
+            } else {
+                self.target_entry(ui);
             }
-            ui.menu_button("\u{25bc}", |ui| {
-                let items = [
-                    ("Reset and Restart", RESTART_SHORTCUT, Action::Restart),
-                    ("New Target", NEW_TARGET_SHORTCUT, Action::NewTarget),
-                    ("Close (and stop)", CLOSE_SHORTCUT, Action::Close),
-                ];
-                for (label, shortcut, item) in items {
-                    let shortcut = ui.ctx().format_shortcut(&shortcut);
-                    if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
-                        action = Some(item);
-                    }
-                }
-            });
-            ui.label("Interval");
+            ui.add_space(12.0);
+            ui.weak("Interval");
             let before = self.interval;
             egui::ComboBox::from_id_salt("interval")
                 .selected_text(interval_label(self.interval))
@@ -348,27 +348,125 @@ impl Tab {
                         ui.selectable_value(&mut self.interval, interval, label);
                     }
                 });
-            if self.interval != before {
+            if self.interval != before
+                && let State::Running(session) = &self.state
+            {
                 session.tracer.set_interval(self.interval);
             }
-            ui.label("Focus");
+            ui.weak("Focus");
             egui::ComboBox::from_id_salt("focus").selected_text(self.focus.label()).show_ui(ui, |ui| {
                 for focus in Focus::ALL {
                     ui.selectable_value(&mut self.focus, focus, focus.label());
                 }
             });
-            if let Some(warning) = &self.warning {
-                ui.colored_label(Color32::LIGHT_RED, warning);
-            }
-            if let Some(from_ms) = route.focus_start_ms() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let to_ms = route.focus_end_ms().unwrap_or_else(|| history::unix_ms(SystemTime::now()));
-                    ui.label(format!("Focus: {} - {}", clock(from_ms), clock(to_ms)));
-                });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                latency_bars::legend(ui);
+                let problem = match &self.state {
+                    State::Editing(Some(error)) => Some(error.as_str()),
+                    _ => self.warning.as_deref(),
+                };
+                if let Some(problem) = problem {
+                    ui.colored_label(theme::BAD, problem);
+                }
+            });
+        });
+        action
+    }
+
+    /// Target field with the list of well-known targets and the Trace button (a spinner while resolving).
+    fn target_entry(&mut self, ui: &mut Ui) {
+        let resolving = matches!(self.state, State::Resolving(_));
+        let field =
+            TextEdit::singleline(&mut self.host_input).hint_text("Enter target name or IP").desired_width(320.0);
+        let input = ui.add_enabled(!resolving, field);
+        if std::mem::take(&mut self.focus_input) {
+            input.request_focus();
+        }
+        let mut start = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+        ui.add_enabled_ui(!resolving, |ui| {
+            ui.menu_button("Targets", |ui| {
+                for group in presets::GROUPS {
+                    ui.label(RichText::new(group.title).font(theme::heading_font(13.0)).color(theme::INK_MUTED));
+                    for preset in group.presets {
+                        if ui.add(Button::new(preset.target).shortcut_text(preset.owner)).clicked() {
+                            self.host_input = preset.target.to_owned();
+                            start = true;
+                            ui.close();
+                        }
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Well-known targets");
+        });
+        if resolving {
+            ui.spinner();
+            ui.weak(format!("Resolving {}…", self.host));
+        } else if ui.add(primary_button("Trace")).clicked() {
+            start = true;
+        }
+        if start && !resolving {
+            let host = self.host_input.clone();
+            self.begin(host);
+        }
+    }
+
+    /// Traced target, pause/resume and the menu of a running tab. Returns the menu action asked.
+    fn trace_controls(&mut self, ui: &mut Ui) -> Option<Action> {
+        let State::Running(session) = &self.state else {
+            return None;
+        };
+        let mut action = None;
+        ui.label(RichText::new(format!("{} / {}", session.target, self.host)).font(theme::heading_font(17.0)));
+        ui.add_space(8.0);
+        let paused = session.tracer.is_paused();
+        let pause = if paused { primary_button("Resume") } else { Button::new("Pause") };
+        if ui
+            .add(pause)
+            .on_hover_text(if paused { "Continue probing" } else { "Stop probing, keep the numbers" })
+            .clicked()
+        {
+            session.tracer.set_paused(!paused);
+        }
+        ui.menu_button("More", |ui| {
+            let items = [
+                ("Reset and restart", RESTART_SHORTCUT, Action::Restart),
+                ("New target", NEW_TARGET_SHORTCUT, Action::NewTarget),
+                ("Close and stop", CLOSE_SHORTCUT, Action::Close),
+            ];
+            for (label, shortcut, item) in items {
+                let shortcut = ui.ctx().format_shortcut(&shortcut);
+                if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
+                    action = Some(item);
+                    ui.close();
+                }
             }
         });
         action
     }
+}
+
+/// Draws a framed pane exactly into `rect`: the content gets its own child ui clipped to the rect, so whatever it
+/// draws can never move or resize the pane.
+fn pane(ui: &mut Ui, rect: Rect, margin: Margin, content: impl FnOnce(&mut Ui)) {
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    theme::pane_frame().inner_margin(margin).show(&mut child, |ui| {
+        ui.set_min_size(ui.available_size());
+        content(ui);
+    });
+}
+
+/// The main button of a group: signal-colored, so it reads as "the thing to press".
+fn primary_button(text: &str) -> Button<'_> {
+    Button::new(RichText::new(text).color(theme::CHASSIS)).fill(theme::SIGNAL)
+}
+
+/// "Focus: from – to" of a route, shown under its latency bars.
+fn focus_label(route: &Route) -> Option<String> {
+    let from_ms = route.focus_start_ms()?;
+    let to_ms = route.focus_end_ms().unwrap_or_else(|| history::unix_ms(SystemTime::now()));
+    Some(format!("Focus {} – {}", clock(from_ms), clock(to_ms)))
 }
 
 /// Menu label of a probe interval.

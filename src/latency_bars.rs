@@ -4,9 +4,11 @@
 
 use std::time::Duration;
 
-use eframe::egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2};
+use eframe::egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 use crate::stats::HopStats;
+use crate::theme::{self, BAD, GOOD, INK_MUTED, WARN};
+pub use crate::theme::{BAD_ZONE, GOOD_ZONE, WARN_ZONE};
 
 /// Latency below which a hop is fine (green zone).
 pub const GOOD_MS: f64 = 100.0;
@@ -19,20 +21,16 @@ const SCALE_STEP_MS: f64 = 50.0;
 /// The scale is this many times the highest hop average.
 const SCALE_PER_AVERAGE: f64 = 2.0;
 
-/// Background of the green zone.
-pub const GOOD_ZONE: Color32 = Color32::from_rgb(0x2b, 0x4a, 0x2b);
-/// Background of the yellow zone.
-pub const WARN_ZONE: Color32 = Color32::from_rgb(0x55, 0x4b, 0x1e);
-/// Background of the red zone.
-pub const BAD_ZONE: Color32 = Color32::from_rgb(0x55, 0x26, 0x26);
 /// Background of a row whose hop doesn't answer.
-const LOST_ROW: Color32 = Color32::from_rgb(0x7a, 0x2c, 0x2c);
+const LOST_ROW: Color32 = Color32::from_rgb(0x6e, 0x2f, 0x33);
 /// Color of the min–max range.
-const RANGE_COLOR: Color32 = Color32::from_gray(0xb0);
+const RANGE_COLOR: Color32 = Color32::from_rgb(0xa9, 0xae, 0xb8);
 /// Color of the average marker.
-const AVG_COLOR: Color32 = Color32::from_rgb(0x4f, 0xc3, 0xf7);
+const AVG_COLOR: Color32 = theme::SIGNAL;
 /// Color of the current-latency dot and of the line connecting averages.
-const CURRENT_COLOR: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
+const CURRENT_COLOR: Color32 = BAD;
+/// Size of the legend in the toolbar.
+const LEGEND_SIZE: Vec2 = vec2(150.0, 26.0);
 
 /// Scale of the bars in milliseconds: [`SCALE_PER_AVERAGE`] times the highest hop average, rounded up to
 /// [`SCALE_STEP_MS`], at least [`MIN_SCALE_MS`]. Rare slow answers (the "max" end) may lie beyond it.
@@ -64,11 +62,37 @@ fn cell_rect(ui: &mut Ui) -> Rect {
 pub fn header(ui: &mut Ui, scale_ms: f64) {
     let rect = cell_rect(ui);
     let painter = ui.painter();
-    let font = FontId::proportional(12.0);
-    let color = ui.visuals().text_color();
-    painter.text(rect.left_center(), Align2::LEFT_CENTER, "0 ms", font.clone(), color);
-    painter.text(rect.center(), Align2::CENTER_CENTER, "Latency", font.clone(), color);
-    painter.text(rect.right_center(), Align2::RIGHT_CENTER, format!("{scale_ms:.0} ms"), font, color);
+    painter.rect_filled(rect, 0.0, theme::PANE_HEADER);
+    let font = theme::heading_font(12.5);
+    // The scale ends sit on tabs in their zone's color, so the header doubles as the axis of the bars below.
+    let tab = |anchor: Align2, text: String, zone: Color32| {
+        let text_size = painter.layout_no_wrap(text.clone(), font.clone(), theme::INK).size();
+        let size = vec2(text_size.x + 12.0, text_size.y + 4.0);
+        let tab = anchor.align_size_within_rect(size, rect.shrink2(vec2(0.0, 3.0)));
+        painter.rect_filled(tab, CornerRadius::same(2), zone);
+        painter.text(tab.center(), Align2::CENTER_CENTER, text, font.clone(), theme::INK);
+    };
+    tab(Align2::LEFT_CENTER, "0 ms".to_owned(), GOOD_ZONE);
+    let end_zone = if scale_ms > WARN_MS { BAD_ZONE } else { WARN_ZONE };
+    tab(Align2::RIGHT_CENTER, format!("{scale_ms:.0} ms"), end_zone);
+    painter.text(rect.center(), Align2::CENTER_CENTER, "Latency", font, INK_MUTED);
+}
+
+/// Legend of the latency zones for the toolbar: a bar in the three zone colors with the 100 / 200 ms boundaries.
+pub fn legend(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(LEGEND_SIZE, Sense::hover());
+    let painter = ui.painter();
+    let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 6.0), rect.right_bottom());
+    let third = bar.width() / 3.0;
+    for (index, color) in [GOOD, WARN, BAD].into_iter().enumerate() {
+        let left = bar.left() + third * index as f32;
+        painter.rect_filled(Rect::from_x_y_ranges(left..=left + third, bar.y_range()), 0.0, color);
+    }
+    let font = eframe::egui::FontId::proportional(12.0);
+    for (index, label) in [(1.0, "100 ms"), (2.0, "200 ms")] {
+        let x = bar.left() + third * index;
+        painter.text(pos2(x, bar.top() - 2.0), Align2::CENTER_BOTTOM, label, font.clone(), INK_MUTED);
+    }
 }
 
 /// Draws the bar of one hop in its table cell; returns the position of the average marker, if any.

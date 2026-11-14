@@ -1,9 +1,11 @@
 //! Pane 1: the hop table — the route to the target with live per-hop statistics, in PingPlotter style.
-//! Its last column holds pane 2, the latency bars ([`latency_bars`]).
+//! Its last column holds pane 2, the latency bars ([`latency_bars`]). Without a route it still shows its header.
 
 use std::time::Duration;
 
-use eframe::egui::{Align, Align2, Color32, FontId, Layout, Pos2, RichText, Sense, Ui, Vec2};
+use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Ui, Vec2};
+
+use crate::theme;
 use egui_extras::{Column, TableBuilder, TableRow};
 
 use crate::latency_bars;
@@ -12,7 +14,9 @@ use crate::route::{Hop, Route};
 use crate::stats::HopStats;
 
 /// Height of a table row.
-const ROW_HEIGHT: f32 = 20.0;
+const ROW_HEIGHT: f32 = 22.0;
+/// Height of the header row.
+const HEADER_HEIGHT: f32 = 26.0;
 /// Width of a numeric column.
 const NUMBER_WIDTH: f32 = 58.0;
 /// Diameter of the hop number badge.
@@ -57,18 +61,26 @@ impl LossLevel {
     /// Color used for this level.
     fn color(self) -> Color32 {
         match self {
-            Self::None => Color32::from_rgb(0x3c, 0xb0, 0x43),
-            Self::Some => Color32::from_rgb(0xe6, 0xb8, 0x00),
-            Self::Heavy => Color32::from_rgb(0xd9, 0x53, 0x4f),
+            Self::None => theme::GOOD,
+            Self::Some => theme::WARN,
+            Self::Heavy => theme::BAD,
         }
     }
 }
 
-/// Draws the hop table of `route` with the latency bars; hop names come from `names`, the `selected` hop is
-/// highlighted. Returns the TTL of the hop row clicked in this frame.
-pub fn show(ui: &mut Ui, route: &Route, names: &NameCache, selected: Option<u8>) -> Option<u8> {
-    let target_hop = route.hops().last().filter(|hop| hop.address == Some(route.target()));
-    let scale_ms = latency_bars::scale_ms(route.hops().iter().map(|hop| &hop.stats));
+/// Draws the hop table of `route` (just the header without one) with the latency bars; hop names come from
+/// `names`, the `selected` hop is highlighted, `focus` labels the period under the bars. Returns the TTL of the
+/// hop row clicked in this frame.
+pub fn show(
+    ui: &mut Ui,
+    route: Option<&Route>,
+    names: &NameCache,
+    selected: Option<u8>,
+    focus: Option<&str>,
+) -> Option<u8> {
+    let hops = route.map_or(&[][..], Route::hops);
+    let target_hop = route.and_then(|route| hops.last().filter(|hop| hop.address == Some(route.target())));
+    let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats));
     let mut averages: Vec<Pos2> = Vec::new();
     let mut clicked = None;
     TableBuilder::new(ui)
@@ -82,14 +94,17 @@ pub fn show(ui: &mut Ui, route: &Route, names: &NameCache, selected: Option<u8>)
         .column(Column::initial(150.0).at_least(80.0).clip(true))
         .columns(Column::exact(NUMBER_WIDTH), 6)
         .column(Column::remainder().at_least(200.0).clip(true))
-        .header(ROW_HEIGHT, |mut header| {
+        .header(HEADER_HEIGHT, |mut header| {
             for (title, numeric) in HEADERS {
-                header.col(|ui| cell(ui, numeric, RichText::new(title).strong()));
+                header.col(|ui| {
+                    ui.painter().rect_filled(ui.max_rect().expand2(Vec2::new(4.0, 0.0)), 0.0, theme::PANE_HEADER);
+                    cell(ui, numeric, RichText::new(title).color(theme::INK_MUTED));
+                });
             }
             header.col(|ui| latency_bars::header(ui, scale_ms));
         })
         .body(|mut body| {
-            for hop in route.hops() {
+            for hop in hops {
                 body.row(ROW_HEIGHT, |mut row| {
                     row.set_selected(selected == Some(hop.ttl));
                     averages.extend(hop_row(&mut row, hop, names, scale_ms));
@@ -99,7 +114,7 @@ pub fn show(ui: &mut Ui, route: &Route, names: &NameCache, selected: Option<u8>)
                 });
             }
             if let Some(hop) = target_hop {
-                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats));
+                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus));
             }
         });
     latency_bars::connect(ui, &averages);
@@ -127,14 +142,19 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
     average
 }
 
-/// Fills the summary row of the whole round trip (the target hop).
-fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats) {
+/// Fills the summary row of the whole round trip (the target hop), with the focus period under the bars.
+fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&str>) {
+    let emphasis = |text: String| RichText::new(text).font(theme::heading_font(14.5));
     row.col(|_| {});
-    row.col(|ui| cell(ui, true, RichText::new(stats.sent().to_string()).strong()));
+    row.col(|ui| cell(ui, true, emphasis(stats.sent().to_string())));
     row.col(|_| {});
-    row.col(|ui| cell(ui, true, RichText::new("Round Trip (ms)").strong()));
+    row.col(|ui| cell(ui, true, emphasis("Round trip (ms)".to_owned())));
     stat_cols(row, stats);
-    row.col(|_| {});
+    row.col(|ui| {
+        if let Some(focus) = focus {
+            cell(ui, true, RichText::new(focus).small().color(theme::INK_MUTED));
+        }
+    });
 }
 
 /// Fills the Avg, Min, Max, Cur, Jitter and PL% columns.
@@ -166,7 +186,7 @@ fn badge(ui: &mut Ui, hop: &Hop) {
     let color = LossLevel::of(hop.stats.loss_percent()).color();
     ui.painter().circle_filled(rect.center(), BADGE_SIZE / 2.0, color);
     ui.painter()
-        .text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(11.0), Color32::BLACK);
+        .text(rect.center(), Align2::CENTER_CENTER, text, theme::heading_font(12.0), theme::CHASSIS);
 }
 
 /// Adds a label, right-aligned if `numeric`.

@@ -8,7 +8,7 @@ mod series;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use eframe::egui::{self, Align, Align2, Button, Color32, Layout, Response, Slider, TextEdit, Ui};
+use eframe::egui::{self, Align, Align2, Button, Color32, Layout, Response, RichText, Slider, TextEdit, Ui};
 use egui_plot::{
     Axis, Bar, BarChart, GridInput, GridMark, Line, LineStyle, MarkerShape, Plot, PlotPoint, PlotPoints, Points, Span,
     Text, VLine,
@@ -18,18 +18,17 @@ use self::fetch::{Fetched, Fetcher, Request};
 pub use self::series::Period;
 use self::series::{Series, Trace, Window, clock, millis_of, seconds, time_marks};
 use crate::history::{self, Comment};
-use crate::latency_bars::{BAD_ZONE, GOOD_MS, GOOD_ZONE, WARN_MS, WARN_ZONE};
+use crate::latency_bars::{GOOD_MS, WARN_MS};
+use crate::theme::{self, BAD_ZONE, GOOD_ZONE, WARN_ZONE};
 
 /// Longest time between history queries of a live timeline, however coarse the buckets are.
 const MAX_REFRESH: Duration = Duration::from_secs(60);
 /// Height of the jitter strip.
-const JITTER_HEIGHT: f32 = 60.0;
-/// Room left under the chart for the slider.
-const SLIDER_HEIGHT: f32 = 24.0;
+const JITTER_HEIGHT: f32 = 44.0;
 /// Width of the y axis, equal for both plots so their time axes line up.
 const Y_AXIS_WIDTH: f32 = 40.0;
 /// Color of the latency line.
-const LATENCY_COLOR: Color32 = Color32::from_gray(0xf0);
+const LATENCY_COLOR: Color32 = theme::INK;
 /// Color of the jitter line.
 const JITTER_COLOR: Color32 = Color32::from_rgb(0xff, 0x8a, 0x65);
 /// Color of the packet loss bars.
@@ -135,7 +134,7 @@ impl Timeline {
             return;
         };
         if let Some(error) = self.sync(path, target_id, ttl, now_ms) {
-            ui.colored_label(Color32::LIGHT_RED, error);
+            ui.colored_label(theme::BAD, error);
             return;
         }
         let Some(shown) = &self.shown else {
@@ -161,7 +160,7 @@ impl Timeline {
     /// Title, period, shown range and the hide/show toggle.
     fn header(&mut self, ui: &mut Ui, title: &str, now_ms: i64) {
         ui.horizontal(|ui| {
-            ui.strong(title);
+            ui.label(RichText::new(title).font(theme::heading_font(15.0)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let toggle = if self.hidden { "Show Graph" } else { "Hide Graph" };
                 if ui.small_button(toggle).clicked() {
@@ -360,7 +359,9 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
 
     let latency = &shown.series.latency;
     let scale = latency.scale_ms;
-    let height = (ui.available_height() - SLIDER_HEIGHT).max(80.0);
+    // Leave exactly the slider's row: taking more than the panel has would grow the panel every frame.
+    let slider_row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
+    let height = (ui.available_height() - slider_row).max(80.0);
     let response = base("timeline", scale)
         .height(height)
         .y_axis_label("Latency (ms)")

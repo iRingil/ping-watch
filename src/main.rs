@@ -11,10 +11,12 @@ mod hop_table;
 mod icmp;
 mod latency_bars;
 mod names;
+mod presets;
 mod route;
 mod stats;
 mod sync;
 mod tab;
+mod theme;
 mod timeline;
 mod tracer;
 
@@ -35,7 +37,7 @@ fn main() -> anyhow::Result<()> {
         "ping-watch",
         options,
         Box::new(move |creation| {
-            creation.egui_ctx.set_theme(egui::Theme::Dark);
+            theme::apply(&creation.egui_ctx);
             Ok(Box::new(PingWatchApp::new(hosts)))
         }),
     )
