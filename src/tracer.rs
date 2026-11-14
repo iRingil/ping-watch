@@ -2,12 +2,13 @@
 //! outcome into a shared [`Route`]; the UI reads snapshots of it.
 
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::icmp::{IcmpError, Pinger};
 use crate::route::Route;
+use crate::sync::lock;
 
 /// Tracing parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,10 +125,4 @@ fn probe_loop(shared: &Shared, pinger: &Pinger, target: Ipv4Addr, ttl: u8, confi
             break;
         }
     }
-}
-
-/// Locks `mutex`, ignoring poisoning: the guarded data stays consistent even if a worker panicked mid-way,
-/// because every update is a single method call.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

@@ -1,0 +1,182 @@
+//! Pane 1: the hop table — the route to the target with live per-hop statistics, in PingPlotter style.
+
+use std::time::Duration;
+
+use eframe::egui::{Align, Align2, Color32, FontId, Layout, RichText, Sense, Ui, Vec2};
+use egui_extras::{Column, TableBuilder, TableRow};
+
+use crate::names::NameCache;
+use crate::route::{Hop, Route};
+use crate::stats::HopStats;
+
+/// Height of a table row.
+const ROW_HEIGHT: f32 = 20.0;
+/// Width of a numeric column.
+const NUMBER_WIDTH: f32 = 58.0;
+/// Diameter of the hop number badge.
+const BADGE_SIZE: f32 = 17.0;
+/// Column titles and whether the column is numeric (right-aligned).
+const HEADERS: [(&str, bool); 10] = [
+    ("Hop", false),
+    ("Count", true),
+    ("IP", false),
+    ("Name", false),
+    ("Avg", true),
+    ("Min", true),
+    ("Max", true),
+    ("Cur", true),
+    ("Jitter", true),
+    ("PL%", true),
+];
+
+/// How bad a hop's packet loss is; picks the badge and PL% color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LossLevel {
+    /// No loss.
+    None,
+    /// Occasional loss, below 10 %.
+    Some,
+    /// 10 % or more.
+    Heavy,
+}
+
+impl LossLevel {
+    /// Classifies a loss percentage.
+    fn of(percent: f64) -> Self {
+        if percent <= 0.0 {
+            Self::None
+        } else if percent < 10.0 {
+            Self::Some
+        } else {
+            Self::Heavy
+        }
+    }
+
+    /// Color used for this level.
+    fn color(self) -> Color32 {
+        match self {
+            Self::None => Color32::from_rgb(0x3c, 0xb0, 0x43),
+            Self::Some => Color32::from_rgb(0xe6, 0xb8, 0x00),
+            Self::Heavy => Color32::from_rgb(0xd9, 0x53, 0x4f),
+        }
+    }
+}
+
+/// Draws the hop table of `route`; hop names come from `names`.
+pub fn show(ui: &mut Ui, route: &Route, names: &NameCache) {
+    let target_hop = route.hops().last().filter(|hop| hop.address == Some(route.target()));
+    TableBuilder::new(ui)
+        .striped(true)
+        .resizable(true)
+        .cell_layout(Layout::left_to_right(Align::Center))
+        .column(Column::exact(40.0))
+        .column(Column::exact(NUMBER_WIDTH))
+        .column(Column::initial(120.0).at_least(80.0))
+        .column(Column::remainder().at_least(120.0).clip(true))
+        .columns(Column::exact(NUMBER_WIDTH), 6)
+        .header(ROW_HEIGHT, |mut header| {
+            for (title, numeric) in HEADERS {
+                header.col(|ui| cell(ui, numeric, RichText::new(title).strong()));
+            }
+        })
+        .body(|mut body| {
+            for hop in route.hops() {
+                body.row(ROW_HEIGHT, |mut row| hop_row(&mut row, hop, names));
+            }
+            if let Some(hop) = target_hop {
+                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats));
+            }
+        });
+}
+
+/// Fills the row of one hop.
+fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache) {
+    row.col(|ui| badge(ui, hop));
+    row.col(|ui| cell(ui, true, hop.stats.sent().to_string()));
+    match hop.address {
+        Some(ip) => {
+            row.col(|ui| cell(ui, false, ip.to_string()));
+            let name = names.get(ip).unwrap_or_else(|| ip.to_string());
+            row.col(|ui| cell(ui, false, name));
+        }
+        None => {
+            row.col(|ui| cell(ui, false, "*"));
+            row.col(|ui| cell(ui, false, "No response"));
+        }
+    }
+    stat_cols(row, &hop.stats);
+}
+
+/// Fills the summary row of the whole round trip (the target hop).
+fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats) {
+    row.col(|_| {});
+    row.col(|ui| cell(ui, true, RichText::new(stats.sent().to_string()).strong()));
+    row.col(|_| {});
+    row.col(|ui| cell(ui, true, RichText::new("Round Trip (ms)").strong()));
+    stat_cols(row, stats);
+}
+
+/// Fills the Avg, Min, Max, Cur, Jitter and PL% columns.
+fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats) {
+    for value in [stats.average(), stats.best(), stats.worst()] {
+        row.col(|ui| cell(ui, true, format_ms(value)));
+    }
+    let current = match stats.last() {
+        Some(rtt) => format_ms(Some(rtt)),
+        None if stats.sent() > 0 => "*".to_owned(),
+        None => format_ms(None),
+    };
+    row.col(|ui| cell(ui, true, current));
+    row.col(|ui| cell(ui, true, format_ms(stats.jitter())));
+    let loss = stats.loss_percent();
+    let loss_text = RichText::new(format!("{loss:.1}"));
+    let loss_text = if loss > 0.0 { loss_text.color(LossLevel::of(loss).color()) } else { loss_text };
+    row.col(|ui| cell(ui, true, loss_text));
+}
+
+/// Hop number in a circle colored by loss; plain number for a hop that never answered.
+fn badge(ui: &mut Ui, hop: &Hop) {
+    let text = hop.ttl.to_string();
+    if hop.address.is_none() {
+        cell(ui, false, text);
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(BADGE_SIZE), Sense::hover());
+    let color = LossLevel::of(hop.stats.loss_percent()).color();
+    ui.painter().circle_filled(rect.center(), BADGE_SIZE / 2.0, color);
+    ui.painter()
+        .text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(11.0), Color32::BLACK);
+}
+
+/// Adds a label, right-aligned if `numeric`.
+fn cell(ui: &mut Ui, numeric: bool, text: impl Into<RichText>) {
+    if numeric {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text.into()));
+    } else {
+        ui.label(text.into());
+    }
+}
+
+/// Formats a duration as milliseconds with one decimal, `-` for none.
+fn format_ms(value: Option<Duration>) -> String {
+    value.map_or_else(|| "-".to_owned(), |duration| format!("{:.1}", duration.as_secs_f64() * 1000.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loss_levels() {
+        assert_eq!(LossLevel::of(0.0), LossLevel::None);
+        assert_eq!(LossLevel::of(5.0), LossLevel::Some);
+        assert_eq!(LossLevel::of(10.0), LossLevel::Heavy);
+        assert_eq!(LossLevel::of(100.0), LossLevel::Heavy);
+    }
+
+    #[test]
+    fn milliseconds_with_one_decimal() {
+        assert_eq!(format_ms(Some(Duration::from_micros(51_449))), "51.4");
+        assert_eq!(format_ms(None), "-");
+    }
+}

@@ -16,8 +16,10 @@ pub struct HopStats {
     best: Option<Duration>,
     /// Slowest round-trip time seen.
     worst: Option<Duration>,
-    /// Round-trip time of the most recent answered probe.
+    /// Round-trip time of the most recent probe, `None` if it was lost.
     last: Option<Duration>,
+    /// Round-trip time of the most recent answered probe, the base for the next jitter difference.
+    last_answered: Option<Duration>,
     /// Sum of absolute differences between consecutive round-trip times, used for jitter.
     total_jitter: Duration,
     /// Number of differences summed in `total_jitter`.
@@ -32,16 +34,18 @@ impl HopStats {
         self.total_rtt = self.total_rtt.saturating_add(rtt);
         self.best = Some(self.best.map_or(rtt, |best| best.min(rtt)));
         self.worst = Some(self.worst.map_or(rtt, |worst| worst.max(rtt)));
-        if let Some(previous) = self.last {
+        if let Some(previous) = self.last_answered {
             self.total_jitter = self.total_jitter.saturating_add(previous.abs_diff(rtt));
             self.jitter_samples = self.jitter_samples.saturating_add(1);
         }
         self.last = Some(rtt);
+        self.last_answered = Some(rtt);
     }
 
     /// Records a probe that got no answer.
     pub fn record_loss(&mut self) {
         self.sent = self.sent.saturating_add(1);
+        self.last = None;
     }
 
     /// Number of probes sent.
@@ -50,6 +54,7 @@ impl HopStats {
     }
 
     /// Number of probes answered.
+    #[cfg(test)]
     pub fn received(&self) -> u64 {
         self.received
     }
@@ -74,7 +79,7 @@ impl HopStats {
         self.worst
     }
 
-    /// Most recent round-trip time, `None` until the first answer.
+    /// Round-trip time of the most recent probe, `None` if it was lost or nothing was sent yet.
     pub fn last(&self) -> Option<Duration> {
         self.last
     }
@@ -135,6 +140,7 @@ mod tests {
         stats.record_loss();
         stats.record_loss();
         stats.record_loss();
+        assert_eq!(stats.last(), None);
         assert_eq!(stats.sent(), 4);
         assert_eq!(stats.received(), 1);
         assert_eq!(stats.loss_percent(), 75.0);
