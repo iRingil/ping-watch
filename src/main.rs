@@ -1,4 +1,5 @@
-//! `ping-watch` — traceroute monitor in the style of PingPlotter.
+//! Ping Watch — traceroute monitor in the style of PingPlotter. (`ping-watch` is only the project / executable
+//! name; everything the user sees says "Ping Watch".)
 //!
 //! Usage: `ping-watch [host...]` — opens the window with one tab per given host, each tracing right away.
 // Release builds are GUI-only; debug builds keep the console for `RUST_LOG` output.
@@ -25,6 +26,9 @@ use eframe::egui;
 
 use crate::app::PingWatchApp;
 
+/// Name of the app as users see it: window title, data folder, executable properties, documentation.
+pub const APP_NAME: &str = "Ping Watch";
+
 /// Window and taskbar icon (the executable's own icon comes from `build.rs`).
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 
@@ -44,13 +48,11 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let hosts: Vec<String> = std::env::args().skip(1).collect();
     let options = eframe::NativeOptions {
-        viewport: window_icon(
-            egui::ViewportBuilder::default().with_title("ping-watch").with_inner_size([1200.0, 760.0]),
-        ),
+        viewport: window_icon(egui::ViewportBuilder::default().with_title(APP_NAME).with_inner_size([1200.0, 760.0])),
         ..Default::default()
     };
     eframe::run_native(
-        "ping-watch",
+        APP_NAME,
         options,
         Box::new(move |creation| {
             theme::apply(&creation.egui_ctx);
