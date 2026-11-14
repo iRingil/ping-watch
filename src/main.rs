@@ -25,12 +25,28 @@ use eframe::egui;
 
 use crate::app::PingWatchApp;
 
+/// Window and taskbar icon (the executable's own icon comes from `build.rs`).
+const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
+
+/// Adds the app icon to `viewport`; without it (bad PNG) the window just gets the default icon.
+fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    match eframe::icon_data::from_png_bytes(ICON_PNG) {
+        Ok(icon) => viewport.with_icon(icon),
+        Err(error) => {
+            log::warn!("cannot load the window icon: {error}");
+            viewport
+        }
+    }
+}
+
 /// Program entry point.
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let hosts: Vec<String> = std::env::args().skip(1).collect();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("ping-watch").with_inner_size([1200.0, 760.0]),
+        viewport: window_icon(
+            egui::ViewportBuilder::default().with_title("ping-watch").with_inner_size([1200.0, 760.0]),
+        ),
         ..Default::default()
     };
     eframe::run_native(
