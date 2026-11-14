@@ -19,6 +19,17 @@ pub enum ProbeOutcome {
     Lost,
 }
 
+/// Outcome of one probe with its time and TTL, as stored in the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sample {
+    /// When the probe was sent, in milliseconds since the Unix epoch.
+    pub at_ms: i64,
+    /// TTL the probe was sent with (the hop number).
+    pub ttl: u8,
+    /// What came back.
+    pub outcome: ProbeOutcome,
+}
+
 /// One hop of the route.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hop {

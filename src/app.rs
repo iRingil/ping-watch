@@ -1,10 +1,12 @@
 //! Main window: target input with Start/Stop, and the panes showing the running trace.
 
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, Key, RichText, TextEdit};
 
+use crate::history::{self, Recorder};
 use crate::hop_table;
 use crate::names::{NameCache, resolve_ipv4};
 use crate::tracer::{TraceConfig, Tracer};
@@ -19,8 +21,12 @@ struct Session {
     host: String,
     /// Resolved address being traced.
     target: Ipv4Addr,
-    /// Background tracer; dropping the session stops it.
+    /// Background tracer; dropping the session stops it. Declared before `recorder` so it stops first and the
+    /// recorder can flush everything the tracer sent.
     tracer: Tracer,
+    /// History writer, `None` if the database is unavailable.
+    #[expect(dead_code, reason = "held only to keep recording until the session is dropped")]
+    recorder: Option<Recorder>,
 }
 
 /// Application state.
@@ -34,13 +40,21 @@ pub struct PingWatchApp {
     error: Option<String>,
     /// Reverse-DNS cache for hop names.
     names: NameCache,
+    /// History database file, `None` if there is no place for it.
+    history_path: Option<PathBuf>,
 }
 
 impl PingWatchApp {
     /// Creates the app; starts tracing `host` right away if given.
     pub fn new(host: Option<String>) -> Self {
-        let mut app =
-            Self { host_input: host.unwrap_or_default(), session: None, error: None, names: NameCache::default() };
+        let history_path = history::default_path().inspect_err(|error| log::warn!("{error}")).ok();
+        let mut app = Self {
+            host_input: host.unwrap_or_default(),
+            session: None,
+            error: None,
+            names: NameCache::default(),
+            history_path,
+        };
         if !app.host_input.is_empty() {
             app.start();
         }
@@ -48,24 +62,41 @@ impl PingWatchApp {
     }
 
     /// (Re)starts tracing the host from the input field; on failure keeps the error for display.
+    /// Without a history database the trace still runs, and the error says history is off.
     fn start(&mut self) {
         // Stop the old trace first, so it doesn't keep probing while the new one starts.
         self.session = None;
         let host = self.host_input.trim().to_owned();
-        let started = resolve_ipv4(&host).map_err(|error| error.to_string()).and_then(|target| {
-            let tracer = Tracer::start(target, TraceConfig::default()).map_err(|error| error.to_string())?;
-            Ok(Session { host, target, tracer })
-        });
-        match started {
-            Ok(session) => {
-                self.session = Some(session);
-                self.error = None;
+        let target = match resolve_ipv4(&host) {
+            Ok(target) => target,
+            Err(error) => return self.fail(error.to_string()),
+        };
+        let (recorder, history_error) = match self.start_recorder(&host) {
+            Ok(recorder) => (Some(recorder), None),
+            Err(error) => (None, Some(error)),
+        };
+        match Tracer::start(target, TraceConfig::default(), recorder.as_ref().and_then(Recorder::sender)) {
+            Ok(tracer) => {
+                self.session = Some(Session { host, target, tracer, recorder });
+                self.error = history_error;
             }
-            Err(error) => {
-                log::warn!("{error}");
-                self.error = Some(error);
-            }
+            Err(error) => self.fail(error.to_string()),
         }
+    }
+
+    /// Logs a start failure and keeps it for display.
+    fn fail(&mut self, error: String) {
+        log::warn!("{error}");
+        self.error = Some(error);
+    }
+
+    /// Starts the history recorder for `host`; the error text says history is off.
+    fn start_recorder(&self, host: &str) -> Result<Recorder, String> {
+        let path = self.history_path.as_ref().ok_or_else(|| "history is off: no data folder".to_owned())?;
+        Recorder::start(path, &host.to_lowercase()).map_err(|error| {
+            log::warn!("{error}");
+            format!("history is off: {error}")
+        })
     }
 
     /// Top bar: target input, Start/Stop button and the last error.

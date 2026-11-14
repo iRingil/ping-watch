@@ -1,13 +1,15 @@
 //! Continuous tracing of one target: one worker thread per TTL probes its hop every interval and records the
-//! outcome into a shared [`Route`]; the UI reads snapshots of it.
+//! outcome into a shared [`Route`] (the UI reads snapshots of it) and, optionally, sends it to the history.
 
 use std::net::Ipv4Addr;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::history::unix_ms;
 use crate::icmp::{IcmpError, Pinger};
-use crate::route::Route;
+use crate::route::{Route, Sample};
 use crate::sync::lock;
 
 /// Tracing parameters.
@@ -69,12 +71,12 @@ pub struct Tracer {
 }
 
 impl Tracer {
-    /// Starts tracing `target`.
+    /// Starts tracing `target`; every probe outcome is also sent to `history`, if given.
     ///
     /// # Errors
     ///
     /// [`TraceError`] if an ICMP handle can't be opened or a thread can't be started.
-    pub fn start(target: Ipv4Addr, config: TraceConfig) -> Result<Self, TraceError> {
+    pub fn start(target: Ipv4Addr, config: TraceConfig, history: Option<Sender<Sample>>) -> Result<Self, TraceError> {
         let shared = Arc::new(Shared {
             route: Mutex::new(Route::new(target, config.max_hops)),
             stop: Mutex::new(false),
@@ -85,9 +87,10 @@ impl Tracer {
         for ttl in 1..=config.max_hops {
             let pinger = Pinger::new()?;
             let shared = Arc::clone(&tracer.shared);
+            let history = history.clone();
             let worker = thread::Builder::new()
                 .name(format!("probe-ttl-{ttl}"))
-                .spawn(move || probe_loop(&shared, &pinger, target, ttl, config))?;
+                .spawn(move || probe_loop(&shared, &pinger, history.as_ref(), target, ttl, config))?;
             tracer.workers.push(worker);
         }
         Ok(tracer)
@@ -112,12 +115,34 @@ impl Drop for Tracer {
 }
 
 /// Worker body: probes hop `ttl` every `config.interval` until stop is requested.
-fn probe_loop(shared: &Shared, pinger: &Pinger, target: Ipv4Addr, ttl: u8, config: TraceConfig) {
+fn probe_loop(
+    shared: &Shared,
+    pinger: &Pinger,
+    history: Option<&Sender<Sample>>,
+    target: Ipv4Addr,
+    ttl: u8,
+    config: TraceConfig,
+) {
     loop {
         let started = Instant::now();
         if lock(&shared.route).should_probe(ttl) {
+            let at_ms = unix_ms(SystemTime::now());
             match pinger.probe(target, ttl, config.timeout) {
-                Ok(outcome) => lock(&shared.route).record(ttl, outcome),
+                Ok(outcome) => {
+                    let in_route = {
+                        let mut route = lock(&shared.route);
+                        route.record(ttl, outcome);
+                        route.should_probe(ttl)
+                    };
+                    // Before the route length is known every TTL is probed once; TTLs that turn out to lie beyond
+                    // the target only add noise to the history.
+                    if in_route
+                        && let Some(history) = history
+                        && history.send(Sample { at_ms, ttl, outcome }).is_err()
+                    {
+                        log::debug!("history recorder is gone; sample of ttl {ttl} dropped");
+                    }
+                }
                 Err(error) => log::warn!("probe {target} ttl {ttl}: {error}"),
             }
         }
