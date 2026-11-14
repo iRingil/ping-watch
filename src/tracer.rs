@@ -1,5 +1,6 @@
 //! Continuous tracing of one target: one worker thread per TTL probes its hop every interval and records the
 //! outcome into a shared [`Route`] (the UI reads snapshots of it) and, optionally, sends it to the history.
+//! The trace can be paused and its interval changed while it runs.
 
 use std::net::IpAddr;
 use std::sync::mpsc::Sender;
@@ -15,7 +16,7 @@ use crate::sync::lock;
 /// Tracing parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraceConfig {
-    /// Time between probes of the same hop.
+    /// Initial time between probes of the same hop.
     pub interval: Duration,
     /// How long to wait for an answer before counting the probe as lost.
     pub timeout: Duration,
@@ -40,24 +41,55 @@ pub enum TraceError {
     Spawn(#[from] std::io::Error),
 }
 
+/// Settings the workers follow, changeable while they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Control {
+    /// Workers exit as soon as they see this.
+    stop: bool,
+    /// Workers don't probe while this is set.
+    paused: bool,
+    /// Time between probes of the same hop.
+    interval: Duration,
+}
+
 /// State shared between the [`Tracer`] and its workers.
 #[derive(Debug)]
 struct Shared {
     /// Route being built.
     route: Mutex<Route>,
-    /// Set to `true` to stop the workers.
-    stop: Mutex<bool>,
-    /// Wakes sleeping workers when `stop` is set.
+    /// Current settings.
+    control: Mutex<Control>,
+    /// Wakes waiting workers when `control` changes.
     wake: Condvar,
 }
 
 impl Shared {
-    /// Sleeps for `duration` or until stop is requested; returns whether to stop.
-    fn sleep_or_stop(&self, duration: Duration) -> bool {
-        let stop = lock(&self.stop);
-        let (stop, _) =
-            self.wake.wait_timeout_while(stop, duration, |stop| !*stop).unwrap_or_else(PoisonError::into_inner);
-        *stop
+    /// Waits until the next probe of a cycle that began at `started` is due: the interval has passed, or a pause
+    /// has just ended (resuming probes right away). Returns `false` if stop was requested instead.
+    fn wait_turn(&self, started: Instant) -> bool {
+        let mut control = lock(&self.control);
+        let mut was_paused = false;
+        loop {
+            if control.stop {
+                return false;
+            }
+            if control.paused {
+                was_paused = true;
+                control = self.wake.wait(control).unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            let remaining = control.interval.saturating_sub(started.elapsed());
+            if was_paused || remaining.is_zero() {
+                return true;
+            }
+            control = self.wake.wait_timeout(control, remaining).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+
+    /// Changes the settings and wakes the workers so they follow at once.
+    fn update(&self, change: impl FnOnce(&mut Control)) {
+        change(&mut lock(&self.control));
+        self.wake.notify_all();
     }
 }
 
@@ -79,7 +111,7 @@ impl Tracer {
     pub fn start(target: IpAddr, config: TraceConfig, history: Option<Sender<Sample>>) -> Result<Self, TraceError> {
         let shared = Arc::new(Shared {
             route: Mutex::new(Route::new(target, config.max_hops)),
-            stop: Mutex::new(false),
+            control: Mutex::new(Control { stop: false, paused: false, interval: config.interval }),
             wake: Condvar::new(),
         });
         // Assigned before spawning, so that an early error drops (and stops) the already started workers.
@@ -100,12 +132,26 @@ impl Tracer {
     pub fn snapshot(&self) -> Route {
         lock(&self.shared.route).clone()
     }
+
+    /// Pauses or resumes probing; statistics are kept.
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.update(|control| control.paused = paused);
+    }
+
+    /// Whether probing is paused.
+    pub fn is_paused(&self) -> bool {
+        lock(&self.shared.control).paused
+    }
+
+    /// Changes the time between probes of the same hop; takes effect immediately.
+    pub fn set_interval(&self, interval: Duration) {
+        self.shared.update(|control| control.interval = interval);
+    }
 }
 
 impl Drop for Tracer {
     fn drop(&mut self) {
-        *lock(&self.shared.stop) = true;
-        self.shared.wake.notify_all();
+        self.shared.update(|control| control.stop = true);
         for worker in self.workers.drain(..) {
             if worker.join().is_err() {
                 log::error!("probe thread panicked");
@@ -114,7 +160,7 @@ impl Drop for Tracer {
     }
 }
 
-/// Worker body: probes hop `ttl` every `config.interval` until stop is requested.
+/// Worker body: probes hop `ttl` every interval until stop is requested.
 fn probe_loop(
     shared: &Shared,
     pinger: &Pinger,
@@ -146,8 +192,42 @@ fn probe_loop(
                 Err(error) => log::warn!("probe {target} ttl {ttl}: {error}"),
             }
         }
-        if shared.sleep_or_stop(config.interval.saturating_sub(started.elapsed())) {
+        if !shared.wait_turn(started) {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    /// Probes sent to the first hop so far.
+    fn sent(tracer: &Tracer) -> u64 {
+        tracer.snapshot().hops().first().map_or(0, |hop| hop.stats.sent())
+    }
+
+    /// Runs against the loopback address, so it needs no network.
+    #[test]
+    fn pause_stops_probing_and_interval_changes_live() {
+        let config =
+            TraceConfig { interval: Duration::from_millis(50), timeout: Duration::from_millis(200), max_hops: 2 };
+        let tracer = Tracer::start(IpAddr::V4(Ipv4Addr::LOCALHOST), config, None).expect("tracer starts");
+        thread::sleep(Duration::from_millis(400));
+        assert!(sent(&tracer) >= 4, "probes every 50 ms");
+
+        tracer.set_paused(true);
+        thread::sleep(Duration::from_millis(100)); // let a probe in flight finish
+        let paused_at = sent(&tracer);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(sent(&tracer), paused_at, "no probes while paused");
+
+        tracer.set_interval(Duration::from_secs(10));
+        tracer.set_paused(false);
+        thread::sleep(Duration::from_millis(300));
+        // Resuming probes once right away, then waits the new, long interval.
+        assert_eq!(sent(&tracer), paused_at.saturating_add(1));
     }
 }
