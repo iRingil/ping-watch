@@ -1,8 +1,6 @@
 //! Focus: the period the hop table and the latency bars summarize, as in PingPlotter.
 
-use std::time::Duration;
-
-use crate::route::RECENT_WINDOW;
+use crate::route::{RECENT_WINDOW, millis};
 
 /// Period whose probes the hop table and latency bars summarize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,7 +19,8 @@ pub enum Focus {
     Minutes60,
     /// Everything since the trace started.
     All,
-    /// Same period as the timeline below, if the probes are still kept in memory; otherwise everything.
+    /// The time range the timeline below shows (also when scrolled back), if its probes are still kept in memory;
+    /// otherwise everything.
     #[default]
     Auto,
 }
@@ -53,9 +52,10 @@ impl Focus {
         }
     }
 
-    /// The period to summarize, `None` for everything; `timeline` is the period the timeline shows.
-    pub fn window(self, timeline: Duration) -> Option<Duration> {
-        let seconds = match self {
+    /// The time range to summarize as `(from, to)` Unix ms, `None` for everything. `timeline` is the range the
+    /// timeline shows, `now_ms` the current time.
+    pub fn range(self, timeline: (i64, i64), now_ms: i64) -> Option<(i64, i64)> {
+        let seconds: i64 = match self {
             Self::Seconds5 => 5,
             Self::Seconds30 => 30,
             Self::Seconds60 => 60,
@@ -63,9 +63,12 @@ impl Focus {
             Self::Minutes30 => 30 * 60,
             Self::Minutes60 => 60 * 60,
             Self::All => return None,
-            Self::Auto => return (timeline <= RECENT_WINDOW).then_some(timeline),
+            Self::Auto => {
+                let kept_since = now_ms.saturating_sub(millis(RECENT_WINDOW));
+                return (timeline.0 >= kept_since).then_some(timeline);
+            }
         };
-        Some(Duration::from_secs(seconds))
+        Some((now_ms.saturating_sub(seconds.saturating_mul(1_000)), now_ms))
     }
 }
 
@@ -73,16 +76,22 @@ impl Focus {
 mod tests {
     use super::*;
 
+    /// "Now" in the tests: 10 hours after the epoch.
+    const NOW: i64 = 36_000_000;
+
     #[test]
-    fn fixed_choices_ignore_the_timeline() {
-        assert_eq!(Focus::Seconds30.window(Duration::from_secs(600)), Some(Duration::from_secs(30)));
-        assert_eq!(Focus::All.window(Duration::from_secs(600)), None);
+    fn fixed_choices_end_now_and_ignore_the_timeline() {
+        let timeline = (NOW - 600_000, NOW - 300_000);
+        assert_eq!(Focus::Seconds30.range(timeline, NOW), Some((NOW - 30_000, NOW)));
+        assert_eq!(Focus::All.range(timeline, NOW), None);
     }
 
     #[test]
-    fn auto_follows_the_timeline_while_probes_are_in_memory() {
-        assert_eq!(Focus::Auto.window(Duration::from_secs(600)), Some(Duration::from_secs(600)));
-        assert_eq!(Focus::Auto.window(RECENT_WINDOW), Some(RECENT_WINDOW));
-        assert_eq!(Focus::Auto.window(Duration::from_secs(24 * 3_600)), None);
+    fn auto_follows_the_timeline_while_its_probes_are_in_memory() {
+        let scrolled_back = (NOW - 1_200_000, NOW - 600_000);
+        assert_eq!(Focus::Auto.range(scrolled_back, NOW), Some(scrolled_back));
+        let hour = (NOW - 3_600_000, NOW);
+        assert_eq!(Focus::Auto.range(hour, NOW), Some(hour));
+        assert_eq!(Focus::Auto.range((NOW - 24 * 3_600_000, NOW), NOW), None);
     }
 }

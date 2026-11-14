@@ -56,6 +56,8 @@ pub struct Route {
     hops: Vec<Hop>,
     /// Start of the period the statistics cover, Unix ms; `None` before the first probe.
     from_ms: Option<i64>,
+    /// End of the period the statistics cover, Unix ms; `None` for "until now".
+    to_ms: Option<i64>,
 }
 
 impl Route {
@@ -72,6 +74,11 @@ impl Route {
     /// Start of the period the statistics cover, Unix ms; `None` before the first probe.
     pub fn focus_start_ms(&self) -> Option<i64> {
         self.from_ms
+    }
+
+    /// End of the period the statistics cover, Unix ms; `None` for "until now".
+    pub fn focus_end_ms(&self) -> Option<i64> {
+        self.to_ms
     }
 }
 
@@ -142,11 +149,12 @@ impl RouteState {
         }
     }
 
-    /// Snapshot with statistics over the last `focus` before `now_ms` (Unix ms), or since the start if `None`.
-    /// A focus longer than [`RECENT_WINDOW`] only covers that window.
-    pub fn snapshot(&self, focus: Option<Duration>, now_ms: i64) -> Route {
+    /// Snapshot with statistics over `focus` = `(from, to)` Unix ms, or since the start if `None`. Only the last
+    /// [`RECENT_WINDOW`] of probes is kept, so an older range covers less.
+    pub fn snapshot(&self, focus: Option<(i64, i64)>) -> Route {
         let len = self.target_ttl.map_or(self.hops.len(), usize::from);
-        let since_ms = focus.map(|focus| now_ms.saturating_sub(millis(focus.min(RECENT_WINDOW))));
+        let since_ms = focus.map(|(from, _)| from);
+        let until_ms = focus.map_or(i64::MAX, |(_, to)| to);
         let hops = self
             .hops
             .iter()
@@ -156,7 +164,10 @@ impl RouteState {
                 let stats = match since_ms {
                     None => hop.total.clone(),
                     Some(since) => HopStats::from_probes(
-                        hop.recent.iter().filter(|(sent_ms, _)| *sent_ms >= since).map(|(_, rtt)| *rtt),
+                        hop.recent
+                            .iter()
+                            .filter(|(sent_ms, _)| (since..=until_ms).contains(sent_ms))
+                            .map(|(_, rtt)| *rtt),
                     ),
                 };
                 Hop { ttl, address: hop.address, stats }
@@ -167,12 +178,12 @@ impl RouteState {
             (None, started) => started,
             (Some(_), None) => None,
         };
-        Route { target: self.target, hops, from_ms }
+        Route { target: self.target, hops, from_ms, to_ms: focus.map(|(_, to)| to) }
     }
 }
 
 /// Duration in whole milliseconds, saturating.
-fn millis(duration: Duration) -> i64 {
+pub fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
@@ -199,7 +210,7 @@ mod tests {
 
     /// Snapshot with all-time statistics.
     fn all(route: &RouteState) -> Route {
-        route.snapshot(None, 0)
+        route.snapshot(None)
     }
 
     #[test]
@@ -266,13 +277,13 @@ mod tests {
         route.record(1, 9_000, reply_ms(TARGET, 10));
         route.record(1, 10_000, ProbeOutcome::Lost);
 
-        let recent = route.snapshot(Some(Duration::from_secs(5)), 10_000);
+        let recent = route.snapshot(Some((5_000, 10_000)));
         let stats = &recent.hops().first().expect("one hop").stats;
         assert_eq!((stats.sent(), stats.received()), (2, 1));
         assert_eq!(stats.worst(), Some(Duration::from_millis(10)));
         assert_eq!(recent.focus_start_ms(), Some(5_000));
 
-        let everything = route.snapshot(None, 10_000);
+        let everything = route.snapshot(None);
         assert_eq!(everything.hops().first().map(|hop| hop.stats.sent()), Some(3));
         assert_eq!(everything.focus_start_ms(), Some(1_000));
     }
@@ -281,7 +292,18 @@ mod tests {
     fn focus_never_starts_before_the_first_probe() {
         let mut route = RouteState::new(TARGET, 1);
         route.record(1, 9_000, reply(TARGET));
-        assert_eq!(route.snapshot(Some(Duration::from_secs(60)), 10_000).focus_start_ms(), Some(9_000));
+        assert_eq!(route.snapshot(Some((0, 10_000))).focus_start_ms(), Some(9_000));
+    }
+
+    #[test]
+    fn focus_range_can_lie_in_the_past() {
+        let mut route = RouteState::new(TARGET, 1);
+        for at_ms in [1_000, 2_000, 3_000, 4_000] {
+            route.record(1, at_ms, reply(TARGET));
+        }
+        let past = route.snapshot(Some((1_500, 3_000)));
+        assert_eq!(past.hops().first().map(|hop| hop.stats.sent()), Some(2));
+        assert_eq!(past.focus_end_ms(), Some(3_000));
     }
 
     #[test]
@@ -290,7 +312,7 @@ mod tests {
         let window = millis(RECENT_WINDOW);
         route.record(1, 0, ProbeOutcome::Lost);
         route.record(1, window.saturating_add(1), reply(TARGET));
-        let snapshot = route.snapshot(Some(RECENT_WINDOW.saturating_mul(2)), window.saturating_add(1));
+        let snapshot = route.snapshot(Some((i64::MIN, window.saturating_add(1))));
         assert_eq!(snapshot.hops().first().map(|hop| hop.stats.sent()), Some(1));
     }
 }

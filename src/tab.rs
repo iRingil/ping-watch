@@ -218,7 +218,8 @@ impl Tab {
         let State::Running(session) = &self.state else {
             return None;
         };
-        Some(session.tracer.snapshot(self.focus.window(self.timeline.period_length())))
+        let now_ms = history::unix_ms(SystemTime::now());
+        Some(session.tracer.snapshot(self.focus.range(self.timeline.visible_range(now_ms), now_ms)))
     }
 
     /// Final-hop numbers for the All Targets overview.
@@ -296,8 +297,11 @@ impl Tab {
             .or_else(|| route.hops().last().map(|hop| hop.ttl));
         if let Some(ttl) = ttl {
             let title = hop_title(&route, ttl, context.names);
-            egui::Panel::bottom("timeline").resizable(true).default_size(300.0).show(ui, |ui| {
-                self.timeline.show(ui, context.reader, session.target_id, ttl, &title);
+            egui::Panel::bottom("timeline").resizable(true).default_size(420.0).show(ui, |ui| {
+                self.timeline.show(ui, context.history_path, session.target_id, ttl, &title);
+                // The panel remembers the height its content used; claim it all, or a short frame (history still
+                // loading, graph hidden) would shrink the panel for good.
+                ui.take_available_space();
             });
         }
         egui::CentralPanel::default().show(ui, |ui| {
@@ -358,8 +362,8 @@ impl Tab {
             }
             if let Some(from_ms) = route.focus_start_ms() {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let now_ms = history::unix_ms(SystemTime::now());
-                    ui.label(format!("Focus: {} - {}", clock(from_ms), clock(now_ms)));
+                    let to_ms = route.focus_end_ms().unwrap_or_else(|| history::unix_ms(SystemTime::now()));
+                    ui.label(format!("Focus: {} - {}", clock(from_ms), clock(to_ms)));
                 });
             }
         });

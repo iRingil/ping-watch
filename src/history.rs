@@ -1,5 +1,6 @@
 //! Probe history in SQLite: a background [`Recorder`] writes samples in batches, [`Store::buckets`] aggregates
-//! them into time buckets for the charts. Samples older than [`RETENTION`] are deleted.
+//! them into time buckets for the charts; user comments on the timeline live here too. Samples older than
+//! [`RETENTION`] are deleted.
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,14 @@ const SCHEMA: &str = "
         rtt_us    INTEGER,          -- round trip, microseconds
         PRIMARY KEY (target_id, ttl, ts_ms)
     ) WITHOUT ROWID;
+    -- Notes the user pinned to a moment of a target's timeline.
+    CREATE TABLE IF NOT EXISTS comments (
+        id        INTEGER PRIMARY KEY,
+        target_id INTEGER NOT NULL REFERENCES targets(id),
+        ts_ms     INTEGER NOT NULL,
+        text      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS comments_by_time ON comments (target_id, ts_ms);
 ";
 
 /// Error of the history database.
@@ -67,6 +76,18 @@ pub struct Bucket {
     pub avg: Option<Duration>,
     /// Slowest answer, `None` if nothing was answered.
     pub max: Option<Duration>,
+    /// Mean absolute difference between consecutive answers (the first answer of the queried period has no
+    /// predecessor), `None` if there is no such difference in the bucket.
+    pub jitter: Option<Duration>,
+}
+
+/// A note pinned to a moment of a target's timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    /// The moment, Unix time in milliseconds.
+    pub ts_ms: i64,
+    /// The note.
+    pub text: String,
 }
 
 /// Default database location: `%LOCALAPPDATA%\ping-watch\history.sqlite`.
@@ -185,11 +206,19 @@ impl Store {
         to_ms: i64,
         bucket_ms: i64,
     ) -> Result<Vec<Bucket>, HistoryError> {
+        // Jitter needs the previous *answered* sample, so it is computed over answered samples only and joined
+        // back by timestamp (unique per target and hop).
         let mut statement = self.connection.prepare_cached(
-            "SELECT ?3 + (ts_ms - ?3) / ?5 * ?5 AS start,
-                    COUNT(*), COUNT(rtt_us), MIN(rtt_us), CAST(ROUND(AVG(rtt_us)) AS INTEGER), MAX(rtt_us)
-             FROM samples
-             WHERE target_id = ?1 AND ttl = ?2 AND ts_ms >= ?3 AND ts_ms < ?4
+            "SELECT ?3 + (s.ts_ms - ?3) / ?5 * ?5 AS start,
+                    COUNT(*), COUNT(s.rtt_us), MIN(s.rtt_us), CAST(ROUND(AVG(s.rtt_us)) AS INTEGER), MAX(s.rtt_us),
+                    CAST(ROUND(AVG(j.jitter)) AS INTEGER)
+             FROM samples AS s
+             LEFT JOIN (
+                 SELECT ts_ms, ABS(rtt_us - LAG(rtt_us) OVER (ORDER BY ts_ms)) AS jitter
+                 FROM samples
+                 WHERE target_id = ?1 AND ttl = ?2 AND ts_ms >= ?3 AND ts_ms < ?4 AND rtt_us IS NOT NULL
+             ) AS j ON j.ts_ms = s.ts_ms
+             WHERE s.target_id = ?1 AND s.ttl = ?2 AND s.ts_ms >= ?3 AND s.ts_ms < ?4
              GROUP BY start
              ORDER BY start",
         )?;
@@ -201,7 +230,49 @@ impl Store {
                 min: micros(row.get(3)?),
                 avg: micros(row.get(4)?),
                 max: micros(row.get(5)?),
+                jitter: micros(row.get(6)?),
             })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Time of the oldest stored sample of hop `ttl` of target `target_id`, `None` if there is none.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn oldest_ms(&self, target_id: i64, ttl: u8) -> Result<Option<i64>, HistoryError> {
+        Ok(self.connection.query_row(
+            "SELECT MIN(ts_ms) FROM samples WHERE target_id = ?1 AND ttl = ?2",
+            params![target_id, ttl],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Pins `text` to the moment `ts_ms` of target `target_id`'s timeline.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn add_comment(&self, target_id: i64, ts_ms: i64, text: &str) -> Result<(), HistoryError> {
+        self.connection.execute(
+            "INSERT INTO comments (target_id, ts_ms, text) VALUES (?1, ?2, ?3)",
+            params![target_id, ts_ms, text],
+        )?;
+        Ok(())
+    }
+
+    /// Comments of target `target_id` in `[from_ms, to_ms)`, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn comments(&self, target_id: i64, from_ms: i64, to_ms: i64) -> Result<Vec<Comment>, HistoryError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT ts_ms, text FROM comments WHERE target_id = ?1 AND ts_ms >= ?2 AND ts_ms < ?3 ORDER BY ts_ms",
+        )?;
+        let rows = statement.query_map(params![target_id, from_ms, to_ms], |row| {
+            Ok(Comment { ts_ms: row.get(0)?, text: row.get(1)? })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -336,8 +407,9 @@ mod tests {
         assert_eq!(
             buckets,
             [
-                Bucket { start_ms: 1_000, sent: 3, received: 2, min: ms(10), avg: ms(20), max: ms(30) },
-                Bucket { start_ms: 2_000, sent: 1, received: 1, min: ms(20), avg: ms(20), max: ms(20) },
+                // Jitter: 30 after 10 → 20; the lost probe is skipped; 20 after 30 → 10.
+                Bucket { start_ms: 1_000, sent: 3, received: 2, min: ms(10), avg: ms(20), max: ms(30), jitter: ms(20) },
+                Bucket { start_ms: 2_000, sent: 1, received: 1, min: ms(20), avg: ms(20), max: ms(20), jitter: ms(10) },
             ]
         );
     }
@@ -347,7 +419,35 @@ mod tests {
         let (mut store, target) = store_with_target();
         store.insert(target, &[lost(1, 0), lost(1, 10)]).expect("insert works");
         let buckets = store.buckets(target, 1, 0, 100, 100).expect("query works");
-        assert_eq!(buckets, [Bucket { start_ms: 0, sent: 2, received: 0, min: None, avg: None, max: None }]);
+        assert_eq!(
+            buckets,
+            [Bucket { start_ms: 0, sent: 2, received: 0, min: None, avg: None, max: None, jitter: None }]
+        );
+    }
+
+    #[test]
+    fn oldest_sample_per_hop() {
+        let (mut store, target) = store_with_target();
+        assert_eq!(store.oldest_ms(target, 1).ok(), Some(None));
+        store.insert(target, &[reply(1, 500, 1), reply(1, 300, 1), reply(2, 100, 1)]).expect("insert works");
+        assert_eq!(store.oldest_ms(target, 1).ok(), Some(Some(300)));
+    }
+
+    #[test]
+    fn comments_are_listed_by_period() {
+        let (store, target) = store_with_target();
+        let other = store.target_id("other").expect("target registers");
+        store.add_comment(target, 2_000, "later").expect("comment saved");
+        store.add_comment(target, 1_000, "outage").expect("comment saved");
+        store.add_comment(other, 1_500, "elsewhere").expect("comment saved");
+        store.add_comment(target, 5_000, "outside").expect("comment saved");
+        let texts: Vec<String> = store
+            .comments(target, 0, 3_000)
+            .expect("query works")
+            .into_iter()
+            .map(|comment| comment.text)
+            .collect();
+        assert_eq!(texts, ["outage", "later"]);
     }
 
     #[test]

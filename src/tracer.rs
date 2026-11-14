@@ -128,9 +128,9 @@ impl Tracer {
         Ok(tracer)
     }
 
-    /// Current route with statistics over the last `focus`, or since the start if `None`.
-    pub fn snapshot(&self, focus: Option<Duration>) -> Route {
-        lock(&self.shared.route).snapshot(focus, unix_ms(SystemTime::now()))
+    /// Current route with statistics over `focus` = `(from, to)` Unix ms, or since the start if `None`.
+    pub fn snapshot(&self, focus: Option<(i64, i64)>) -> Route {
+        lock(&self.shared.route).snapshot(focus)
     }
 
     /// Pauses or resumes probing; statistics are kept.

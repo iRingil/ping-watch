@@ -1,5 +1,6 @@
 //! Pane 2: per-hop latency bars drawn in the last column of the hop table — min–max range, average and current
-//! latency over colored latency zones, with a line connecting the averages of consecutive hops.
+//! latency over colored latency zones, with a line connecting the averages of consecutive hops. The scale follows
+//! the averages, so one slow answer doesn't squash every bar; a range reaching past it ends in an arrow.
 
 use std::time::Duration;
 
@@ -15,6 +16,8 @@ pub const WARN_MS: f64 = 200.0;
 const MIN_SCALE_MS: f64 = 250.0;
 /// Scale is rounded up to a multiple of this.
 const SCALE_STEP_MS: f64 = 50.0;
+/// The scale is this many times the highest hop average.
+const SCALE_PER_AVERAGE: f64 = 2.0;
 
 /// Background of the green zone.
 pub const GOOD_ZONE: Color32 = Color32::from_rgb(0x2b, 0x4a, 0x2b);
@@ -31,11 +34,11 @@ const AVG_COLOR: Color32 = Color32::from_rgb(0x4f, 0xc3, 0xf7);
 /// Color of the current-latency dot and of the line connecting averages.
 const CURRENT_COLOR: Color32 = Color32::from_rgb(0xef, 0x53, 0x50);
 
-/// Scale of the bars in milliseconds: the worst latency of all hops rounded up to [`SCALE_STEP_MS`],
-/// at least [`MIN_SCALE_MS`].
+/// Scale of the bars in milliseconds: [`SCALE_PER_AVERAGE`] times the highest hop average, rounded up to
+/// [`SCALE_STEP_MS`], at least [`MIN_SCALE_MS`]. Rare slow answers (the "max" end) may lie beyond it.
 pub fn scale_ms<'a>(stats: impl IntoIterator<Item = &'a HopStats>) -> f64 {
-    let worst = stats.into_iter().filter_map(HopStats::worst).max().map_or(0.0, millis);
-    ((worst / SCALE_STEP_MS).ceil() * SCALE_STEP_MS).max(MIN_SCALE_MS)
+    let highest = stats.into_iter().filter_map(HopStats::average).max().map_or(0.0, millis);
+    ((highest * SCALE_PER_AVERAGE / SCALE_STEP_MS).ceil() * SCALE_STEP_MS).max(MIN_SCALE_MS)
 }
 
 /// Duration as fractional milliseconds.
@@ -86,8 +89,13 @@ pub fn cell(ui: &mut Ui, stats: &HopStats, answering: bool, scale_ms: f64) -> Op
         let (left, right) = (x_of(rect, millis(best), scale_ms), x_of(rect, millis(worst), scale_ms));
         let stroke = Stroke::new(1.0, RANGE_COLOR);
         painter.line_segment([pos2(left, y), pos2(right, y)], stroke);
-        for x in [left, right] {
-            painter.line_segment([pos2(x, y - 3.0), pos2(x, y + 3.0)], stroke);
+        painter.line_segment([pos2(left, y - 3.0), pos2(left, y + 3.0)], stroke);
+        if millis(worst) > scale_ms {
+            // The slowest answer lies past the scale: an arrow head at the edge instead of an end tick.
+            painter.line_segment([pos2(right - 5.0, y - 4.0), pos2(right, y)], stroke);
+            painter.line_segment([pos2(right - 5.0, y + 4.0), pos2(right, y)], stroke);
+        } else {
+            painter.line_segment([pos2(right, y - 3.0), pos2(right, y + 3.0)], stroke);
         }
     }
     if let Some(current) = stats.last() {
@@ -128,8 +136,18 @@ mod tests {
     }
 
     #[test]
-    fn scale_rounds_worst_up() {
-        assert_eq!(scale_ms(&[answered(30), answered(351)]), 400.0);
-        assert_eq!(scale_ms(&[answered(300)]), 300.0);
+    fn scale_follows_the_highest_average() {
+        assert_eq!(scale_ms(&[answered(30), answered(176)]), 400.0);
+        assert_eq!(scale_ms(&[answered(150)]), 300.0);
+    }
+
+    #[test]
+    fn one_slow_answer_does_not_stretch_the_scale() {
+        let mut stats = HopStats::default();
+        for rtt in [50, 50, 50, 50, 50, 50, 50, 50, 50, 900] {
+            stats.record_reply(Duration::from_millis(rtt));
+        }
+        // Average 135 ms → 270 → 300, while the worst answer is 900 ms.
+        assert_eq!(scale_ms(&[stats]), 300.0);
     }
 }
