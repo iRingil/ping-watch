@@ -12,8 +12,6 @@ use rusqlite::{Connection, params};
 
 use crate::route::{ProbeOutcome, Sample};
 
-/// Data folder name used before the app was named "Ping Watch".
-const LEGACY_FOLDER: &str = "ping-watch";
 /// How long samples are kept: the longest period the timeline can show.
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How often the recorder writes collected samples.
@@ -35,7 +33,7 @@ const SCHEMA: &str = "
         target_id INTEGER NOT NULL REFERENCES targets(id),
         ttl       INTEGER NOT NULL,
         ts_ms     INTEGER NOT NULL, -- Unix time, milliseconds
-        address   BLOB,             -- 4 (IPv4) or 16 (IPv6) bytes; rows from before IPv6 hold a u32
+        address   BLOB,             -- 4 (IPv4) or 16 (IPv6) bytes
         rtt_us    INTEGER,          -- round trip, microseconds
         PRIMARY KEY (target_id, ttl, ts_ms)
     ) WITHOUT ROWID;
@@ -92,23 +90,14 @@ pub struct Comment {
     pub text: String,
 }
 
-/// Default database location: `%LOCALAPPDATA%\Ping Watch\history.sqlite`. A data folder left by older versions
-/// under the project name (`ping-watch`) is renamed to it first, so the history carries over.
+/// Default database location: `%LOCALAPPDATA%\Ping Watch\history.sqlite`.
 ///
 /// # Errors
 ///
 /// [`HistoryError::NoDataDir`] if `%LOCALAPPDATA%` is not set.
 pub fn default_path() -> Result<PathBuf, HistoryError> {
-    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or(HistoryError::NoDataDir)?);
-    let folder = base.join(crate::APP_NAME);
-    let legacy = base.join(LEGACY_FOLDER);
-    if !folder.exists() && legacy.is_dir() {
-        match std::fs::rename(&legacy, &folder) {
-            Ok(()) => log::info!("moved the history from {} to {}", legacy.display(), folder.display()),
-            Err(error) => log::warn!("cannot move {} to {}: {error}", legacy.display(), folder.display()),
-        }
-    }
-    Ok(folder.join("history.sqlite"))
+    let base = std::env::var_os("LOCALAPPDATA").ok_or(HistoryError::NoDataDir)?;
+    Ok(PathBuf::from(base).join(crate::APP_NAME).join("history.sqlite"))
 }
 
 /// Converts a wall-clock time to Unix milliseconds (0 for times before 1970).
