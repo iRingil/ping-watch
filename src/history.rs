@@ -1,6 +1,7 @@
 //! Probe history in SQLite: a background [`Recorder`] writes samples in batches, [`Store::buckets`] aggregates
 //! them into time buckets for the charts. Samples older than [`RETENTION`] are deleted.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
@@ -31,7 +32,7 @@ const SCHEMA: &str = "
         target_id INTEGER NOT NULL REFERENCES targets(id),
         ttl       INTEGER NOT NULL,
         ts_ms     INTEGER NOT NULL, -- Unix time, milliseconds
-        address   INTEGER,          -- IPv4 as u32
+        address   BLOB,             -- 4 (IPv4) or 16 (IPv6) bytes; rows from before IPv6 hold a u32
         rtt_us    INTEGER,          -- round trip, microseconds
         PRIMARY KEY (target_id, ttl, ts_ms)
     ) WITHOUT ROWID;
@@ -146,7 +147,11 @@ impl Store {
             for sample in samples {
                 let (address, rtt_us) = match sample.outcome {
                     ProbeOutcome::Reply { from, rtt } => {
-                        (Some(u32::from(from)), Some(i64::try_from(rtt.as_micros()).unwrap_or(i64::MAX)))
+                        let octets = match from {
+                            IpAddr::V4(ip) => ip.octets().to_vec(),
+                            IpAddr::V6(ip) => ip.octets().to_vec(),
+                        };
+                        (Some(octets), Some(i64::try_from(rtt.as_micros()).unwrap_or(i64::MAX)))
                     }
                     ProbeOutcome::Lost => (None, None),
                 };
@@ -287,7 +292,7 @@ mod tests {
     use super::*;
 
     /// Router address used in samples.
-    const ROUTER: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+    const ROUTER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
     /// Answered sample of hop `ttl` at `at_ms` with a round trip of `rtt_ms`.
     fn reply(ttl: u8, at_ms: i64, rtt_ms: u64) -> Sample {

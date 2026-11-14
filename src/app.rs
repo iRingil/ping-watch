@@ -1,6 +1,6 @@
 //! Main window: target input with Start/Stop, and the panes showing the running trace.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, Key, RichText, TextEdit};
 
 use crate::history::{self, Recorder, Store};
 use crate::hop_table;
-use crate::names::{NameCache, resolve_ipv4};
+use crate::names::{NameCache, resolve};
 use crate::route::Route;
 use crate::timeline::Timeline;
 use crate::tracer::{TraceConfig, Tracer};
@@ -22,7 +22,7 @@ struct Session {
     /// Host as the user entered it.
     host: String,
     /// Resolved address being traced.
-    target: Ipv4Addr,
+    target: IpAddr,
     /// Id of the target in the history, `None` if history is off.
     target_id: Option<i64>,
     /// Background tracer; dropping the session stops it. Declared before `recorder` so it stops first and the
@@ -83,7 +83,7 @@ impl PingWatchApp {
         // Stop the old trace first, so it doesn't keep probing while the new one starts.
         self.session = None;
         let host = self.host_input.trim().to_owned();
-        let target = match resolve_ipv4(&host) {
+        let target = match resolve(&host) {
             Ok(target) => target,
             Err(error) => return self.fail(error.to_string()),
         };

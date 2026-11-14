@@ -1,7 +1,7 @@
 //! Continuous tracing of one target: one worker thread per TTL probes its hop every interval and records the
 //! outcome into a shared [`Route`] (the UI reads snapshots of it) and, optionally, sends it to the history.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -76,7 +76,7 @@ impl Tracer {
     /// # Errors
     ///
     /// [`TraceError`] if an ICMP handle can't be opened or a thread can't be started.
-    pub fn start(target: Ipv4Addr, config: TraceConfig, history: Option<Sender<Sample>>) -> Result<Self, TraceError> {
+    pub fn start(target: IpAddr, config: TraceConfig, history: Option<Sender<Sample>>) -> Result<Self, TraceError> {
         let shared = Arc::new(Shared {
             route: Mutex::new(Route::new(target, config.max_hops)),
             stop: Mutex::new(false),
@@ -85,7 +85,7 @@ impl Tracer {
         // Assigned before spawning, so that an early error drops (and stops) the already started workers.
         let mut tracer = Self { shared, workers: Vec::new() };
         for ttl in 1..=config.max_hops {
-            let pinger = Pinger::new()?;
+            let pinger = Pinger::for_target(target)?;
             let shared = Arc::clone(&tracer.shared);
             let history = history.clone();
             let worker = thread::Builder::new()
@@ -119,7 +119,7 @@ fn probe_loop(
     shared: &Shared,
     pinger: &Pinger,
     history: Option<&Sender<Sample>>,
-    target: Ipv4Addr,
+    target: IpAddr,
     ttl: u8,
     config: TraceConfig,
 ) {

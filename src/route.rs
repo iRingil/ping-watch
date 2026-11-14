@@ -1,6 +1,6 @@
 //! State of the route to one target: per-hop addresses and statistics, and how many hops the route has.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::stats::HopStats;
@@ -11,7 +11,7 @@ pub enum ProbeOutcome {
     /// Someone answered: a router on the way (TTL expired) or the target itself.
     Reply {
         /// Address that sent the answer.
-        from: Ipv4Addr,
+        from: IpAddr,
         /// Measured round-trip time.
         rtt: Duration,
     },
@@ -36,7 +36,7 @@ pub struct Hop {
     /// TTL the hop is probed with; also its position in the route, starting at 1.
     pub ttl: u8,
     /// Address that answered most recently, `None` if the hop never answered.
-    pub address: Option<Ipv4Addr>,
+    pub address: Option<IpAddr>,
     /// Accumulated statistics.
     pub stats: HopStats,
 }
@@ -45,7 +45,7 @@ pub struct Hop {
 #[derive(Debug, Clone)]
 pub struct Route {
     /// Address being traced.
-    target: Ipv4Addr,
+    target: IpAddr,
     /// One entry per TTL from 1 to the maximum hop count.
     hops: Vec<Hop>,
     /// Smallest TTL at which the target itself answered: the route length.
@@ -54,13 +54,13 @@ pub struct Route {
 
 impl Route {
     /// Creates an empty route to `target` that probes TTLs `1..=max_hops`.
-    pub fn new(target: Ipv4Addr, max_hops: u8) -> Self {
+    pub fn new(target: IpAddr, max_hops: u8) -> Self {
         let hops = (1..=max_hops).map(|ttl| Hop { ttl, address: None, stats: HopStats::default() }).collect();
         Self { target, hops, target_ttl: None }
     }
 
     /// Address being traced.
-    pub fn target(&self) -> Ipv4Addr {
+    pub fn target(&self) -> IpAddr {
         self.target
     }
 
@@ -99,15 +99,17 @@ impl Route {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
     /// Address of the traced target in tests.
-    const TARGET: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
+    const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
     /// Address of an intermediate router in tests.
-    const ROUTER: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 1);
+    const ROUTER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
 
     /// Reply outcome from `from` with a 10 ms round trip.
-    fn reply(from: Ipv4Addr) -> ProbeOutcome {
+    fn reply(from: IpAddr) -> ProbeOutcome {
         ProbeOutcome::Reply { from, rtt: Duration::from_millis(10) }
     }
 
