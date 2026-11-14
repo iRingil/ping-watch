@@ -25,6 +25,12 @@ const TIME_STEPS_S: [i64; 17] =
     [1, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1_800, 3_600, 7_200, 10_800, 21_600, 43_200, 86_400];
 /// At most this many time axis marks.
 const MAX_TIME_MARKS: i64 = 8;
+/// Candidate steps between value (latency) marks, in ms: round numbers only.
+const VALUE_STEPS_MS: [f64; 12] = [1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1_000.0];
+/// At most this many value marks above zero.
+const MAX_VALUE_MARKS: f64 = 7.0;
+/// Least vertical space per value mark, in points: the plot hides labels of marks set closer than ~20 points.
+const MIN_VALUE_MARK_SPACING: f32 = 26.0;
 
 /// Period shown by the timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -109,12 +115,14 @@ impl Period {
         }
     }
 
-    /// `strftime` format of time axis labels: seconds for short periods, the date for long ones.
-    pub fn clock_format(self) -> &'static str {
-        match self.seconds() {
-            ..=600 => "%H:%M:%S",
-            601..=86_400 => "%H:%M",
-            _ => "%d.%m %H:%M",
+    /// `strftime` format of a time axis label for marks `step_s` apart: seconds only when the marks fall between
+    /// whole minutes (no ever-repeating ":00"), the date when the period spans days.
+    pub fn axis_format(self, step_s: f64) -> &'static str {
+        let whole_minutes = step_s >= 60.0 && step_s.rem_euclid(60.0) == 0.0;
+        match (self.seconds() > 86_400, whole_minutes) {
+            (true, _) => "%d.%m %H:%M",
+            (false, true) => "%H:%M",
+            (false, false) => "%H:%M:%S",
         }
     }
 }
@@ -270,6 +278,19 @@ pub fn time_marks(min_s: f64, max_s: f64, utc_offset_s: i64) -> Vec<(f64, f64)> 
         .collect()
 }
 
+/// Value axis marks from 0 to `max` for a plot `height` points tall, on the roundest step that keeps the marks at
+/// most [`MAX_VALUE_MARKS`] and at least [`MIN_VALUE_MARK_SPACING`] apart (20 ms rather than 10 ms for a 140 ms
+/// scale). Returns `(value, step)` pairs.
+pub fn value_marks(max: f64, height: f32) -> Vec<(f64, f64)> {
+    let fitting = f64::from((height / MIN_VALUE_MARK_SPACING).floor()).clamp(1.0, MAX_VALUE_MARKS);
+    let step = VALUE_STEPS_MS.into_iter().find(|step| max / step <= fitting).unwrap_or(1_000.0);
+    (0_u32..)
+        .map(|index| f64::from(index) * step)
+        .take_while(|value| *value <= max + f64::EPSILON)
+        .map(|value| (value, step))
+        .collect()
+}
+
 /// Local time of Unix milliseconds in `strftime` `format`.
 pub fn clock(ms: i64, format: &str) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
@@ -372,6 +393,23 @@ mod tests {
         // With a +3:30 offset, hourly marks fall on local hours, i.e. at :30 UTC.
         let marks = time_marks(0.0, 6.0 * 3_600.0, 3 * 3_600 + 1_800);
         assert!(marks.iter().all(|(value, _)| value.rem_euclid(3_600.0) == 1_800.0));
+    }
+
+    #[test]
+    fn value_marks_use_round_steps() {
+        let values = |max, height| value_marks(max, height).into_iter().map(|(value, _)| value).collect::<Vec<_>>();
+        assert_eq!(values(140.0, 300.0), [0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0]);
+        assert_eq!(values(50.0, 300.0), [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]);
+        assert_eq!(values(400.0, 300.0).get(1), Some(&100.0));
+        // A short plot gets fewer, wider-spaced marks so their labels still show.
+        assert_eq!(values(140.0, 80.0), [0.0, 50.0, 100.0]);
+    }
+
+    #[test]
+    fn axis_labels_skip_seconds_on_whole_minutes() {
+        assert_eq!(Period::Minutes10.axis_format(120.0), "%H:%M");
+        assert_eq!(Period::Minute.axis_format(15.0), "%H:%M:%S");
+        assert_eq!(Period::Days7.axis_format(86_400.0), "%d.%m %H:%M");
     }
 
     #[test]

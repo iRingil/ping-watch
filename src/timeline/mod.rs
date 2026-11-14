@@ -10,13 +10,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, Align, Align2, Button, Color32, Layout, Response, RichText, Slider, Stroke, TextEdit, Ui};
 use egui_plot::{
-    Bar, BarChart, GridInput, GridMark, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoint, PlotPoints, Points,
-    Polygon, Text, VLine,
+    Bar, BarChart, GridInput, GridMark, HLine, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoint, PlotPoints,
+    Points, Polygon, Text, VLine,
 };
 
 use self::fetch::{Fetched, Fetcher, Request};
 pub use self::series::Period;
-use self::series::{Series, Trace, Window, clock, millis_of, seconds, time_marks};
+use self::series::{Series, Trace, Window, clock, millis_of, seconds, time_marks, value_marks};
 use crate::history::{self, Comment};
 use crate::latency_bars::{GOOD_MS, WARN_MS};
 use crate::theme::{self, BAD_ZONE, GOOD_ZONE, WARN_ZONE};
@@ -33,6 +33,8 @@ const LATENCY_COLOR: Color32 = theme::INK;
 const JITTER_COLOR: Color32 = Color32::from_rgb(0xff, 0x8a, 0x65);
 /// Color of the packet loss bars.
 const LOSS_COLOR: Color32 = Color32::from_rgb(0xe5, 0x39, 0x35);
+/// Grid lines drawn over the latency zones.
+const GRID_OVER_ZONES: Color32 = Color32::from_rgba_premultiplied(22, 22, 22, 22);
 /// Color of comment markers.
 const COMMENT_COLOR: Color32 = Color32::from_rgb(0xff, 0xd5, 0x4f);
 
@@ -307,8 +309,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
     let window = shown.request.window;
     let (from_s, to_s, bucket_s) = (seconds(window.from_ms), seconds(window.to_ms), seconds(window.bucket_ms));
     let utc_offset_s = i64::from(chrono::Local::now().offset().local_minus_utc());
-    let format = period.clock_format();
-    let base = |id: &'static str, scale: f64| {
+    let base = |id: &'static str, scale: f64, height: f32| {
         Plot::new(id)
             .allow_drag(false)
             .allow_zoom(false)
@@ -327,12 +328,18 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
                     .map(|(value, step_size)| GridMark { value, step_size })
                     .collect()
             })
+            .height(height)
+            .y_grid_spacer(move |input: GridInput| {
+                value_marks(input.bounds.1, height)
+                    .into_iter()
+                    .map(|(value, step_size)| GridMark { value, step_size })
+                    .collect()
+            })
             .y_axis_formatter(|mark, _| format!("{:.0}", mark.value))
     };
 
     let jitter = &shown.series.jitter;
-    base("timeline-jitter", jitter.scale_ms)
-        .height(JITTER_HEIGHT)
+    base("timeline-jitter", jitter.scale_ms, JITTER_HEIGHT)
         .show_x(false)
         .show_axes([false, true])
         .show(ui, |plot| {
@@ -350,10 +357,8 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
     // Leave exactly the slider's row: taking more than the panel has would grow the panel every frame.
     let slider_row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
     let height = (ui.available_height() - slider_row).max(80.0);
-    let response = base("timeline", scale)
-        .height(height)
-        .y_axis_label("Latency (ms)")
-        .x_axis_formatter(move |mark, _| clock(millis_of(mark.value), format))
+    let response = base("timeline", scale, height)
+        .x_axis_formatter(move |mark, _| clock(millis_of(mark.value), period.axis_format(mark.step_size)))
         .show(ui, |plot| {
             plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, scale]));
             // Zones are painted only where there is data, as in PingPlotter; time before the first sample stays plain.
@@ -370,6 +375,16 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
                     }
                 }
             }
+            // Grid lines again on top of the zones (the plot's own grid lies under them), as in PingPlotter.
+            for (value, _) in value_marks(scale, height).into_iter().skip(1) {
+                plot.hline(HLine::new("", value).color(GRID_OVER_ZONES).width(1.0).allow_hover(false));
+            }
+            // Titled inside, like the jitter strip, so both charts share one y-axis width and line up.
+            plot.add(
+                Text::new("", PlotPoint::new(from_s, scale), "Latency (ms)")
+                    .anchor(Align2::LEFT_TOP)
+                    .color(theme::INK_MUTED),
+            );
             add_trace(plot, "Latency", latency, LATENCY_COLOR);
             // Loss hangs from the top of the chart: a fully lost bucket is a red bar of full height.
             let bars = shown

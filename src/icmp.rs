@@ -66,8 +66,8 @@ impl Pinger {
 
     /// Sends one echo request to `target` with `ttl` and waits up to `timeout` for the answer.
     ///
-    /// The round-trip time is measured locally around the call, which gives sub-millisecond precision
-    /// (the API itself reports whole milliseconds).
+    /// The round-trip time combines a local measurement (sub-millisecond) with the kernel's (whole milliseconds,
+    /// free of scheduling delays); see [`round_trip`].
     ///
     /// # Errors
     ///
@@ -86,7 +86,7 @@ impl Pinger {
             IpAddr::V4(ip) => self.send_v4(ip, &options, &mut buffer, timeout_ms),
             IpAddr::V6(ip) => self.send_v6(ip, &options, &mut buffer, timeout_ms),
         };
-        let rtt = started.elapsed();
+        let measured = started.elapsed();
 
         if replies == 0 {
             // SAFETY: no preconditions; reads the error of the call just made on this thread.
@@ -104,12 +104,12 @@ impl Pinger {
             }
         }
 
-        let (status, from) = match target {
+        let (status, from, kernel_ms) = match target {
             IpAddr::V4(_) => parse_v4(&buffer),
             IpAddr::V6(_) => parse_v6(&buffer),
         };
         Ok(match status {
-            IP_SUCCESS | IP_TTL_EXPIRED_TRANSIT => ProbeOutcome::Reply { from, rtt },
+            IP_SUCCESS | IP_TTL_EXPIRED_TRANSIT => ProbeOutcome::Reply { from, rtt: round_trip(measured, kernel_ms) },
             status => {
                 log::debug!("probe {target} ttl {ttl}: reply status {status}");
                 ProbeOutcome::Lost
@@ -166,16 +166,25 @@ impl Pinger {
     }
 }
 
-/// Status and sender of the IPv4 reply at the start of `buffer`.
-fn parse_v4(buffer: &[u64; REPLY_BUFFER_WORDS]) -> (u32, IpAddr) {
+/// Round-trip time of a reply: the local measurement `measured` (sub-millisecond, but inflated by however long the
+/// thread waited to be scheduled around the call) clamped into `[kernel_ms, kernel_ms + 1)`, the interval given by
+/// the kernel's own whole-millisecond measurement. Keeps the precision without the scheduling stalls.
+fn round_trip(measured: Duration, kernel_ms: u32) -> Duration {
+    let low = Duration::from_millis(u64::from(kernel_ms));
+    let high = low.saturating_add(Duration::from_micros(999));
+    measured.clamp(low, high)
+}
+
+/// Status, sender and kernel round-trip time (ms) of the IPv4 reply at the start of `buffer`.
+fn parse_v4(buffer: &[u64; REPLY_BUFFER_WORDS]) -> (u32, IpAddr, u32) {
     // SAFETY: the buffer is initialized (zeroed, then possibly written by the API), 8-byte aligned and larger than
     // `ICMP_ECHO_REPLY`, a plain C struct for which any bit pattern is valid.
     let reply = unsafe { buffer.as_ptr().cast::<ICMP_ECHO_REPLY>().read() };
-    (reply.Status, IpAddr::V4(Ipv4Addr::from(reply.Address.to_ne_bytes())))
+    (reply.Status, IpAddr::V4(Ipv4Addr::from(reply.Address.to_ne_bytes())), reply.RoundTripTime)
 }
 
-/// Status and sender of the IPv6 reply at the start of `buffer`.
-fn parse_v6(buffer: &[u64; REPLY_BUFFER_WORDS]) -> (u32, IpAddr) {
+/// Status, sender and kernel round-trip time (ms) of the IPv6 reply at the start of `buffer`.
+fn parse_v6(buffer: &[u64; REPLY_BUFFER_WORDS]) -> (u32, IpAddr, u32) {
     // SAFETY: as in `parse_v4`; `ICMPV6_ECHO_REPLY_LH` is a plain C struct (its address part is packed, which only
     // lowers its alignment requirement).
     let reply = unsafe { buffer.as_ptr().cast::<ICMPV6_ECHO_REPLY_LH>().read() };
@@ -185,7 +194,7 @@ fn parse_v6(buffer: &[u64; REPLY_BUFFER_WORDS]) -> (u32, IpAddr) {
     for (pair, word) in octets.as_chunks_mut::<2>().0.iter_mut().zip(words) {
         *pair = word.to_ne_bytes();
     }
-    (reply.Status, IpAddr::V6(Ipv6Addr::from(octets)))
+    (reply.Status, IpAddr::V6(Ipv6Addr::from(octets)), reply.RoundTripTime)
 }
 
 impl Drop for Pinger {
@@ -195,5 +204,26 @@ impl Drop for Pinger {
         if let Err(error) = unsafe { IcmpCloseHandle(self.handle) } {
             log::warn!("cannot close ICMP handle: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measurement_inside_the_kernel_interval_is_kept() {
+        assert_eq!(round_trip(Duration::from_micros(44_380), 44), Duration::from_micros(44_380));
+    }
+
+    #[test]
+    fn scheduling_stall_is_cut_to_the_kernel_interval() {
+        // The thread got the reply 140 ms late; the kernel says 44 ms.
+        assert_eq!(round_trip(Duration::from_micros(184_500), 44), Duration::from_micros(44_999));
+    }
+
+    #[test]
+    fn measurement_below_the_kernel_value_is_raised() {
+        assert_eq!(round_trip(Duration::from_micros(900), 1), Duration::from_millis(1));
     }
 }
