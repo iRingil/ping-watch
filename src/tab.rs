@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{
-    self, Align, Button, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect,
-    RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, pos2,
+    self, Align, Button, CornerRadius, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup,
+    PopupCloseBehavior, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, pos2,
 };
 
 use crate::focus::Focus;
@@ -39,6 +39,8 @@ const ENTRY_WIDTH: f32 = 360.0;
 const ARROW_WIDTH: f32 = 24.0;
 /// Width of the target list: wider than the field, so a full IPv6 address and the description fit side by side.
 const TARGET_LIST_WIDTH: f32 = 600.0;
+/// Height of a target list row (also the size of its icon buttons).
+const TARGET_ROW_HEIGHT: f32 = 28.0;
 /// Tallest the target list grows before it scrolls.
 const TARGET_LIST_HEIGHT: f32 = 380.0;
 /// Share of the pane area the hop table gets at first; the timeline gets the rest.
@@ -454,23 +456,18 @@ impl Tab {
         }
         let mut picked = None;
         ScrollArea::vertical().max_height(TARGET_LIST_HEIGHT).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for target in all {
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(false, &target.address).clicked() {
-                        picked = Some(target.address.clone());
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("Delete").clicked()
-                            && let Err(error) = targets.delete(target.id)
-                        {
+                match target_row(ui, &target) {
+                    RowAction::Pick => picked = Some(target.address.clone()),
+                    RowAction::Edit => self.editing = Some(Draft::of(&target)),
+                    RowAction::Delete => {
+                        if let Err(error) = targets.delete(target.id) {
                             log::error!("cannot delete {}: {error}", target.address);
                         }
-                        if ui.small_button("Edit").clicked() {
-                            self.editing = Some(Draft::of(&target));
-                        }
-                        ui.weak(target_description(&target));
-                    });
-                });
+                    }
+                    RowAction::None => {}
+                }
             }
         });
         picked
@@ -582,7 +579,78 @@ impl Draft {
     }
 }
 
-/// Right-hand text of a target list row: its name and IP version, whichever are known ("DanceHub, ipv4").
+/// What a click on a target list row asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowAction {
+    /// Nothing clicked.
+    None,
+    /// Put the address into the field.
+    Pick,
+    /// Open the edit dialog.
+    Edit,
+    /// Remove the entry.
+    Delete,
+}
+
+/// One row of the target list: the whole row highlights under the pointer and picks the address when clicked;
+/// the pencil and cross icons on the right sit on top of it, so clicking them edits or deletes instead.
+fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
+    let size = egui::vec2(ui.available_width(), TARGET_ROW_HEIGHT);
+    let (rect, row) = ui.allocate_exact_size(size, Sense::click());
+    let icon = egui::Vec2::splat(TARGET_ROW_HEIGHT);
+    let delete_rect = Rect::from_min_size(pos2(rect.right() - icon.x, rect.top()), icon);
+    let edit_rect = delete_rect.translate(egui::vec2(-icon.x, 0.0));
+    let edit = ui.interact(edit_rect, row.id.with("edit"), Sense::click()).on_hover_text("Edit");
+    let delete = ui.interact(delete_rect, row.id.with("delete"), Sense::click()).on_hover_text("Delete");
+
+    let painter = ui.painter();
+    if row.hovered() || edit.hovered() || delete.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(3), theme::PANE_HEADER);
+    }
+    let font = egui::FontId::proportional(15.0);
+    let text_y = rect.center().y;
+    painter.text(pos2(rect.left() + 8.0, text_y), egui::Align2::LEFT_CENTER, &target.address, font.clone(), theme::INK);
+    let description_right = edit_rect.left() - 8.0;
+    painter.text(
+        pos2(description_right, text_y),
+        egui::Align2::RIGHT_CENTER,
+        target_description(target),
+        font,
+        theme::INK_MUTED,
+    );
+    paint_pencil(ui, edit_rect, if edit.hovered() { theme::SIGNAL } else { theme::INK_MUTED });
+    paint_cross(ui, delete_rect, if delete.hovered() { theme::BAD } else { theme::INK_MUTED });
+
+    if delete.clicked() {
+        RowAction::Delete
+    } else if edit.clicked() {
+        RowAction::Edit
+    } else if row.clicked() {
+        RowAction::Pick
+    } else {
+        RowAction::None
+    }
+}
+
+/// Paints a pencil icon centered in `rect`.
+fn paint_pencil(ui: &Ui, rect: Rect, color: egui::Color32) {
+    let c = rect.center();
+    let painter = ui.painter();
+    // Body from the tip (bottom left) to the end (top right), with the tip drawn as a small wedge.
+    painter.line_segment([pos2(c.x - 3.0, c.y + 3.0), pos2(c.x + 4.5, c.y - 4.5)], Stroke::new(3.0, color));
+    let tip = vec![pos2(c.x - 6.0, c.y + 6.0), pos2(c.x - 4.6, c.y + 1.8), pos2(c.x - 1.8, c.y + 4.6)];
+    painter.add(egui::Shape::convex_polygon(tip, color, Stroke::NONE));
+}
+
+/// Paints a cross icon centered in `rect`.
+fn paint_cross(ui: &Ui, rect: Rect, color: egui::Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.8, color);
+    ui.painter().line_segment([pos2(c.x - 4.5, c.y - 4.5), pos2(c.x + 4.5, c.y + 4.5)], stroke);
+    ui.painter().line_segment([pos2(c.x - 4.5, c.y + 4.5), pos2(c.x + 4.5, c.y - 4.5)], stroke);
+}
+
+/// Right-hand text of a target list row: its name and IP version, whichever are known ("Office router, ipv4").
 fn target_description(target: &SavedTarget) -> String {
     let family = target.family.map(Family::label);
     [Some(target.name.as_str()).filter(|name| !name.is_empty()), family]

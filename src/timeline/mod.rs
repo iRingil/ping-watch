@@ -1,6 +1,6 @@
 //! Pane 3: timeline of one hop over a chosen period (60 seconds … 7 days), read from the history in the
 //! background — a jitter strip, the latency chart with packet loss and comments, a right-click menu (periods,
-//! Hide Graph, Reset Focus to Current, Create Comment) and a slider to scroll back in time.
+//! Reset Focus to Current, Create Comment) and a slider to scroll back in time.
 
 mod fetch;
 mod series;
@@ -8,10 +8,10 @@ mod series;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use eframe::egui::{self, Align, Align2, Button, Color32, Layout, Response, RichText, Slider, TextEdit, Ui};
+use eframe::egui::{self, Align, Align2, Button, Color32, Layout, Response, RichText, Slider, Stroke, TextEdit, Ui};
 use egui_plot::{
-    Axis, Bar, BarChart, GridInput, GridMark, Line, LineStyle, MarkerShape, Plot, PlotPoint, PlotPoints, Points, Span,
-    Text, VLine,
+    Bar, BarChart, GridInput, GridMark, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoint, PlotPoints, Points,
+    Polygon, Text, VLine,
 };
 
 use self::fetch::{Fetched, Fetcher, Request};
@@ -81,8 +81,6 @@ struct Draft {
 enum MenuChoice {
     /// Show another period.
     Period(Period),
-    /// Collapse the pane to its header.
-    Hide,
     /// Follow the current time again.
     ResetFocus,
     /// Comment the moment right-clicked.
@@ -96,8 +94,6 @@ pub struct Timeline {
     period: Period,
     /// Right end of the window, Unix ms; `None` follows the current time.
     end_ms: Option<i64>,
-    /// Collapsed to its header.
-    hidden: bool,
     /// Background query thread, started on first use.
     fetcher: Option<Fetcher>,
     /// Why the thread couldn't start.
@@ -126,9 +122,6 @@ impl Timeline {
     pub fn show(&mut self, ui: &mut Ui, history_path: Option<&Path>, target_id: Option<i64>, ttl: u8, title: &str) {
         let now_ms = history::unix_ms(SystemTime::now());
         self.header(ui, title, now_ms);
-        if self.hidden {
-            return;
-        }
         let (Some(path), Some(target_id)) = (history_path, target_id) else {
             ui.label("History is off, so there is nothing to chart.");
             return;
@@ -157,15 +150,11 @@ impl Timeline {
         self.comment_dialog(ui.ctx());
     }
 
-    /// Title, period, shown range and the hide/show toggle.
+    /// Title, period and the shown range.
     fn header(&mut self, ui: &mut Ui, title: &str, now_ms: i64) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).font(theme::heading_font(15.0)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let toggle = if self.hidden { "Show Graph" } else { "Hide Graph" };
-                if ui.small_button(toggle).clicked() {
-                    self.hidden = !self.hidden;
-                }
                 egui::ComboBox::from_id_salt("timeline-period")
                     .selected_text(self.period.label())
                     .show_ui(ui, |ui| {
@@ -236,9 +225,6 @@ impl Timeline {
                 }
             }
             ui.separator();
-            if ui.button("Hide Graph").clicked() {
-                choice = Some(MenuChoice::Hide);
-            }
             if ui.add_enabled(self.end_ms.is_some(), Button::new("Reset Focus to Current")).clicked() {
                 choice = Some(MenuChoice::ResetFocus);
             }
@@ -258,27 +244,23 @@ impl Timeline {
     fn choose(&mut self, choice: MenuChoice, target_id: i64) {
         match choice {
             MenuChoice::Period(period) => self.period = period,
-            MenuChoice::Hide => self.hidden = true,
             MenuChoice::ResetFocus => self.end_ms = None,
             MenuChoice::Comment(ts_ms) => self.draft = Some(Draft { target_id, ts_ms, text: String::new() }),
         }
     }
 
     /// Slider moving the window back in time, from the oldest sample to now; the right end follows the current
-    /// time.
+    /// time. Always shown (as in PingPlotter), disabled while the whole history fits into the window.
     fn slider(&mut self, ui: &mut Ui, oldest_ms: Option<i64>, bucket_ms: i64, now_ms: i64) {
-        let Some(oldest_ms) = oldest_ms else {
-            return;
-        };
-        let earliest_end = oldest_ms.saturating_add(self.period.millis()).min(now_ms);
-        if earliest_end >= now_ms && self.end_ms.is_none() {
-            // Everything stored fits into the window: nothing to scroll back to.
-            return;
-        }
+        let earliest_end = oldest_ms.map_or(now_ms, |oldest| oldest.saturating_add(self.period.millis()).min(now_ms));
+        let scrollable = earliest_end < now_ms || self.end_ms.is_some();
+        // A disabled slider still needs a non-empty range to draw its handle at the right end.
+        let range_start = if scrollable { earliest_end } else { now_ms.saturating_sub(1) };
         let mut end_s = seconds(self.end_ms.unwrap_or(now_ms));
         ui.spacing_mut().slider_width = ui.available_width();
-        let slider = Slider::new(&mut end_s, seconds(earliest_end)..=seconds(now_ms)).show_value(false);
-        if ui.add(slider).changed() {
+        let slider = Slider::new(&mut end_s, seconds(range_start)..=seconds(now_ms)).show_value(false);
+        let response = ui.add_enabled(scrollable, slider).on_disabled_hover_text("The whole history fits on the chart");
+        if response.changed() {
             let end_ms = millis_of(end_s);
             // Dropped close to the right end: follow the current time again.
             self.end_ms = (now_ms.saturating_sub(end_ms) > bucket_ms.saturating_mul(2)).then_some(end_ms);
@@ -333,10 +315,11 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
             .allow_scroll(false)
             .allow_boxed_zoom(false)
             .allow_double_click_reset(false)
-            .include_x(from_s)
-            .include_x(to_s)
-            .include_y(0.0)
-            .include_y(scale)
+            // Exact bounds, no margins: 0 sits on the bottom edge (nothing below it to show) and the period
+            // spans the full width.
+            .default_x_bounds(from_s, to_s)
+            .default_y_bounds(0.0, scale)
+            .set_margin_fraction(egui::Vec2::ZERO)
             .y_axis_min_width(Y_AXIS_WIDTH)
             .x_grid_spacer(move |input: GridInput| {
                 time_marks(input.bounds.0, input.bounds.1, utc_offset_s)
@@ -353,6 +336,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
         .show_x(false)
         .show_axes([false, true])
         .show(ui, |plot| {
+            plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
             plot.add(
                 Text::new("", PlotPoint::new(from_s, jitter.scale_ms), "Jitter (ms)")
                     .anchor(Align2::LEFT_TOP)
@@ -371,11 +355,19 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
         .y_axis_label("Latency (ms)")
         .x_axis_formatter(move |mark, _| clock(millis_of(mark.value), format))
         .show(ui, |plot| {
-            for (low, high, color) in
-                [(0.0, GOOD_MS, GOOD_ZONE), (GOOD_MS, WARN_MS, WARN_ZONE), (WARN_MS, scale, BAD_ZONE)]
-            {
-                if low < scale {
-                    plot.add(Span::new("", low..=high.min(scale)).axis(Axis::Y).fill(color).border_width(0.0));
+            plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, scale]));
+            // Zones are painted only where there is data, as in PingPlotter; time before the first sample stays plain.
+            if let Some(data_from_s) = shown.series.first_s {
+                for (low, high, color) in
+                    [(0.0, GOOD_MS, GOOD_ZONE), (GOOD_MS, WARN_MS, WARN_ZONE), (WARN_MS, scale, BAD_ZONE)]
+                {
+                    if low < scale {
+                        let top = high.min(scale);
+                        let corners = vec![[data_from_s, low], [to_s, low], [to_s, top], [data_from_s, top]];
+                        plot.polygon(
+                            Polygon::new("", PlotPoints::from(corners)).fill_color(color).stroke(Stroke::NONE),
+                        );
+                    }
                 }
             }
             add_trace(plot, "Latency", latency, LATENCY_COLOR);

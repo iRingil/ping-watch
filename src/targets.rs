@@ -73,7 +73,7 @@ pub struct SavedTarget {
     pub id: i64,
     /// Host name or IP address, as traced.
     pub address: String,
-    /// Optional name of the resource ("DanceHub"); may be empty.
+    /// Optional name of the resource ("Office router"); may be empty.
     pub name: String,
     /// IP version, `None` for a host name that hasn't been resolved yet.
     pub family: Option<Family>,
@@ -266,6 +266,6 @@ mod tests {
     fn family_of_literals() {
         assert_eq!(Family::of_literal("169.58.108.229"), Some(Family::V4));
         assert_eq!(Family::of_literal("::1"), Some(Family::V6));
-        assert_eq!(Family::of_literal("dancehub.example"), None);
+        assert_eq!(Family::of_literal("router.example"), None);
     }
 }

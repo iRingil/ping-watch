@@ -14,8 +14,9 @@ const MIN_SCALE_MS: f64 = 50.0;
 const MIN_JITTER_SCALE_MS: f64 = 10.0;
 /// Scales are rounded up to a multiple of this.
 const SCALE_STEP_MS: f64 = 5.0;
-/// Head room above the smoothed peak.
-const SCALE_HEADROOM: f64 = 1.25;
+/// Head room above the smoothed peak: the usual line sits in the lower part of the chart and spikes up to twice
+/// the usual level stay fully visible.
+const SCALE_HEADROOM: f64 = 2.0;
 /// Number of consecutive buckets averaged to find the scale: a spike narrower than this can't stretch the scale
 /// by itself — it is drawn clipped at the top instead — while a sustained rise moves the scale with it.
 const SMOOTHING_BUCKETS: usize = 15;
@@ -191,6 +192,8 @@ pub struct Series {
     pub jitter: Trace,
     /// Packet loss `(time s, loss %)` of buckets that lost something.
     pub loss: Vec<(f64, f64)>,
+    /// Start of the first bucket with data, s; `None` if the window holds no data.
+    pub first_s: Option<f64>,
 }
 
 impl Series {
@@ -211,7 +214,12 @@ impl Series {
             }
             previous_start = Some(bucket.start_ms);
         }
-        Self { latency: Trace::build(&latency, MIN_SCALE_MS), jitter: Trace::build(&jitter, MIN_JITTER_SCALE_MS), loss }
+        Self {
+            latency: Trace::build(&latency, MIN_SCALE_MS),
+            jitter: Trace::build(&jitter, MIN_JITTER_SCALE_MS),
+            loss,
+            first_s: buckets.first().map(|bucket| seconds(bucket.start_ms)),
+        }
     }
 }
 
@@ -328,8 +336,8 @@ mod tests {
         }
         let series = Series::from_buckets(&steady(&averages), 1_000);
         let scale = series.latency.scale_ms;
-        // Smoothed peak (14 × 50 + 600) / 15 ≈ 86.7, × 1.25 head room → 110.
-        assert_eq!(scale, 110.0);
+        // Smoothed peak (14 × 50 + 600) / 15 ≈ 86.7, × 2 head room → 175.
+        assert_eq!(scale, 175.0);
         assert_eq!(series.latency.clipped, vec![[60.5, scale]]);
         assert!(series.latency.segments.iter().flatten().all(|point| point[1] <= scale));
     }
@@ -337,8 +345,14 @@ mod tests {
     #[test]
     fn a_sustained_rise_moves_the_scale() {
         let series = Series::from_buckets(&steady(&[200; 30]), 1_000);
-        assert_eq!(series.latency.scale_ms, 250.0);
+        assert_eq!(series.latency.scale_ms, 400.0);
         assert!(series.latency.clipped.is_empty());
+    }
+
+    #[test]
+    fn first_data_time_is_known() {
+        assert_eq!(Series::from_buckets(&steady(&[50, 60]), 1_000).first_s, Some(0.0));
+        assert_eq!(Series::from_buckets(&[], 1_000).first_s, None);
     }
 
     #[test]
