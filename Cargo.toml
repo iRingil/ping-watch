@@ -4,3 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+# Every `unsafe` block states why it is sound (ANSSI LANG-UNSAFE).
+undocumented_unsafe_blocks = "warn"
+missing_safety_doc = "warn"
+# Panics only where justified; propagate errors instead (ANSSI: error handling).
+unwrap_used = "warn"
+# Overflow must be handled explicitly (checked_/wrapping_/saturating_).
+arithmetic_side_effects = "warn"
+# Every module, function, type, field and constant has a doc comment, private ones included.
+missing_docs_in_private_items = "warn"
+
+[profile.release]
+# Keep overflow panics in release too, so an unhandled overflow is never silent.
+overflow-checks = true
