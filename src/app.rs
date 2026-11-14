@@ -12,6 +12,7 @@ use crate::hop_table::format_ms;
 use crate::names::NameCache;
 use crate::tab::{self, Action, Tab};
 use crate::theme;
+use crate::tray::{Tray, TrayCommand};
 
 /// How often the window redraws to show fresh numbers.
 const REFRESH: Duration = Duration::from_millis(250);
@@ -40,11 +41,14 @@ pub struct PingWatchApp {
     history_path: Option<PathBuf>,
     /// Read connection to the history for the timelines, `None` if history is off.
     reader: Option<Store>,
+    /// Icon in the notification area, `None` if it couldn't be created.
+    tray: Option<Tray>,
 }
 
 impl PingWatchApp {
-    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab.
-    pub fn new(hosts: Vec<String>) -> Self {
+    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab, and the
+    /// `tray` icon.
+    pub fn new(hosts: Vec<String>, tray: Option<Tray>) -> Self {
         let history_path = history::default_path().inspect_err(|error| log::warn!("{error}")).ok();
         let reader = history_path
             .as_deref()
@@ -53,7 +57,7 @@ impl PingWatchApp {
         if tabs.is_empty() {
             tabs.push(Tab::new());
         }
-        Self { tabs, page: Page::Target(0), names: NameCache::default(), history_path, reader }
+        Self { tabs, page: Page::Target(0), names: NameCache::default(), history_path, reader, tray }
     }
 
     /// Carries out `action` on the active tab.
@@ -222,6 +226,23 @@ fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
 }
 
 impl eframe::App for PingWatchApp {
+    /// Handles the tray icon; runs even while the window is minimized or hidden.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        while let Some(command) = tray.poll() {
+            match command {
+                TrayCommand::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayCommand::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if let Some(action) = shortcut_action(ui.ctx()) {
             self.apply(action);

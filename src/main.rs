@@ -20,6 +20,7 @@ mod tab;
 mod theme;
 mod timeline;
 mod tracer;
+mod tray;
 
 use anyhow::anyhow;
 use eframe::egui;
@@ -56,7 +57,11 @@ fn main() -> anyhow::Result<()> {
         options,
         Box::new(move |creation| {
             theme::apply(&creation.egui_ctx);
-            Ok(Box::new(PingWatchApp::new(hosts)))
+            // Created here, on the event loop's thread, as the tray needs. Without it the app still works.
+            let tray = tray::Tray::new(&creation.egui_ctx, ICON_PNG, APP_NAME)
+                .inspect_err(|error| log::warn!("{error}"))
+                .ok();
+            Ok(Box::new(PingWatchApp::new(hosts, tray)))
         }),
     )
     // `eframe::Error` isn't `Send + Sync`, so it can't go into `anyhow` directly.
