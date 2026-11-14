@@ -15,6 +15,8 @@ pub const CHASSIS: Color32 = Color32::from_rgb(0x1a, 0x1f, 0x29);
 pub const PANE: Color32 = Color32::from_rgb(0x21, 0x28, 0x35);
 /// Pane headers and table header rows, a step lighter than the pane.
 pub const PANE_HEADER: Color32 = Color32::from_rgb(0x29, 0x31, 0x40);
+/// Inactive tabs: between the tab bar (WELL) and the open tab (CHASSIS).
+pub const TAB_IDLE: Color32 = Color32::from_rgb(0x1d, 0x23, 0x2f);
 /// Input fields and plot backgrounds, a step darker than the chassis.
 pub const WELL: Color32 = Color32::from_rgb(0x14, 0x18, 0x20);
 /// Hairlines: pane borders, grid, separators.

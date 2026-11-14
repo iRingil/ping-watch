@@ -271,6 +271,10 @@ impl Timeline {
             return;
         };
         let earliest_end = oldest_ms.saturating_add(self.period.millis()).min(now_ms);
+        if earliest_end >= now_ms && self.end_ms.is_none() {
+            // Everything stored fits into the window: nothing to scroll back to.
+            return;
+        }
         let mut end_s = seconds(self.end_ms.unwrap_or(now_ms));
         ui.spacing_mut().slider_width = ui.available_width();
         let slider = Slider::new(&mut end_s, seconds(earliest_end)..=seconds(now_ms)).show_value(false);

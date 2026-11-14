@@ -4,18 +4,27 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use eframe::egui::{self, Align, Button, Frame, Layout, Margin, RichText, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{
+    self, Align, Button, CornerRadius, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
+};
 use egui_extras::{Column, TableBuilder};
 
 use crate::history::{self, Store};
 use crate::hop_table::format_ms;
 use crate::names::NameCache;
 use crate::tab::{self, Action, Tab};
+use crate::targets::TargetList;
 use crate::theme;
 use crate::tray::{Tray, TrayCommand};
 
 /// How often the window redraws to show fresh numbers.
 const REFRESH: Duration = Duration::from_millis(250);
+/// Height of a tab in the tab bar.
+const TAB_HEIGHT: f32 = 30.0;
+/// Space between a tab's edge and its title.
+const TAB_PADDING: f32 = 12.0;
+/// Width of a tab's close mark.
+const TAB_CLOSE_WIDTH: f32 = 16.0;
 /// Height of an overview table row.
 const ROW_HEIGHT: f32 = 22.0;
 
@@ -41,6 +50,8 @@ pub struct PingWatchApp {
     history_path: Option<PathBuf>,
     /// Read connection to the history for the timelines, `None` if history is off.
     reader: Option<Store>,
+    /// The user's target list, `None` if history is off.
+    targets: Option<TargetList>,
     /// Icon in the notification area, `None` if it couldn't be created.
     tray: Option<Tray>,
 }
@@ -57,7 +68,10 @@ impl PingWatchApp {
         if tabs.is_empty() {
             tabs.push(Tab::new());
         }
-        Self { tabs, page: Page::Target(0), names: NameCache::default(), history_path, reader, tray }
+        let targets = history_path
+            .as_deref()
+            .and_then(|path| TargetList::open(path).inspect_err(|error| log::warn!("{error}")).ok());
+        Self { tabs, page: Page::Target(0), names: NameCache::default(), history_path, reader, targets, tray }
     }
 
     /// Carries out `action` on the active tab.
@@ -106,23 +120,24 @@ impl PingWatchApp {
     /// signal color.
     fn tab_bar(&mut self, ui: &mut Ui) {
         let mut close = None;
+        // The baseline the tabs stand on; the open tab covers it, so it reads as joined to the toolbar below.
+        let bar = ui.max_rect();
+        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, theme::RULE));
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if tab_label(ui, self.page == Page::AllTargets, "All targets").clicked() {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if tab_widget(ui, self.page == Page::AllTargets, "All targets", false).0.clicked() {
                 self.page = Page::AllTargets;
             }
             for (index, tab) in self.tabs.iter().enumerate() {
-                ui.add_space(6.0);
-                if tab_label(ui, self.page == Page::Target(index), &tab.title()).clicked() {
+                let (response, close_clicked) = tab_widget(ui, self.page == Page::Target(index), &tab.title(), true);
+                if close_clicked {
+                    close = Some(index);
+                } else if response.clicked() {
                     self.page = Page::Target(index);
                 }
-                let close_button = Button::new(RichText::new("\u{d7}").color(theme::INK_MUTED)).frame(false);
-                if ui.add(close_button).on_hover_text("Close and stop").clicked() {
-                    close = Some(index);
-                }
             }
-            ui.add_space(6.0);
-            if ui.add(Button::new("+").frame(false)).on_hover_text("New target (Ctrl+N)").clicked() {
+            let plus = ui.add(Button::new(RichText::new("+").font(theme::heading_font(16.0))).frame(false));
+            if plus.on_hover_text("New target (Ctrl+N)").clicked() {
                 self.apply(Action::NewTarget);
             }
         });
@@ -196,18 +211,49 @@ impl PingWatchApp {
     }
 }
 
-/// A tab title in the tab bar, underlined in the signal color when open.
-fn tab_label(ui: &mut Ui, open: bool, title: &str) -> egui::Response {
-    let text =
-        RichText::new(title)
-            .font(theme::heading_font(14.5))
-            .color(if open { theme::INK } else { theme::INK_MUTED });
-    let response = ui.add(Button::new(text).frame(false));
+/// A tab of the tab bar: a box with rounded top corners. Every tab keeps its outline; the open one is filled with
+/// the toolbar color (so it joins the toolbar below) and has a signal-blue top edge. Returns the tab's response
+/// and whether its close mark was clicked.
+fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Response, bool) {
+    let font = theme::heading_font(14.5);
+    let text_color = if open { theme::INK } else { theme::INK_MUTED };
+    let galley = ui.painter().layout_no_wrap(title.to_owned(), font, text_color);
+    let close_width = if closable { TAB_CLOSE_WIDTH } else { 0.0 };
+    let size = Vec2::new(galley.size().x + TAB_PADDING * 2.0 + close_width, TAB_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+
+    let fill = if open {
+        theme::CHASSIS
+    } else if response.hovered() {
+        theme::PANE_HEADER
+    } else {
+        theme::TAB_IDLE
+    };
+    let corners = CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 };
+    let painter = ui.painter();
+    painter.rect(rect, corners, fill, Stroke::new(1.0, theme::RULE), StrokeKind::Inside);
     if open {
-        let rect = response.rect;
-        ui.painter().hline(rect.x_range(), rect.bottom() + 3.0, Stroke::new(2.0, theme::SIGNAL));
+        // Open the bottom edge into the toolbar and mark the top.
+        let inner = (rect.left() + 1.0)..=(rect.right() - 1.0);
+        painter.hline(inner.clone(), rect.bottom() - 0.5, Stroke::new(2.0, fill));
+        painter.hline(inner, rect.top() + 1.0, Stroke::new(2.0, theme::SIGNAL));
     }
-    response
+    let text_pos = egui::pos2(rect.left() + TAB_PADDING, rect.center().y - galley.size().y / 2.0);
+    painter.galley(text_pos, galley, text_color);
+
+    let mut close_clicked = false;
+    if closable {
+        let close_rect = Rect::from_center_size(
+            egui::pos2(rect.right() - TAB_PADDING / 2.0 - TAB_CLOSE_WIDTH / 2.0, rect.center().y),
+            Vec2::splat(TAB_CLOSE_WIDTH),
+        );
+        let close = ui.interact(close_rect, response.id.with("close"), Sense::click()).on_hover_text("Close and stop");
+        let color = if close.hovered() { theme::BAD } else { theme::INK_MUTED };
+        ui.painter()
+            .text(close_rect.center(), egui::Align2::CENTER_CENTER, "\u{d7}", theme::heading_font(16.0), color);
+        close_clicked = close.clicked();
+    }
+    (response, close_clicked)
 }
 
 /// The action of a pressed keyboard shortcut, if any (consumed so widgets don't see it).
@@ -247,7 +293,7 @@ impl eframe::App for PingWatchApp {
         if let Some(action) = shortcut_action(ui.ctx()) {
             self.apply(action);
         }
-        let bar_frame = Frame::new().fill(theme::WELL).inner_margin(Margin { left: 10, right: 10, top: 6, bottom: 6 });
+        let bar_frame = Frame::new().fill(theme::WELL).inner_margin(Margin { left: 10, right: 10, top: 6, bottom: 0 });
         egui::Panel::top("tab-bar")
             .frame(bar_frame)
             .show_separator_line(false)
@@ -256,6 +302,7 @@ impl eframe::App for PingWatchApp {
             names: &self.names,
             reader: self.reader.as_ref(),
             history_path: self.history_path.as_deref(),
+            targets: self.targets.as_ref(),
         };
         for tab in &mut self.tabs {
             tab.poll(context);

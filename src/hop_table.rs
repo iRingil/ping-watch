@@ -15,8 +15,14 @@ use crate::stats::HopStats;
 
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 22.0;
+/// Share of the table width given to the latency bars (pane 2); the Name column takes what is left.
+const LATENCY_SHARE: f32 = 0.3;
 /// Height of the header row.
 const HEADER_HEIGHT: f32 = 26.0;
+/// Width of the Hop column.
+const HOP_WIDTH: f32 = 40.0;
+/// Width of the IP column (fits an IPv4 address; IPv6 ones are clipped, the full address is in the timeline).
+const IP_WIDTH: f32 = 130.0;
 /// Width of a numeric column.
 const NUMBER_WIDTH: f32 = 58.0;
 /// Diameter of the hop number badge.
@@ -83,17 +89,22 @@ pub fn show(
     let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats));
     let mut averages: Vec<Pos2> = Vec::new();
     let mut clicked = None;
+    // Explicit widths: the latency bars get their share, Name gets whatever the fixed columns leave.
+    let available = ui.available_width();
+    let latency_width = (available * LATENCY_SHARE).max(200.0);
+    let spacing = ui.spacing().item_spacing.x * 11.0;
+    let fixed = HOP_WIDTH + NUMBER_WIDTH * 7.0 + IP_WIDTH + latency_width + spacing;
+    let name_width = (available - fixed).max(80.0);
     TableBuilder::new(ui)
         .striped(true)
-        .resizable(true)
         .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center))
-        .column(Column::exact(40.0))
+        .column(Column::exact(HOP_WIDTH))
         .column(Column::exact(NUMBER_WIDTH))
-        .column(Column::initial(120.0).at_least(80.0))
-        .column(Column::initial(150.0).at_least(80.0).clip(true))
+        .column(Column::exact(IP_WIDTH).clip(true))
+        .column(Column::exact(name_width).clip(true))
         .columns(Column::exact(NUMBER_WIDTH), 6)
-        .column(Column::remainder().at_least(200.0).clip(true))
+        .column(Column::exact(latency_width).clip(true))
         .header(HEADER_HEIGHT, |mut header| {
             for (title, numeric) in HEADERS {
                 header.col(|ui| {

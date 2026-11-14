@@ -17,6 +17,7 @@ mod route;
 mod stats;
 mod sync;
 mod tab;
+mod targets;
 mod theme;
 mod timeline;
 mod tracer;

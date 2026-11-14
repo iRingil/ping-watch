@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{
-    self, Align, Button, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Rect, RichText, Stroke, TextEdit, Ui,
-    pos2,
+    self, Align, Button, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect,
+    RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, pos2,
 };
 
 use crate::focus::Focus;
@@ -17,8 +17,8 @@ use crate::history::{self, Recorder, Store};
 use crate::hop_table;
 use crate::latency_bars;
 use crate::names::{NameCache, resolve};
-use crate::presets;
 use crate::route::{Hop, Route};
+use crate::targets::{Family, SavedTarget, TargetList};
 use crate::theme;
 use crate::timeline::Timeline;
 use crate::tracer::{TraceConfig, Tracer};
@@ -33,6 +33,14 @@ const INTERVALS: [(Duration, &str); 7] = [
     (Duration::from_secs(30), "30 seconds"),
     (Duration::from_secs(60), "60 seconds"),
 ];
+/// Width of the target field.
+const ENTRY_WIDTH: f32 = 360.0;
+/// Width of the arrow area at the right end of the target field.
+const ARROW_WIDTH: f32 = 24.0;
+/// Width of the target list: wider than the field, so a full IPv6 address and the description fit side by side.
+const TARGET_LIST_WIDTH: f32 = 600.0;
+/// Tallest the target list grows before it scrolls.
+const TARGET_LIST_HEIGHT: f32 = 380.0;
 /// Share of the pane area the hop table gets at first; the timeline gets the rest.
 const TABLE_SHARE: f32 = 0.66;
 /// Limits of the table's share when the splitter is dragged, so neither pane disappears.
@@ -68,6 +76,8 @@ pub struct Context<'a> {
     pub reader: Option<&'a Store>,
     /// History database file, `None` if history is off.
     pub history_path: Option<&'a Path>,
+    /// The user's target list, `None` if history is off.
+    pub targets: Option<&'a TargetList>,
 }
 
 /// A running trace of one target.
@@ -134,6 +144,8 @@ pub struct Tab {
     focus_input: bool,
     /// Share of the pane area taken by the hop table, changed by dragging the splitter.
     table_share: f32,
+    /// Saved target being edited.
+    editing: Option<Draft>,
 }
 
 impl Tab {
@@ -150,6 +162,7 @@ impl Tab {
             focus: Focus::default(),
             focus_input: true,
             table_share: TABLE_SHARE,
+            editing: None,
         }
     }
 
@@ -205,6 +218,11 @@ impl Tab {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => return self.fail(format!("cannot resolve {}", self.host)),
         };
+        if let Some(targets) = context.targets
+            && let Err(error) = targets.remember(&self.host, target)
+        {
+            log::warn!("cannot add {} to the target list: {error}", self.host);
+        }
         let key = history_key(&self.host);
         let target_id = context
             .reader
@@ -267,7 +285,10 @@ impl Tab {
     pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>) -> Option<Action> {
         let route = self.route();
         let toolbar_frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::symmetric(10, 8));
-        let action = egui::Panel::top("tab-toolbar").frame(toolbar_frame).show(ui, |ui| self.toolbar(ui)).inner;
+        let action = egui::Panel::top("tab-toolbar")
+            .frame(toolbar_frame)
+            .show(ui, |ui| self.toolbar(ui, context.targets))
+            .inner;
         // The clicked hop while it's still on the route, otherwise the target (last) hop.
         let ttl = route.as_ref().and_then(|route| {
             self.selected_ttl
@@ -330,13 +351,13 @@ impl Tab {
 
     /// Toolbar: the target field (or the traced target with pause and its menu), interval, focus, problems and the
     /// latency zone legend. Returns the action asked.
-    fn toolbar(&mut self, ui: &mut Ui) -> Option<Action> {
+    fn toolbar(&mut self, ui: &mut Ui, targets: Option<&TargetList>) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
             if matches!(self.state, State::Running(_)) {
                 action = self.trace_controls(ui);
             } else {
-                self.target_entry(ui);
+                self.target_entry(ui, targets);
             }
             ui.add_space(12.0);
             ui.weak("Interval");
@@ -374,31 +395,37 @@ impl Tab {
     }
 
     /// Target field with the list of well-known targets and the Trace button (a spinner while resolving).
-    fn target_entry(&mut self, ui: &mut Ui) {
+    fn target_entry(&mut self, ui: &mut Ui, targets: Option<&TargetList>) {
         let resolving = matches!(self.state, State::Resolving(_));
-        let field =
-            TextEdit::singleline(&mut self.host_input).hint_text("Enter target name or IP").desired_width(320.0);
+        // Room on the right of the field for the arrow that opens the target list.
+        let field = TextEdit::singleline(&mut self.host_input)
+            .hint_text("Enter target name or IP")
+            .desired_width(ENTRY_WIDTH)
+            .margin(Margin { left: 6, right: ARROW_WIDTH as i8, top: 3, bottom: 3 });
         let input = ui.add_enabled(!resolving, field);
         if std::mem::take(&mut self.focus_input) {
             input.request_focus();
         }
         let mut start = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-        ui.add_enabled_ui(!resolving, |ui| {
-            ui.menu_button("Targets", |ui| {
-                for group in presets::GROUPS {
-                    ui.label(RichText::new(group.title).font(theme::heading_font(13.0)).color(theme::INK_MUTED));
-                    for preset in group.presets {
-                        if ui.add(Button::new(preset.target).shortcut_text(preset.owner)).clicked() {
-                            self.host_input = preset.target.to_owned();
-                            start = true;
-                            ui.close();
-                        }
+
+        let arrow_rect = Rect::from_min_max(pos2(input.rect.right() - ARROW_WIDTH, input.rect.top()), input.rect.max);
+        let arrow =
+            ui.interact(arrow_rect, input.id.with("target-list"), Sense::click()).on_hover_text("Saved targets");
+        paint_arrow(ui, arrow_rect, if arrow.hovered() { theme::INK } else { theme::INK_MUTED });
+        if !resolving && let Some(targets) = targets {
+            Popup::from_toggle_button_response(&arrow)
+                .anchor(input.rect)
+                .width(input.rect.width().max(TARGET_LIST_WIDTH))
+                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    if let Some(address) = self.target_list(ui, targets) {
+                        self.host_input = address;
+                        ui.close();
                     }
-                }
-            })
-            .response
-            .on_hover_text("Well-known targets");
-        });
+                });
+        }
+        self.edit_dialog(ui.ctx(), targets);
+
         if resolving {
             ui.spinner();
             ui.weak(format!("Resolving {}…", self.host));
@@ -408,6 +435,84 @@ impl Tab {
         if start && !resolving {
             let host = self.host_input.clone();
             self.begin(host);
+        }
+    }
+
+    /// Rows of the saved target list: address on the left, name and IP version on the right, Edit and Delete.
+    /// Returns the address picked.
+    fn target_list(&mut self, ui: &mut Ui, targets: &TargetList) -> Option<String> {
+        let all = match targets.all() {
+            Ok(all) => all,
+            Err(error) => {
+                ui.colored_label(theme::BAD, format!("Cannot read the target list: {error}"));
+                return None;
+            }
+        };
+        if all.is_empty() {
+            ui.weak("No saved targets. Every target you trace is added here.");
+            return None;
+        }
+        let mut picked = None;
+        ScrollArea::vertical().max_height(TARGET_LIST_HEIGHT).show(ui, |ui| {
+            for target in all {
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(false, &target.address).clicked() {
+                        picked = Some(target.address.clone());
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("Delete").clicked()
+                            && let Err(error) = targets.delete(target.id)
+                        {
+                            log::error!("cannot delete {}: {error}", target.address);
+                        }
+                        if ui.small_button("Edit").clicked() {
+                            self.editing = Some(Draft::of(&target));
+                        }
+                        ui.weak(target_description(&target));
+                    });
+                });
+            }
+        });
+        picked
+    }
+
+    /// Dialog editing a saved target's address and name.
+    fn edit_dialog(&mut self, ctx: &egui::Context, targets: Option<&TargetList>) {
+        let (Some(draft), Some(targets)) = (&mut self.editing, targets) else {
+            return;
+        };
+        let mut close = false;
+        egui::Modal::new(egui::Id::unique("edit-target")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new("Edit target").font(theme::heading_font(17.0)));
+            ui.add_space(6.0);
+            egui::Grid::new("edit-target-fields").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                ui.weak("Address");
+                ui.add(TextEdit::singleline(&mut draft.address).desired_width(f32::INFINITY));
+                ui.end_row();
+                ui.weak("Name");
+                ui.add(TextEdit::singleline(&mut draft.name).hint_text("optional").desired_width(f32::INFINITY));
+                ui.end_row();
+            });
+            if let Some(error) = &draft.error {
+                ui.colored_label(theme::BAD, error);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let can_save = !draft.address.trim().is_empty();
+                if ui.add_enabled(can_save, primary_button("Save")).clicked() {
+                    match targets.update(draft.id, &draft.address, &draft.name) {
+                        Ok(()) => close = true,
+                        Err(error) => draft.error = Some(format!("Not saved: {error}")),
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            self.editing = None;
         }
     }
 
@@ -455,6 +560,47 @@ fn pane(ui: &mut Ui, rect: Rect, margin: Margin, content: impl FnOnce(&mut Ui)) 
         ui.set_min_size(ui.available_size());
         content(ui);
     });
+}
+
+/// A saved target being edited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Draft {
+    /// Row id in the list.
+    id: i64,
+    /// Address as edited.
+    address: String,
+    /// Name as edited.
+    name: String,
+    /// Why the last save failed.
+    error: Option<String>,
+}
+
+impl Draft {
+    /// Draft of `target` as it is now.
+    fn of(target: &SavedTarget) -> Self {
+        Self { id: target.id, address: target.address.clone(), name: target.name.clone(), error: None }
+    }
+}
+
+/// Right-hand text of a target list row: its name and IP version, whichever are known ("DanceHub, ipv4").
+fn target_description(target: &SavedTarget) -> String {
+    let family = target.family.map(Family::label);
+    [Some(target.name.as_str()).filter(|name| !name.is_empty()), family]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Paints the down-pointing triangle that opens the target list.
+fn paint_arrow(ui: &Ui, rect: Rect, color: egui::Color32) {
+    let center = rect.center();
+    let points = vec![
+        pos2(center.x - 5.0, center.y - 2.5),
+        pos2(center.x + 5.0, center.y - 2.5),
+        pos2(center.x, center.y + 3.5),
+    ];
+    ui.painter().add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
 /// The main button of a group: signal-colored, so it reads as "the thing to press".
