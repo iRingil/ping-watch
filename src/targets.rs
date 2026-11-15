@@ -1,22 +1,30 @@
 //! The user's list of targets, kept in the history database: seeded once with well-known targets, extended
 //! automatically by every new target traced, editable (address and an optional name) and prunable (presets too).
-//! The address family is determined once, when an address is added or changed, and stored with it.
+//! The address family is determined once, when an address is added or changed, and stored with it. Each entry
+//! also keeps the trace settings last used for it (interval, focus, timeline period).
 
 use std::net::IpAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::focus::Focus;
 use crate::history::HistoryError;
 use crate::presets;
+use crate::timeline::Period;
 
-/// Schema of the list; `family` is 4, 6 or NULL (a host name not resolved yet).
+/// Schema of the list; `family` is 4, 6 or NULL (a host name not resolved yet); the settings columns are all NULL
+/// until the target is first traced.
 const SCHEMA: &str = "
     CREATE TABLE saved_targets (
-        id      INTEGER PRIMARY KEY,
-        address TEXT NOT NULL UNIQUE,
-        name    TEXT NOT NULL DEFAULT '',
-        family  INTEGER
+        id          INTEGER PRIMARY KEY,
+        address     TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL DEFAULT '',
+        family      INTEGER,
+        interval_ms INTEGER, -- probe interval
+        focus       TEXT,    -- Focus::key
+        period_s    INTEGER  -- timeline period, seconds
     );
 ";
 
@@ -64,6 +72,17 @@ impl Family {
             _ => None,
         }
     }
+}
+
+/// Trace settings remembered per target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceSettings {
+    /// Probe interval.
+    pub interval: Duration,
+    /// Period the hop table summarizes.
+    pub focus: Focus,
+    /// Period the timeline shows.
+    pub period: Period,
 }
 
 /// One entry of the list.
@@ -186,6 +205,47 @@ impl TargetList {
         Ok(())
     }
 
+    /// Settings last used for tracing `address`, `None` if it was never traced (or the stored values are unknown).
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn settings(&self, address: &str) -> Result<Option<TraceSettings>, HistoryError> {
+        let row: Option<(Option<i64>, Option<String>, Option<i64>)> = self
+            .connection
+            .query_row(
+                "SELECT interval_ms, focus, period_s FROM saved_targets WHERE address = ?1",
+                [normalize(address)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((Some(interval_ms), Some(focus), Some(period_s))) = row else {
+            return Ok(None);
+        };
+        let interval = u64::try_from(interval_ms).ok().map(Duration::from_millis);
+        let focus = Focus::from_key(&focus);
+        let period = u64::try_from(period_s).ok().and_then(Period::from_seconds);
+        Ok(interval
+            .zip(focus)
+            .zip(period)
+            .map(|((interval, focus), period)| TraceSettings { interval, focus, period }))
+    }
+
+    /// Remembers `settings` for `address` (which must already be listed, see [`Self::remember`]).
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn save_settings(&self, address: &str, settings: TraceSettings) -> Result<(), HistoryError> {
+        let interval_ms = i64::try_from(settings.interval.as_millis()).unwrap_or(i64::MAX);
+        let period_s = i64::try_from(settings.period.seconds()).unwrap_or(i64::MAX);
+        self.connection.execute(
+            "UPDATE saved_targets SET interval_ms = ?2, focus = ?3, period_s = ?4 WHERE address = ?1",
+            params![normalize(address), interval_ms, settings.focus.key(), period_s],
+        )?;
+        Ok(())
+    }
+
     /// Removes entry `id`.
     ///
     /// # Errors
@@ -252,6 +312,19 @@ mod tests {
         list.update(id, "2001:db8::1", "").expect("address changed");
         let changed = find(&list, "2001:db8::1").expect("listed under the new address");
         assert_eq!((changed.name.as_str(), changed.family), ("", Some(Family::V6)));
+    }
+
+    #[test]
+    fn settings_are_remembered_per_target() {
+        let list = list();
+        let ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+        assert_eq!(list.settings("9.9.9.9").ok(), Some(None), "never traced yet");
+        list.remember("9.9.9.9", ip).expect("remembered");
+        let settings =
+            TraceSettings { interval: Duration::from_millis(500), focus: Focus::Minutes5, period: Period::Hour };
+        list.save_settings("9.9.9.9", settings).expect("saved");
+        assert_eq!(list.settings(" 9.9.9.9 ").ok(), Some(Some(settings)));
+        assert_eq!(list.settings("1.1.1.1").ok(), Some(None), "other targets keep their own");
     }
 
     #[test]

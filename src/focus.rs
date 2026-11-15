@@ -52,6 +52,25 @@ impl Focus {
         }
     }
 
+    /// Stable key for storing the choice.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Seconds5 => "5s",
+            Self::Seconds30 => "30s",
+            Self::Seconds60 => "60s",
+            Self::Minutes5 => "5m",
+            Self::Minutes30 => "30m",
+            Self::Minutes60 => "60m",
+            Self::All => "all",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// The choice stored under `key`, if it is one.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|focus| focus.key() == key)
+    }
+
     /// The time range to summarize as `(from, to)` Unix ms, `None` for everything. `timeline` is the range the
     /// timeline shows, `now_ms` the current time.
     pub fn range(self, timeline: (i64, i64), now_ms: i64) -> Option<(i64, i64)> {
@@ -78,6 +97,12 @@ mod tests {
 
     /// "Now" in the tests: 10 hours after the epoch.
     const NOW: i64 = 36_000_000;
+
+    #[test]
+    fn keys_round_trip() {
+        assert!(Focus::ALL.into_iter().all(|focus| Focus::from_key(focus.key()) == Some(focus)));
+        assert_eq!(Focus::from_key("nonsense"), None);
+    }
 
     #[test]
     fn fixed_choices_end_now_and_ignore_the_timeline() {

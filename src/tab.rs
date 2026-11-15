@@ -19,7 +19,7 @@ use crate::icons::{self, Icon, Style};
 use crate::latency_bars;
 use crate::names::{NameCache, resolve};
 use crate::route::{Hop, Route};
-use crate::targets::{Family, SavedTarget, TargetList};
+use crate::targets::{Family, SavedTarget, TargetList, TraceSettings};
 use crate::theme;
 use crate::timeline::Timeline;
 use crate::tracer::{TraceConfig, Tracer};
@@ -47,7 +47,7 @@ const TARGET_ROW_HEIGHT: f32 = 28.0;
 /// Tallest the target list grows before it scrolls.
 const TARGET_LIST_HEIGHT: f32 = 380.0;
 /// Share of the pane area the hop table gets at first; the timeline gets the rest.
-const TABLE_SHARE: f32 = 0.66;
+pub const TABLE_SHARE: f32 = 0.66;
 /// Limits of the table's share when the splitter is dragged, so neither pane disappears.
 const TABLE_SHARE_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.85;
 /// Height of the draggable bar between the panes.
@@ -147,10 +147,10 @@ pub struct Tab {
     focus: Focus,
     /// Move keyboard focus to the host input on the next frame.
     focus_input: bool,
-    /// Share of the pane area taken by the hop table, changed by dragging the splitter.
-    table_share: f32,
     /// Saved target being edited.
     editing: Option<Draft>,
+    /// Settings as last stored for this target; compared each frame to store changes.
+    saved_settings: Option<TraceSettings>,
 }
 
 impl Tab {
@@ -166,8 +166,8 @@ impl Tab {
             interval: Duration::from_secs(1),
             focus: Focus::default(),
             focus_input: true,
-            table_share: TABLE_SHARE,
             editing: None,
+            saved_settings: None,
         }
     }
 
@@ -177,6 +177,22 @@ impl Tab {
         tab.host_input.clone_from(&host);
         tab.begin(host);
         tab
+    }
+
+    /// Stores the running trace's interval, focus and timeline period for its target whenever they changed.
+    fn save_settings(&mut self, targets: Option<&TargetList>) {
+        let (State::Running(_), Some(targets)) = (&self.state, targets) else {
+            return;
+        };
+        let current = TraceSettings { interval: self.interval, focus: self.focus, period: self.timeline.period() };
+        if self.saved_settings == Some(current) {
+            return;
+        }
+        if let Err(error) = targets.save_settings(&self.host, current) {
+            log::warn!("cannot save the settings of {}: {error}", self.host);
+        }
+        // Marked as handled even after a failure: one attempt per change, not one per frame.
+        self.saved_settings = Some(current);
     }
 
     /// Address being traced, `None` until the trace runs.
@@ -235,6 +251,16 @@ impl Tab {
             && let Err(error) = targets.remember(&self.host, target)
         {
             log::warn!("cannot add {} to the target list: {error}", self.host);
+        }
+        // The settings this target was last traced with come back with it.
+        self.saved_settings = context
+            .targets
+            .and_then(|targets| targets.settings(&self.host).inspect_err(|error| log::warn!("{error}")).ok())
+            .flatten();
+        if let Some(settings) = self.saved_settings {
+            self.interval = settings.interval;
+            self.focus = settings.focus;
+            self.timeline.set_period(settings.period);
         }
         let key = history_key(&self.host);
         let target_id = context
@@ -310,7 +336,8 @@ impl Tab {
     /// Draws the tab: toolbar, the hop table pane and the timeline pane. The panes keep their frames and the table
     /// its header even before a trace runs, so an empty tab shows where everything will appear. Returns the action
     /// asked for in the menu.
-    pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>) -> Option<Action> {
+    pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>, table_share: &mut f32) -> Option<Action> {
+        self.save_settings(context.targets);
         let route = self.route();
         let toolbar_frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::symmetric(10, 8));
         let action = egui::Panel::top("tab-toolbar")
@@ -325,8 +352,8 @@ impl Tab {
         });
         let area = ui.available_rect_before_wrap().shrink2(egui::vec2(PANE_GAP, 0.0));
         ui.allocate_rect(area, egui::Sense::hover());
-        let (table_rect, splitter_rect, timeline_rect) = self.split(area);
-        self.splitter(ui, splitter_rect, area);
+        let (table_rect, splitter_rect, timeline_rect) = split(area, *table_share);
+        splitter(ui, splitter_rect, area, table_share);
 
         pane(ui, table_rect, Margin::same(1), |ui| {
             let focus = route.as_ref().and_then(focus_label);
@@ -344,37 +371,6 @@ impl Tab {
             }
         });
         action
-    }
-
-    /// Splits the pane area into the hop table (top, `table_share` of the height), the splitter and the timeline
-    /// (the rest). Computed from the window size every frame, so the panes are in place from the first frame.
-    fn split(&self, area: Rect) -> (Rect, Rect, Rect) {
-        let usable = area.height() - SPLITTER_HEIGHT - PANE_GAP;
-        let splitter_top = area.top() + usable * self.table_share;
-        let timeline_top = splitter_top + SPLITTER_HEIGHT;
-        let table = Rect::from_min_max(area.min, pos2(area.right(), splitter_top));
-        let splitter = Rect::from_min_max(pos2(area.left(), splitter_top), pos2(area.right(), timeline_top));
-        let timeline =
-            Rect::from_min_max(pos2(area.left(), timeline_top), pos2(area.right(), area.bottom() - PANE_GAP));
-        (table, splitter, timeline)
-    }
-
-    /// The bar between the panes: dragging it moves the border; it lights up under the pointer.
-    fn splitter(&mut self, ui: &mut Ui, rect: Rect, area: Rect) {
-        let response = ui
-            .interact(rect, ui.scope_id().with("pane-splitter"), egui::Sense::drag())
-            .on_hover_cursor(egui::CursorIcon::ResizeVertical);
-        let usable = (area.height() - SPLITTER_HEIGHT - PANE_GAP).max(1.0);
-        if response.dragged() {
-            let share = self.table_share + response.drag_delta().y / usable;
-            self.table_share = share.clamp(*TABLE_SHARE_RANGE.start(), *TABLE_SHARE_RANGE.end());
-        }
-        let active = response.hovered() || response.dragged();
-        let color = if active { theme::SIGNAL } else { theme::RULE };
-        let center = rect.center();
-        // A full-width hairline with a thicker grip in the middle shows where to grab.
-        ui.painter().hline(rect.x_range(), center.y, Stroke::new(1.0, color));
-        ui.painter().hline((center.x - 24.0)..=(center.x + 24.0), center.y, Stroke::new(4.0, color));
     }
 
     /// Toolbar: the target field (or the traced target with pause and its menu), interval, focus, problems and the
@@ -576,6 +572,36 @@ impl Tab {
         });
         action
     }
+}
+
+/// Splits the pane area into the hop table (top, `table_share` of the height, kept by the app for all tabs), the splitter and the timeline
+/// (the rest). Computed from the window size every frame, so the panes are in place from the first frame.
+fn split(area: Rect, table_share: f32) -> (Rect, Rect, Rect) {
+    let usable = area.height() - SPLITTER_HEIGHT - PANE_GAP;
+    let splitter_top = area.top() + usable * table_share;
+    let timeline_top = splitter_top + SPLITTER_HEIGHT;
+    let table = Rect::from_min_max(area.min, pos2(area.right(), splitter_top));
+    let splitter = Rect::from_min_max(pos2(area.left(), splitter_top), pos2(area.right(), timeline_top));
+    let timeline = Rect::from_min_max(pos2(area.left(), timeline_top), pos2(area.right(), area.bottom() - PANE_GAP));
+    (table, splitter, timeline)
+}
+
+/// The bar between the panes: dragging it moves the border; it lights up under the pointer.
+fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
+    let response = ui
+        .interact(rect, ui.scope_id().with("pane-splitter"), egui::Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let usable = (area.height() - SPLITTER_HEIGHT - PANE_GAP).max(1.0);
+    if response.dragged() {
+        let share = *table_share + response.drag_delta().y / usable;
+        *table_share = share.clamp(*TABLE_SHARE_RANGE.start(), *TABLE_SHARE_RANGE.end());
+    }
+    let active = response.hovered() || response.dragged();
+    let color = if active { theme::SIGNAL } else { theme::RULE };
+    let center = rect.center();
+    // A full-width hairline with a thicker grip in the middle shows where to grab.
+    ui.painter().hline(rect.x_range(), center.y, Stroke::new(1.0, color));
+    ui.painter().hline((center.x - 24.0)..=(center.x + 24.0), center.y, Stroke::new(4.0, color));
 }
 
 /// Draws a framed pane exactly into `rect`: the content gets its own child ui clipped to the rect, so whatever it

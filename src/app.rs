@@ -3,7 +3,7 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Button, CornerRadius, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
@@ -17,7 +17,10 @@ use crate::tab::{self, Action, Tab};
 use crate::targets::TargetList;
 use crate::theme;
 use crate::tray::{Tray, TrayCommand};
+use crate::window_state::{WindowState, WindowStore};
 
+/// Least time between two stores of the window state while it changes (moving, resizing).
+const WINDOW_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the window redraws to show fresh numbers.
 const REFRESH: Duration = Duration::from_millis(250);
 /// Height of a tab in the tab bar.
@@ -59,12 +62,28 @@ pub struct PingWatchApp {
     targets: Option<TargetList>,
     /// Icon in the notification area, `None` if it couldn't be created.
     tray: Option<Tray>,
+    /// Where the window state is kept between runs, `None` if history is off.
+    window_store: Option<WindowStore>,
+    /// The window state as of the last frame.
+    window: WindowState,
+    /// The window state as last stored.
+    window_saved: Option<WindowState>,
+    /// When the window state was last stored.
+    window_saved_at: Instant,
+    /// Minimize the window on the first frame (it was left minimized).
+    start_minimized: bool,
 }
 
 impl PingWatchApp {
-    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab, and the
-    /// `tray` icon.
-    pub fn new(hosts: Vec<String>, tray: Option<Tray>) -> Self {
+    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab, the `tray`
+    /// icon, and the window state as stored in `window_store` (`saved_window`, already applied to the window's
+    /// geometry by the caller).
+    pub fn new(
+        hosts: Vec<String>,
+        tray: Option<Tray>,
+        window_store: Option<WindowStore>,
+        saved_window: Option<WindowState>,
+    ) -> Self {
         let history_path = history::default_path().inspect_err(|error| log::warn!("{error}")).ok();
         let reader = history_path
             .as_deref()
@@ -76,7 +95,31 @@ impl PingWatchApp {
         let targets = history_path
             .as_deref()
             .and_then(|path| TargetList::open(path).inspect_err(|error| log::warn!("{error}")).ok());
-        Self { tabs, page: Page::Target(0), names: NameCache::default(), history_path, reader, targets, tray }
+        // The current state starts as "not minimized": the saved flag only says what to do on start, and the
+        // window reports the truth from then on.
+        let window = saved_window.map(|state| WindowState { minimized: false, ..state }).unwrap_or(WindowState {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            maximized: false,
+            minimized: false,
+            table_share: tab::TABLE_SHARE,
+        });
+        Self {
+            tabs,
+            page: Page::Target(0),
+            names: NameCache::default(),
+            history_path,
+            reader,
+            targets,
+            tray,
+            window_store,
+            window,
+            window_saved: saved_window,
+            window_saved_at: Instant::now(),
+            start_minimized: saved_window.is_some_and(|state| state.minimized),
+        }
     }
 
     /// Carries out `action` on the active tab.
@@ -288,6 +331,46 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Re
 }
 
 impl PingWatchApp {
+    /// Follows the window's geometry and state, and stores it when it changed: at most once a second, and at once
+    /// when the window is being closed. Position and size are taken only from the normal (not maximized or
+    /// minimized) window, so restoring a maximized window brings back its normal size too.
+    fn track_window(&mut self, ctx: &egui::Context) {
+        let (outer, inner, minimized, maximized, closing) = ctx.input(|input| {
+            let viewport = input.viewport();
+            (
+                viewport.outer_rect,
+                viewport.inner_rect,
+                viewport.minimized,
+                viewport.maximized,
+                viewport.close_requested(),
+            )
+        });
+        let window = &mut self.window;
+        // Unknown means it hasn't been minimized: winit reports the flag once it changes.
+        window.minimized = minimized.unwrap_or(false);
+        window.maximized = maximized.unwrap_or(window.maximized);
+        if !window.minimized
+            && !window.maximized
+            && let (Some(outer), Some(inner)) = (outer, inner)
+        {
+            window.x = outer.min.x;
+            window.y = outer.min.y;
+            window.width = inner.width();
+            window.height = inner.height();
+        }
+        let due = closing || self.window_saved_at.elapsed() >= WINDOW_SAVE_INTERVAL;
+        if self.window_saved == Some(self.window) || !due || !self.window.is_plausible() {
+            return;
+        }
+        if let Some(store) = &mut self.window_store
+            && let Err(error) = store.save(self.window)
+        {
+            log::warn!("cannot save the window state: {error}");
+        }
+        self.window_saved = Some(self.window);
+        self.window_saved_at = Instant::now();
+    }
+
     /// Status bar: a problem of the shown tab in red (network down, history off, unknown host) or, normally, its key
     /// numbers; on the overview, how many targets are traced and how many have problems.
     fn status_bar(&self, ui: &mut Ui) {
@@ -369,8 +452,9 @@ fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
 }
 
 impl eframe::App for PingWatchApp {
-    /// Handles the tray icon; runs even while the window is minimized or hidden.
+    /// Handles the tray icon and keeps the window state; runs even while the window is minimized or hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.track_window(ctx);
         let Some(tray) = &self.tray else {
             return;
         };
@@ -387,6 +471,10 @@ impl eframe::App for PingWatchApp {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // Minimizing is sent once the window has drawn a frame; sent before it exists, Windows ignores it.
+        if std::mem::take(&mut self.start_minimized) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
         if let Some(action) = shortcut_action(ui.ctx()) {
             self.apply(action);
         }
@@ -423,7 +511,10 @@ impl eframe::App for PingWatchApp {
                 None
             }
             Page::Target(index) => self.tabs.get_mut(index).and_then(|tab| {
-                egui::CentralPanel::default().frame(Frame::new()).show(ui, |ui| tab.ui(ui, context)).inner
+                egui::CentralPanel::default()
+                    .frame(Frame::new())
+                    .show(ui, |ui| tab.ui(ui, context, &mut self.window.table_share))
+                    .inner
             }),
         };
         if let Some(action) = action {

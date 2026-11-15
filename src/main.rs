@@ -23,14 +23,19 @@ mod theme;
 mod timeline;
 mod tracer;
 mod tray;
+mod window_state;
 
 use anyhow::anyhow;
 use eframe::egui;
 
 use crate::app::PingWatchApp;
+use crate::window_state::{WindowState, WindowStore};
 
 /// Name of the app as users see it: window title, data folder, executable properties, documentation.
 pub const APP_NAME: &str = "Ping Watch";
+
+/// Inner size of the window on the very first start, logical points.
+const DEFAULT_WINDOW_SIZE: [f32; 2] = [1200.0, 760.0];
 
 /// Window and taskbar icon (the executable's own icon comes from `build.rs`).
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
@@ -50,10 +55,22 @@ fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let hosts: Vec<String> = std::env::args().skip(1).collect();
-    let options = eframe::NativeOptions {
-        viewport: window_icon(egui::ViewportBuilder::default().with_title(APP_NAME).with_inner_size([1200.0, 760.0])),
-        ..Default::default()
-    };
+    // The window comes back where and as it was left.
+    let window_store = history::default_path()
+        .ok()
+        .and_then(|path| WindowStore::open(&path).inspect_err(|error| log::warn!("{error}")).ok());
+    let saved_window = window_store
+        .as_ref()
+        .and_then(|store| store.load().inspect_err(|error| log::warn!("{error}")).ok().flatten())
+        .filter(WindowState::is_plausible);
+    let mut viewport = egui::ViewportBuilder::default().with_title(APP_NAME).with_inner_size(DEFAULT_WINDOW_SIZE);
+    if let Some(state) = saved_window {
+        viewport = viewport
+            .with_position([state.x, state.y])
+            .with_inner_size([state.width, state.height])
+            .with_maximized(state.maximized);
+    }
+    let options = eframe::NativeOptions { viewport: window_icon(viewport), ..Default::default() };
     eframe::run_native(
         APP_NAME,
         options,
@@ -63,7 +80,7 @@ fn main() -> anyhow::Result<()> {
             let tray = tray::Tray::new(&creation.egui_ctx, ICON_PNG, APP_NAME)
                 .inspect_err(|error| log::warn!("{error}"))
                 .ok();
-            Ok(Box::new(PingWatchApp::new(hosts, tray)))
+            Ok(Box::new(PingWatchApp::new(hosts, tray, window_store, saved_window)))
         }),
     )
     // `eframe::Error` isn't `Send + Sync`, so it can't go into `anyhow` directly.

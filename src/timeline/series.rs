@@ -93,6 +93,11 @@ impl Period {
         }
     }
 
+    /// The period lasting `seconds`, if there is one.
+    pub fn from_seconds(seconds: u64) -> Option<Self> {
+        Self::ALL.into_iter().find(|period| period.seconds() == seconds)
+    }
+
     /// Length of the period in milliseconds.
     pub fn millis(self) -> i64 {
         i64::try_from(self.seconds()).unwrap_or(i64::MAX).saturating_mul(1_000)
@@ -331,6 +336,12 @@ mod tests {
             .zip(0_i64..)
             .map(|(&avg, index)| bucket(index.saturating_mul(1_000), 1, 1, Some(avg)))
             .collect()
+    }
+
+    #[test]
+    fn periods_are_found_by_length() {
+        assert!(Period::ALL.into_iter().all(|period| Period::from_seconds(period.seconds()) == Some(period)));
+        assert_eq!(Period::from_seconds(7), None);
     }
 
     #[test]

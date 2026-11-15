@@ -115,6 +115,16 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    /// Period shown.
+    pub fn period(&self) -> Period {
+        self.period
+    }
+
+    /// Shows another period.
+    pub fn set_period(&mut self, period: Period) {
+        self.period = period;
+    }
+
     /// Time range the chart shows, Unix ms.
     pub fn visible_range(&self, now_ms: i64) -> (i64, i64) {
         let end = self.end_ms.unwrap_or(now_ms);
