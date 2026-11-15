@@ -344,56 +344,90 @@ impl PingWatchApp {
         self.tabs_saved = tabs;
     }
 
-    /// Status bar: a problem of the shown tab in red (network down, history off, unknown host) or, normally, its key
-    /// numbers; on the overview, how many targets are traced and how many have problems.
+    /// Status bar. On a target tab: its problem in red (network down, history off, unknown host) or its key
+    /// numbers. On All targets: the same for the selected row; with no row selected, the number of targets and the
+    /// problems — the message if there is one, the count if there are more.
     fn status_bar(&self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             let tab = match self.page {
                 Page::Target(index) => self.tabs.get(index),
-                Page::AllTargets => None,
+                Page::AllTargets => self
+                    .all_targets
+                    .selected()
+                    .and_then(|selected| self.tabs.iter().find(|tab| tab.title() == selected)),
             };
-            let Some(tab) = tab else {
-                let problems = self.tabs.iter().filter(|tab| tab.problem().is_some()).count();
-                status_segment(ui, "Targets", self.tabs.len().to_string());
-                if problems > 0 {
-                    ui.separator();
-                    status_problem(ui, &format!("{problems} with problems"));
-                }
-                return;
-            };
-            if let Some(problem) = tab.problem() {
-                status_problem(ui, &problem);
+            if let Some(tab) = tab {
+                tab_status(ui, tab);
                 return;
             }
-            let overview = tab.overview();
-            let Some(target) = overview.target else {
-                ui.weak(&overview.status);
-                return;
-            };
-            // "9.9.9.9 / 9.9.9.9" says nothing twice: the host only when it isn't the address itself.
-            let target_text = if overview.title == target.to_string() {
-                overview.title.clone()
-            } else {
-                format!("{target} / {}", overview.title)
-            };
-            status_segment(ui, "Target", target_text);
-            let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
-            ui.separator();
-            status_segment(ui, "Avg", format!("{} ms", format_ms(stats.and_then(|stats| stats.average()))));
-            ui.separator();
-            status_segment(
-                ui,
-                "Loss",
-                stats.map_or_else(|| "-".to_owned(), |stats| format!("{:.1} %", stats.loss_percent())),
-            );
-            ui.separator();
-            status_segment(ui, "Hops", overview.hops.map_or_else(|| "-".to_owned(), |hops| hops.to_string()));
-            if tab.is_paused() {
-                ui.separator();
-                ui.colored_label(theme::WARN, "Paused");
+            status_segment(ui, "Targets", self.tabs.len().to_string());
+            let problems: Vec<(String, String)> =
+                self.tabs.iter().filter_map(|tab| tab.problem().map(|problem| (tab.title(), problem))).collect();
+            match problems.as_slice() {
+                [] => {}
+                [(title, problem)] => {
+                    ui.separator();
+                    status_problem(ui, &format!("{title}: {problem}"));
+                }
+                more => {
+                    ui.separator();
+                    status_problem(ui, &format!("Errors {}", more.len()));
+                }
             }
         });
     }
+}
+
+/// Status of one target: its problem in red, or target, average, loss, hops and whether it's paused.
+fn tab_status(ui: &mut Ui, tab: &Tab) {
+    if let Some(problem) = tab.problem() {
+        status_problem(ui, &problem);
+        return;
+    }
+    let overview = tab.overview();
+    let Some(target) = overview.target else {
+        ui.weak(&overview.status);
+        return;
+    };
+    // "9.9.9.9 / 9.9.9.9" says nothing twice: the host only when it isn't the address itself.
+    let target_text = if overview.title == target.to_string() {
+        overview.title.clone()
+    } else {
+        format!("{target} / {}", overview.title)
+    };
+    status_segment(ui, "Target", target_text);
+    let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
+    ui.separator();
+    status_segment(ui, "Avg", format!("{} ms", format_ms(stats.and_then(|stats| stats.average()))));
+    ui.separator();
+    status_segment(ui, "Loss", stats.map_or_else(|| "-".to_owned(), |stats| format!("{:.1} %", stats.loss_percent())));
+    ui.separator();
+    status_segment(ui, "Hops", overview.hops.map_or_else(|| "-".to_owned(), |hops| hops.to_string()));
+    if tab.is_paused() {
+        ui.separator();
+        ui.colored_label(theme::WARN, "Paused");
+    }
+}
+
+/// The open page under the tab bar: a box continuing the open tab down to the status bar (its sides and bottom
+/// are outlined, its top is the tab bar's baseline), inset from the window edges like the tabs.
+fn page<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
+    let frame = Frame::new().fill(theme::WELL).inner_margin(Margin { left: 10, right: 10, top: 0, bottom: 8 });
+    egui::CentralPanel::default()
+        .frame(frame)
+        .show(ui, |ui| {
+            let rect = ui.max_rect();
+            ui.painter().rect_filled(rect, 0.0, theme::CHASSIS);
+            let inner = content(ui);
+            // Drawn after the content, whose toolbar fill would cover them.
+            let stroke = Stroke::new(1.0, theme::RULE);
+            let painter = ui.painter();
+            painter.vline(rect.left() + 0.5, rect.y_range(), stroke);
+            painter.vline(rect.right() - 0.5, rect.y_range(), stroke);
+            painter.hline(rect.x_range(), rect.bottom() - 0.5, stroke);
+            inner
+        })
+        .inner
 }
 
 /// A "label value" pair of the status bar.
@@ -476,12 +510,9 @@ impl eframe::App for PingWatchApp {
         }
         let action = match self.page {
             Page::AllTargets => {
-                let request = egui::CentralPanel::default()
-                    .frame(Frame::new())
-                    .show(ui, |ui| {
-                        self.all_targets.ui(ui, &mut self.tabs, self.targets.as_ref(), self.history_path.as_deref())
-                    })
-                    .inner;
+                let request = page(ui, |ui| {
+                    self.all_targets.ui(ui, &mut self.tabs, self.targets.as_ref(), self.history_path.as_deref())
+                });
                 match request {
                     Some(Request::Open(index)) => self.page = Page::Target(index),
                     Some(Request::Add(host)) => self.tabs.push(Tab::tracing_every(host, self.all_targets.interval())),
@@ -489,12 +520,10 @@ impl eframe::App for PingWatchApp {
                 }
                 None
             }
-            Page::Target(index) => self.tabs.get_mut(index).and_then(|tab| {
-                egui::CentralPanel::default()
-                    .frame(Frame::new())
-                    .show(ui, |ui| tab.ui(ui, context, &mut self.window.table_share))
-                    .inner
-            }),
+            Page::Target(index) => self
+                .tabs
+                .get_mut(index)
+                .and_then(|tab| page(ui, |ui| tab.ui(ui, context, &mut self.window.table_share))),
         };
         if let Some(action) = action {
             self.apply(action);

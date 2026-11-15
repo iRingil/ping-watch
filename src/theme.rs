@@ -123,7 +123,7 @@ pub fn heading_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(HEADING_FAMILY.into()))
 }
 
-/// Frame of a pane: pane fill with a hairline border.
+/// Frame of a pane: pane fill with a hairline border and square corners (the table header band runs edge to edge).
 pub fn pane_frame() -> egui::Frame {
-    egui::Frame::new().fill(PANE).stroke(Stroke::new(1.0, RULE)).corner_radius(CornerRadius::same(3))
+    egui::Frame::new().fill(PANE).stroke(Stroke::new(1.0, RULE))
 }

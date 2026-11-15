@@ -34,8 +34,8 @@ const NUMBER_WIDTH: f32 = 62.0;
 const NUMBER_COLUMNS: usize = 6;
 /// Narrowest the latency column gets.
 const LATENCY_MIN_WIDTH: f32 = 160.0;
-/// Height of one chart.
-const CHART_HEIGHT: f32 = 190.0;
+/// Least height of a chart: the charts share the pane equally, and below this the pane scrolls instead.
+const CHART_MIN_HEIGHT: f32 = 130.0;
 /// Share of the pane area the table gets when charts are first shown.
 const TABLE_SHARE: f32 = 0.4;
 
@@ -73,6 +73,11 @@ impl AllTargets {
             table_share: TABLE_SHARE,
         };
         Self { entry: TargetEntry::new(false), settings: saved.unwrap_or(defaults), saved, selected: None }
+    }
+
+    /// Host of the selected row, if any.
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
     }
 
     /// Interval for targets added on this page.
@@ -240,7 +245,9 @@ impl AllTargets {
                         if response.double_clicked() {
                             toggle = Some(index);
                         } else if response.clicked() {
-                            self.selected = Some(overview.title.clone());
+                            // A click on the selected row clears the selection.
+                            let title = Some(overview.title.clone());
+                            self.selected = if self.selected == title { None } else { title };
                         }
                     });
                 }
@@ -268,11 +275,19 @@ impl AllTargets {
         request
     }
 
-    /// The charts of the ticked targets, one under another in table order, all over the page's period.
+    /// The charts of the ticked targets, one under another in table order, all over the page's period. They share
+    /// the pane's height equally; once that would make them shorter than [`CHART_MIN_HEIGHT`], the pane scrolls.
     fn charts(&mut self, ui: &mut Ui, tabs: &mut [Tab], history_path: Option<&Path>) {
+        let count = tabs.iter().filter(|tab| tab.is_charted()).count();
+        let gap = ui.spacing().item_spacing.y;
+        #[expect(clippy::cast_precision_loss, reason = "a handful of charts")]
+        let height = {
+            let count = count.max(1) as f32;
+            ((ui.available_height() - gap * (count - 1.0)) / count).max(CHART_MIN_HEIGHT)
+        };
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (index, tab) in tabs.iter_mut().enumerate().filter(|(_, tab)| tab.is_charted()) {
-                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), CHART_HEIGHT), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
                 let mut child = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(rect)
