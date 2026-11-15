@@ -1,54 +1,174 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ping Watch</title>
-<meta name="description" content="Ping Watch traces the route to your targets, shows each hop's latency and loss, and keeps the history. For Windows.">
-<link rel="icon" href="icon.png">
-<style>
-  :root {
-    --chassis: #1a1f29;
-    --pane: #212835;
-    --rule: #364054;
-    --ink: #dcd7cb;
-    --muted: #8b93a5;
-    --signal: #6fb7d9;
-    --good: #52b094;
-    --warn: #e2a13e;
-    --bad: #e05f74;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    display: grid;
-    place-items: center;
-    background: var(--chassis);
-    color: var(--ink);
-    font: 17px/1.5 "Segoe UI", system-ui, sans-serif;
-    padding: 24px 16px;
-  }
-  main { max-width: 34rem; }
-  img { width: 112px; height: 112px; display: block; }
-  h1 { font-size: 2.4rem; font-weight: 600; margin: 20px 0 4px; letter-spacing: -0.01em; }
-  p { margin: 0 0 14px; color: var(--muted); }
-  .zones { display: flex; height: 6px; width: 180px; margin: 22px 0; }
-  .zones span { flex: 1; }
-  .zones span:nth-child(1) { background: var(--good); }
-  .zones span:nth-child(2) { background: var(--warn); }
-  .zones span:nth-child(3) { background: var(--bad); }
-  a { color: var(--signal); }
-  a:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
-</style>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ping Watch: see which hop slows your connection down</title>
+    <meta name="description" content="Windows app that traces the route to the sites and servers you choose and shows, hop by hop, where the delays and the lost packets are, with history and alerts.">
+    <link rel="canonical" href="https://iringil.github.io/ping-watch/">
+    <link rel="icon" type="image/png" href="favicon.png">
+    <meta name="theme-color" content="#1a1f29">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Ping Watch">
+    <meta property="og:description" content="Trace the route to your targets and see, hop by hop, where the delays and the lost packets are.">
+    <meta property="og:url" content="https://iringil.github.io/ping-watch/">
+    <meta property="og:image" content="https://raw.githubusercontent.com/iRingil/ping-watch/main/assets/social-preview.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Ping Watch",
+        "description": "Traces the route to the sites and servers you choose and shows, hop by hop, where the delays and the lost packets are, with history and alerts.",
+        "applicationCategory": "UtilitiesApplication",
+        "operatingSystem": "Windows 10, Windows 11",
+        "license": "https://polyformproject.org/licenses/noncommercial/1.0.0/",
+        "url": "https://iringil.github.io/ping-watch/",
+        "downloadUrl": "https://github.com/iRingil/ping-watch/releases/latest",
+        "image": "https://iringil.github.io/ping-watch/main-window.webp",
+        "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+    }
+    </script>
+    <style>
+        /* The app's own dark palette: graphite slate, warm "paper" ink, signal blue, latency zones. */
+        :root {
+            --bg: #1a1f29;
+            --surface: #212835;
+            --border: #364054;
+            --text: #dcd7cb;
+            --muted: #8b93a5;
+            --signal: #6fb7d9;
+            --signal-hover: #8fc9e4;
+            --good: #52b094;
+            --warn: #e2a13e;
+            --bad: #e05f74;
+        }
+        * { box-sizing: border-box; }
+        html { color-scheme: dark; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font: 17px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+        }
+        a { color: var(--signal); }
+        a:focus-visible, .button:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
+        .wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+        header.wrap { padding-top: 56px; padding-bottom: 32px; text-align: center; }
+        .logo { width: 96px; height: 96px; border-radius: 20px; }
+        h1 { margin: 12px 0 8px; font-size: clamp(2rem, 6vw, 3rem); line-height: 1.15; }
+        .tagline { margin: 0 auto; max-width: 640px; font-size: 1.2rem; color: var(--muted); }
+        .tagline strong { color: var(--text); font-weight: 600; }
+        /* The three latency zones, as in the app's legend. */
+        .zones { display: flex; width: 180px; height: 5px; margin: 22px auto 0; }
+        .zones span { flex: 1; }
+        .zones span:nth-child(1) { background: var(--good); }
+        .zones span:nth-child(2) { background: var(--warn); }
+        .zones span:nth-child(3) { background: var(--bad); }
+        .actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin: 28px 0 8px; }
+        .button {
+            display: inline-block;
+            padding: 12px 24px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            color: var(--text);
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .button.primary { background: var(--signal); border-color: var(--signal); color: var(--bg); }
+        .button.primary:hover { background: var(--signal-hover); }
+        .button:not(.primary):hover { border-color: var(--muted); }
+        .small { font-size: 0.9rem; color: var(--muted); }
+        .shot {
+            display: block;
+            width: 100%;
+            height: auto;
+            margin: 24px 0 8px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+        }
+        h2 { margin: 56px 0 16px; font-size: 1.6rem; }
+        .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+        .card { padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+        .card h3 { margin: 0 0 6px; font-size: 1.1rem; }
+        .card p { margin: 0; color: var(--muted); }
+        ol, ul { padding-left: 1.3em; }
+        li { margin: 6px 0; }
+        code { padding: 1px 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; font-size: 0.9em; }
+        footer.wrap { margin-top: 64px; padding-top: 24px; padding-bottom: 40px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.9rem; }
+    </style>
 </head>
 <body>
-<main>
-  <img src="icon.png" alt="">
-  <h1>Ping Watch</h1>
-  <p>Traces the route to your targets, shows each hop's latency and loss, and keeps the history. For Windows.</p>
-  <div class="zones" aria-hidden="true"><span></span><span></span><span></span></div>
-  <p>There is no release to download yet. The source code is on <a href="https://github.com/iRingil/ping-watch">GitHub</a>.</p>
+<header class="wrap">
+    <img class="logo" src="logo.webp" alt="" width="192" height="192">
+    <h1>Ping Watch</h1>
+    <p class="tagline">Trace the route to the sites and servers you choose and see, <strong>hop by hop</strong>,
+        where the delays and the lost packets are.</p>
+    <div class="zones" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div class="actions">
+        <a class="button primary" href="https://github.com/iRingil/ping-watch/releases/latest">Download for Windows</a>
+        <a class="button" href="https://github.com/iRingil/ping-watch">Source on GitHub</a>
+    </div>
+    <p class="small">Free for noncommercial use · Windows 10 and 11, 64-bit · installer or portable</p>
+</header>
+
+<main class="wrap">
+    <img class="shot" src="main-window.webp" width="2182" height="1406"
+         alt="A target tab: the hops to OpenDNS with their latency and loss, the latency bars and the timeline of the last ten minutes">
+
+    <h2>What it does</h2>
+    <p>Enter an address, and Ping Watch probes every router on the way to it, again and again, so a slow or dropping
+        hop stands out at once. It keeps the history, so you can look back at what happened while you were away.</p>
+
+    <div class="features">
+        <div class="card">
+            <h3>Hop by hop</h3>
+            <p>Every router on the route with its latency, jitter and loss, and a bar over green, amber and red
+                zones.</p>
+        </div>
+        <div class="card">
+            <h3>History</h3>
+            <p>Every probe is kept on this PC. The timeline goes from the last minute to the last seven days, with
+                comments pinned to moments.</p>
+        </div>
+        <div class="card">
+            <h3>Several targets</h3>
+            <p>A tab per target, and "All targets" to compare them side by side and chart the ones you tick.</p>
+        </div>
+        <div class="card">
+            <h3>Alerts</h3>
+            <p>Rules for loss and latency; Windows shows a notification when one fires and when the connection is
+                fine again.</p>
+        </div>
+        <div class="card">
+            <h3>Five languages</h3>
+            <p>English, Russian, German, French and Spanish. Light and dark themes, or the one Windows uses.</p>
+        </div>
+        <div class="card">
+            <h3>Private</h3>
+            <p>No accounts, telemetry, ads or analytics. It sends only the pings and the DNS lookups tracing
+                needs.</p>
+        </div>
+    </div>
+
+    <h2>Installation</h2>
+    <ol>
+        <li>Download <code>PingWatch-&lt;version&gt;-setup.exe</code> or the portable zip from
+            <a href="https://github.com/iRingil/ping-watch/releases/latest">the latest release</a>.</li>
+        <li>Run the installer (no administrator rights needed) and choose a normal or a portable installation, or
+            unpack the zip anywhere and run <code>PingWatch.exe</code>.</li>
+        <li>The app is not code-signed yet, so Windows SmartScreen may warn about it: click
+            <strong>More info → Run anyway</strong>.</li>
+    </ol>
+    <p>Details on the files the app keeps and everything it sends are in the
+        <a href="https://github.com/iRingil/ping-watch#readme">README</a>.</p>
 </main>
+
+<footer class="wrap">
+    Ping Watch is released under the
+    <a href="https://github.com/iRingil/ping-watch/blob/main/LICENSE.md">PolyForm Noncommercial License 1.0.0</a>:
+    free to use, change and share for any noncommercial purpose.
+</footer>
 </body>
 </html>

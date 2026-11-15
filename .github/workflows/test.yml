@@ -1,0 +1,75 @@
+name: Test
+
+# The tracer sends real ICMP probes through the Windows API, so the tests run on Windows.
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.total }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # The logic is unit-tested; the window (src/ui, main.rs) is checked by hand, so it is left out of the total.
+      - name: Test with coverage
+        run: cargo llvm-cov --locked --ignore-filename-regex "src[\\/](ui[\\/]|main\.rs)" --json --summary-only --output-path coverage.json
+      - name: Read the total coverage
+        id: coverage
+        shell: pwsh
+        run: |
+          $total = [math]::Floor((Get-Content coverage.json | ConvertFrom-Json).data[0].totals.lines.percent)
+          "total=$total" >> $env:GITHUB_OUTPUT
+          "Line coverage: $total %"
+
+  # The README badge reads coverage.json from the badges branch: one commit, replaced on every push to main.
+  badge:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test.outputs.coverage != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the coverage badge
+        env:
+          TOTAL: ${{ needs.test.outputs.coverage }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$TOTAL" -ge 90 ]; then color=brightgreen
+          elif [ "$TOTAL" -ge 75 ]; then color=green
+          elif [ "$TOTAL" -ge 60 ]; then color=yellow
+          else color=red; fi
+          mkdir badges && cd badges
+          git init -q -b badges
+          printf '{"schemaVersion": 1, "label": "coverage", "message": "%s%%", "color": "%s"}\n' "$TOTAL" "$color" > coverage.json
+          git add coverage.json
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Coverage $TOTAL%"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

@@ -1,0 +1,34 @@
+name: Build
+
+# Builds the installer and the portable zip on demand; the Release workflow publishes the latest successful run.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked
+      - name: Install Inno Setup
+        shell: pwsh
+        run: if (-not (Test-Path "${env:ProgramFiles}\Inno Setup\ISCC.exe") -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      # cargo build --release, the installer and the portable zip.
+      - name: Build the installer and the portable zip
+        shell: cmd
+        run: infrastructure\inno\build.cmd
+      - name: Upload the installer and the portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: PingWatch
+          path: |
+            build/PingWatch-*-setup.exe
+            build/PingWatch-*-portable.zip
+          if-no-files-found: error

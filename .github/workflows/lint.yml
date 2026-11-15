@@ -1,0 +1,51 @@
+name: Lint
+
+# The app uses Windows-only APIs (ICMP, the registry, the tray), so the checks run on Windows.
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustfmt.toml'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustfmt.toml'
+      - '.github/workflows/**'
+  # New advisories appear while the code stays unchanged
+  schedule:
+    - cron: '17 5 * * 1'
+
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # cargo-audit is not a project dependency, so its version is pinned here.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.23.0
+      # Audits every crate in Cargo.lock, transitive ones included - Dependabot only proposes updates
+      - name: cargo audit
+        run: cargo audit
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings

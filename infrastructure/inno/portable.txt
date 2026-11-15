@@ -1,0 +1,2 @@
+This file makes Ping Watch portable: its settings and history are kept in the "userdata" folder next to it.
+Delete this file to keep them in %LOCALAPPDATA%\Ping Watch instead.
