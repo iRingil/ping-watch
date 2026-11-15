@@ -43,8 +43,15 @@ jobs:
           Invoke-WebRequest -Uri $env:INNO_URL -OutFile $installer
           $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup installer hash $hash, expected $env:INNO_SHA256" }
-          Start-Process -Wait -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/ALLUSERS"
-          if (-not (Test-Path "${env:ProgramFiles}\Inno Setup\ISCC.exe")) { throw "ISCC.exe was not installed" }
+          # Into the folder build.cmd looks in first; the setup log is shown if anything goes wrong.
+          $dir = Join-Path $env:ProgramFiles "Inno Setup"
+          $log = Join-Path $env:RUNNER_TEMP "innosetup-install.log"
+          $arguments = "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/ALLUSERS", "/DIR=`"$dir`"", "/LOG=`"$log`""
+          $setup = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList $arguments
+          if ($setup.ExitCode -ne 0 -or -not (Test-Path (Join-Path $dir "ISCC.exe"))) {
+            if (Test-Path $log) { Get-Content $log }
+            throw "Inno Setup was not installed (setup exit code $($setup.ExitCode))"
+          }
       # cargo build --release, the installer and the portable zip.
       - name: Build the installer and the portable zip
         shell: cmd
