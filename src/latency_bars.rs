@@ -63,6 +63,7 @@ pub fn header(ui: &mut Ui, scale_ms: f64) {
     let rect = cell_rect(ui);
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, theme::PANE_HEADER);
+    painter.vline(rect.left() + 0.5, rect.y_range().shrink(4.0), Stroke::new(1.0, theme::RULE));
     let font = theme::heading_font(12.5);
     // The scale ends sit on tabs in their zone's color, so the header doubles as the axis of the bars below.
     let tab = |anchor: Align2, text: String, zone: Color32| {

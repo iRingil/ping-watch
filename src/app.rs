@@ -1,6 +1,7 @@
 //! Main window: a tab bar ("All Targets", one tab per target, "+"), the All Targets overview and the active
 //! target tab. Keyboard shortcuts act on the active tab.
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,7 +11,7 @@ use eframe::egui::{
 use egui_extras::{Column, TableBuilder};
 
 use crate::history::{self, Store};
-use crate::hop_table::format_ms;
+use crate::hop_table::{self, format_ms};
 use crate::names::NameCache;
 use crate::tab::{self, Action, Tab};
 use crate::targets::TargetList;
@@ -25,6 +26,10 @@ const TAB_HEIGHT: f32 = 30.0;
 const TAB_PADDING: f32 = 12.0;
 /// Width of a tab's close mark.
 const TAB_CLOSE_WIDTH: f32 = 16.0;
+/// Width of the overview's text columns (target, IP, status).
+const OVERVIEW_TEXT_WIDTH: f32 = 220.0;
+/// Width of the overview's numeric columns.
+const OVERVIEW_NUMBER_WIDTH: f32 = 70.0;
 /// Height of an overview table row.
 const ROW_HEIGHT: f32 = 22.0;
 
@@ -102,18 +107,34 @@ impl PingWatchApp {
         }
     }
 
-    /// Closes (and stops) tab `index`, showing its neighbour, or the overview after the last tab.
+    /// Closes (and stops) tab `index`; if it was shown, the overview is shown instead.
     fn close(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
         self.tabs.remove(index);
         self.page = match self.page {
-            _ if self.tabs.is_empty() => Page::AllTargets,
+            // Closing the shown tab leads to the overview, not to some neighbouring trace.
+            Page::Target(shown) if shown == index => Page::AllTargets,
             Page::Target(shown) if shown > index => Page::Target(shown.saturating_sub(1)),
-            Page::Target(shown) if shown == index => Page::Target(index.min(self.tabs.len().saturating_sub(1))),
             page => page,
         };
+    }
+
+    /// Keeps one tab per traced address: when a tab starts tracing an address another tab already traces, it is
+    /// closed and the earlier tab is shown instead.
+    fn merge_duplicate_traces(&mut self) {
+        let targets: Vec<Option<IpAddr>> = self.tabs.iter().map(Tab::target).collect();
+        let duplicate = targets.iter().enumerate().find_map(|(later, target)| {
+            let target = (*target)?;
+            let earlier = targets.iter().take(later).position(|other| *other == Some(target))?;
+            Some((earlier, later))
+        });
+        if let Some((earlier, later)) = duplicate {
+            log::info!("{} is already traced in another tab", self.tabs.get(later).map(Tab::title).unwrap_or_default());
+            self.tabs.remove(later);
+            self.page = Page::Target(earlier);
+        }
     }
 
     /// Tab bar: All targets, the target tabs with close buttons, and "+". The open tab is underlined in the
@@ -150,36 +171,42 @@ impl PingWatchApp {
     fn overview(&mut self, ui: &mut Ui) {
         let overviews: Vec<_> = self.tabs.iter().map(Tab::overview).collect();
         let mut open = None;
+        let row_width = OVERVIEW_TEXT_WIDTH * 3.0 + OVERVIEW_NUMBER_WIDTH * 6.0 + ui.spacing().item_spacing.x * 8.0;
         TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
             .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::initial(220.0).at_least(120.0).clip(true))
-            .column(Column::initial(200.0).at_least(100.0).clip(true))
-            .column(Column::initial(160.0).at_least(80.0).clip(true))
-            .columns(Column::exact(70.0), 6)
+            .columns(Column::exact(OVERVIEW_TEXT_WIDTH).clip(true), 3)
+            .columns(Column::exact(OVERVIEW_NUMBER_WIDTH), 6)
             .header(ROW_HEIGHT, |mut header| {
-                for title in ["Target", "IP", "Status", "Hops", "Avg", "Min", "Max", "Cur", "PL%"] {
-                    header.col(|ui| {
-                        ui.painter().rect_filled(ui.max_rect().expand2(Vec2::new(4.0, 0.0)), 0.0, theme::PANE_HEADER);
-                        ui.label(RichText::new(title).color(theme::INK_MUTED));
-                    });
+                // Title and whether the column is numeric (right-aligned).
+                let columns = [
+                    ("Target", false),
+                    ("IP", false),
+                    ("Status", false),
+                    ("Hops", true),
+                    ("Avg", true),
+                    ("Min", true),
+                    ("Max", true),
+                    ("Cur", true),
+                    ("PL%", true),
+                ];
+                for (index, (title, numeric)) in columns.into_iter().enumerate() {
+                    header.col(|ui| hop_table::header_cell(ui, index == 0, numeric, title, row_width));
                 }
             })
             .body(|mut body| {
                 for (index, overview) in overviews.iter().enumerate() {
                     body.row(ROW_HEIGHT, |mut row| {
                         row.col(|ui| {
-                            ui.label(RichText::new(&overview.title).font(theme::heading_font(15.0)));
+                            hop_table::cell(ui, false, RichText::new(&overview.title).font(theme::heading_font(15.0)));
                         });
                         row.col(|ui| {
-                            ui.label(overview.target.map(|ip| ip.to_string()).unwrap_or_default());
+                            hop_table::cell(ui, false, overview.target.map(|ip| ip.to_string()).unwrap_or_default());
                         });
+                        row.col(|ui| hop_table::cell(ui, false, overview.status.as_str()));
                         row.col(|ui| {
-                            ui.label(&overview.status);
-                        });
-                        row.col(|ui| {
-                            ui.label(overview.hops.map(|hops| hops.to_string()).unwrap_or_default());
+                            hop_table::cell(ui, true, overview.hops.map(|hops| hops.to_string()).unwrap_or_default());
                         });
                         let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
                         for value in [
@@ -188,13 +215,10 @@ impl PingWatchApp {
                             stats.and_then(|stats| stats.worst()),
                             stats.and_then(|stats| stats.last()),
                         ] {
-                            row.col(|ui| {
-                                ui.label(format_ms(value));
-                            });
+                            row.col(|ui| hop_table::cell(ui, true, format_ms(value)));
                         }
-                        row.col(|ui| {
-                            ui.label(stats.map(|stats| format!("{:.1}", stats.loss_percent())).unwrap_or_default());
-                        });
+                        let loss = stats.map(|stats| format!("{:.1}", stats.loss_percent())).unwrap_or_default();
+                        row.col(|ui| hop_table::cell(ui, true, loss));
                         if row.response().clicked() {
                             open = Some(index);
                         }
@@ -300,6 +324,8 @@ impl eframe::App for PingWatchApp {
         if let Some(action) = shortcut_action(ui.ctx()) {
             self.apply(action);
         }
+        // Tabs that resolved last frame are checked before anything borrows them for drawing.
+        self.merge_duplicate_traces();
         let bar_frame = Frame::new().fill(theme::WELL).inner_margin(Margin { left: 10, right: 10, top: 6, bottom: 0 });
         egui::Panel::top("tab-bar")
             .frame(bar_frame)

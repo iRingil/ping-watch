@@ -123,3 +123,24 @@ pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str)
     paint(ui, menu_rect.center(), Icon::ArrowDown, if menu.hovered() { theme::INK } else { theme::INK_MUTED });
     Split { main, menu }
 }
+
+/// A menu entry drawn as a row: the whole row lights up under the pointer, the label on the left, the keyboard
+/// shortcut dimmed on the right. Takes the menu's full width.
+pub fn menu_row(ui: &mut Ui, label: &str, shortcut: &str) -> Response {
+    let size = vec2(ui.available_width(), ui.spacing().interact_size.y + 2.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(3), theme::PANE_HEADER);
+    }
+    let font = egui::FontId::proportional(15.0);
+    painter.text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, font.clone(), theme::INK);
+    painter.text(
+        pos2(rect.right() - 8.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        shortcut,
+        font,
+        theme::INK_MUTED,
+    );
+    response
+}

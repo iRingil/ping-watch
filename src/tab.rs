@@ -34,6 +34,8 @@ const INTERVALS: [(Duration, &str); 7] = [
     (Duration::from_secs(30), "30 seconds"),
     (Duration::from_secs(60), "60 seconds"),
 ];
+/// Width of the running trace's menu.
+const TRACE_MENU_WIDTH: f32 = 230.0;
 /// Width of the target field.
 const ENTRY_WIDTH: f32 = 360.0;
 /// Width of the arrow area at the right end of the target field.
@@ -175,6 +177,14 @@ impl Tab {
         tab.host_input.clone_from(&host);
         tab.begin(host);
         tab
+    }
+
+    /// Address being traced, `None` until the trace runs.
+    pub fn target(&self) -> Option<IpAddr> {
+        match &self.state {
+            State::Running(session) => Some(session.target),
+            State::Editing(_) | State::Resolving(_) => None,
+        }
     }
 
     /// Tab title: the host, or a placeholder while none is entered.
@@ -544,15 +554,15 @@ impl Tab {
         if split.main.clicked() {
             session.tracer.set_paused(!paused);
         }
-        Popup::from_toggle_button_response(&split.menu).show(|ui| {
+        // Only actions on this trace; a new target is opened with "+".
+        Popup::from_toggle_button_response(&split.menu).width(TRACE_MENU_WIDTH).show(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             let items = [
                 ("Reset and restart", RESTART_SHORTCUT, Action::Restart),
-                ("New target", NEW_TARGET_SHORTCUT, Action::NewTarget),
                 ("Close and stop", CLOSE_SHORTCUT, Action::Close),
             ];
             for (label, shortcut, item) in items {
-                let shortcut = ui.ctx().format_shortcut(&shortcut);
-                if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
+                if icons::menu_row(ui, label, &ui.ctx().format_shortcut(&shortcut)).clicked() {
                     action = Some(item);
                     ui.close();
                 }

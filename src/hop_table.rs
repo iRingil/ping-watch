@@ -17,6 +17,8 @@ use crate::stats::HopStats;
 const ROW_HEIGHT: f32 = 22.0;
 /// Share of the table width given to the latency bars (pane 2); the Name column takes what is left.
 const LATENCY_SHARE: f32 = 0.3;
+/// Inset of a header title from its cell's edges.
+const HEADER_INSET: f32 = 4.0;
 /// Height of the header row.
 const HEADER_HEIGHT: f32 = 26.0;
 /// Width of the Hop column.
@@ -106,11 +108,8 @@ pub fn show(
         .columns(Column::exact(NUMBER_WIDTH), 6)
         .column(Column::exact(latency_width).clip(true))
         .header(HEADER_HEIGHT, |mut header| {
-            for (title, numeric) in HEADERS {
-                header.col(|ui| {
-                    ui.painter().rect_filled(ui.max_rect().expand2(Vec2::new(4.0, 0.0)), 0.0, theme::PANE_HEADER);
-                    cell(ui, numeric, RichText::new(title).color(theme::INK_MUTED));
-                });
+            for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
+                header.col(|ui| header_cell(ui, index == 0, numeric, title, available));
             }
             header.col(|ui| latency_bars::header(ui, scale_ms));
         })
@@ -169,6 +168,32 @@ fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&s
     });
 }
 
+/// One header cell: the first paints the header band across the whole row of width `row_width` (cells clip
+/// their own painting, so per-cell bands left gaps); every other cell starts with a thin divider. The title keeps a
+/// small inset from the cell edges, right-aligned if `numeric`.
+pub fn header_cell(ui: &mut Ui, first: bool, numeric: bool, title: &str, row_width: f32) {
+    let cell_rect = ui.max_rect();
+    if first {
+        let row = eframe::egui::Rect::from_min_size(cell_rect.min, Vec2::new(row_width, cell_rect.height()));
+        let mut painter = ui.painter().clone();
+        painter.set_clip_rect(row.expand(1.0));
+        painter.rect_filled(row, 0.0, theme::PANE_HEADER);
+    } else {
+        ui.painter()
+            .vline(cell_rect.left() + 0.5, cell_rect.y_range().shrink(4.0), Stroke::new(1.0, theme::RULE));
+    }
+    let text = RichText::new(title).color(theme::INK_MUTED);
+    if numeric {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(HEADER_INSET);
+            ui.label(text);
+        });
+    } else {
+        ui.add_space(HEADER_INSET);
+        ui.label(text);
+    }
+}
+
 /// Paints the summary row's band and the rule above it once, across the whole row of width `row_width` starting
 /// at the first cell (cells clip their painting, so it is done with a painter clipped to the row instead).
 fn summary_band(ui: &mut Ui, row_width: f32) {
@@ -225,11 +250,15 @@ fn latency_color(latency: Duration) -> Color32 {
     }
 }
 
-/// Adds a label, right-aligned if `numeric`.
-fn cell(ui: &mut Ui, numeric: bool, text: impl Into<RichText>) {
+/// Adds a label with the same inset as the header titles, right-aligned if `numeric`.
+pub fn cell(ui: &mut Ui, numeric: bool, text: impl Into<RichText>) {
     if numeric {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text.into()));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(HEADER_INSET);
+            ui.label(text.into());
+        });
     } else {
+        ui.add_space(HEADER_INSET);
         ui.label(text.into());
     }
 }
