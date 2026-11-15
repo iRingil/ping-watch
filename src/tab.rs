@@ -8,8 +8,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{
-    self, Align, Button, CornerRadius, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup,
-    PopupCloseBehavior, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, pos2,
+    self, Align, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup, Rect, RichText, Stroke, Ui, pos2,
 };
 
 use crate::focus::Focus;
@@ -19,10 +18,12 @@ use crate::icons::{self, Icon, Style};
 use crate::latency_bars;
 use crate::names::{NameCache, resolve};
 use crate::route::{Hop, Route};
-use crate::targets::{Family, SavedTarget, TargetList, TraceSettings};
+use crate::target_entry::TargetEntry;
+use crate::targets::{TargetList, TraceSettings};
 use crate::theme;
-use crate::timeline::Timeline;
+use crate::timeline::{Period, Timeline};
 use crate::tracer::{TraceConfig, Tracer};
+use crate::window_state::SavedTab;
 
 /// Probe intervals offered in the toolbar.
 const INTERVALS: [(Duration, &str); 7] = [
@@ -36,16 +37,6 @@ const INTERVALS: [(Duration, &str); 7] = [
 ];
 /// Width of the running trace's menu.
 const TRACE_MENU_WIDTH: f32 = 230.0;
-/// Width of the target field.
-const ENTRY_WIDTH: f32 = 360.0;
-/// Width of the arrow area at the right end of the target field.
-const ARROW_WIDTH: f32 = 24.0;
-/// Width of the target list: wider than the field, so a full IPv6 address and the description fit side by side.
-const TARGET_LIST_WIDTH: f32 = 600.0;
-/// Height of a target list row (also the size of its icon buttons).
-const TARGET_ROW_HEIGHT: f32 = 28.0;
-/// Tallest the target list grows before it scrolls.
-const TARGET_LIST_HEIGHT: f32 = 380.0;
 /// Share of the pane area the hop table gets at first; the timeline gets the rest.
 pub const TABLE_SHARE: f32 = 0.66;
 /// Limits of the table's share when the splitter is dragged, so neither pane disappears.
@@ -53,7 +44,7 @@ const TABLE_SHARE_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.85;
 /// Height of the draggable bar between the panes.
 const SPLITTER_HEIGHT: f32 = 10.0;
 /// Gap between the panes and the window edge.
-const PANE_GAP: f32 = 10.0;
+pub const PANE_GAP: f32 = 10.0;
 /// Restarts the trace with fresh statistics.
 pub const RESTART_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
 /// Opens a tab for a new target.
@@ -129,8 +120,8 @@ pub struct Overview {
 /// One target tab.
 #[derive(Debug)]
 pub struct Tab {
-    /// Contents of the host input of an editing tab.
-    host_input: String,
+    /// Target field of an editing tab.
+    entry: TargetEntry,
     /// Host being resolved or traced.
     host: String,
     /// Life state.
@@ -145,10 +136,8 @@ pub struct Tab {
     interval: Duration,
     /// Period the hop table summarizes.
     focus: Focus,
-    /// Move keyboard focus to the host input on the next frame.
-    focus_input: bool,
-    /// Saved target being edited.
-    editing: Option<Draft>,
+    /// The target's chart on the All targets page, `None` while it isn't charted there.
+    chart: Option<Timeline>,
     /// Settings as last stored for this target; compared each frame to store changes.
     saved_settings: Option<TraceSettings>,
     /// Pause the trace as soon as it starts (a tab restored from a paused one).
@@ -159,7 +148,7 @@ impl Tab {
     /// An empty tab asking for a host.
     pub fn new() -> Self {
         Self {
-            host_input: String::new(),
+            entry: TargetEntry::new(true),
             host: String::new(),
             state: State::Editing(None),
             warning: None,
@@ -167,8 +156,7 @@ impl Tab {
             timeline: Timeline::default(),
             interval: Duration::from_secs(1),
             focus: Focus::default(),
-            focus_input: true,
-            editing: None,
+            chart: None,
             saved_settings: None,
             start_paused: false,
         }
@@ -177,21 +165,30 @@ impl Tab {
     /// A tab that starts tracing `host` right away.
     pub fn tracing(host: String) -> Self {
         let mut tab = Self::new();
-        tab.host_input.clone_from(&host);
+        tab.entry.set_text(&host);
         tab.begin(host);
         tab
     }
 
-    /// A tab restored from the last run: traces `host` again, starting paused if it wasn't `tracing` then.
-    pub fn restored(host: String, tracing: bool) -> Self {
+    /// A tab that starts tracing `host` right away with `interval`, unless the target has remembered settings.
+    pub fn tracing_every(host: String, interval: Duration) -> Self {
         let mut tab = Self::tracing(host);
-        tab.start_paused = !tracing;
+        tab.interval = interval;
         tab
     }
 
-    /// What to remember about this tab: its host and whether it is tracing (resolving counts as about to trace);
-    /// `None` for a tab without a host.
-    pub fn remembered(&self) -> Option<(String, bool)> {
+    /// A tab restored from the last run: traces `saved.host` again, starting paused if it wasn't tracing then,
+    /// with its chart on the All targets page if it had one.
+    pub fn restored(saved: &SavedTab) -> Self {
+        let mut tab = Self::tracing(saved.host.clone());
+        tab.start_paused = !saved.tracing;
+        tab.set_charted(saved.charted);
+        tab
+    }
+
+    /// What to remember about this tab: its host, whether it is tracing (resolving counts as about to trace) and
+    /// charted; `None` for a tab without a host. `shown` is left for the caller.
+    pub fn remembered(&self) -> Option<SavedTab> {
         if self.host.is_empty() {
             return None;
         }
@@ -200,7 +197,51 @@ impl Tab {
             State::Resolving(_) => !self.start_paused,
             State::Editing(_) => false,
         };
-        Some((self.host.clone(), tracing))
+        Some(SavedTab { host: self.host.clone(), tracing, charted: self.is_charted(), shown: false })
+    }
+
+    /// Changes the probe interval, also of the running trace.
+    pub fn set_interval(&mut self, interval: Duration) {
+        self.interval = interval;
+        if let State::Running(session) = &self.state {
+            session.tracer.set_interval(interval);
+        }
+    }
+
+    /// Whether the target is charted on the All targets page.
+    pub fn is_charted(&self) -> bool {
+        self.chart.is_some()
+    }
+
+    /// Shows or hides the target's chart on the All targets page.
+    pub fn set_charted(&mut self, charted: bool) {
+        if charted != self.is_charted() {
+            self.chart = charted.then(Timeline::compact);
+        }
+    }
+
+    /// Draws the target's chart for the All targets page (the target hop over `period`, which the chart's own
+    /// controls may change).
+    pub fn chart(&mut self, ui: &mut Ui, history_path: Option<&Path>, period: &mut Period) {
+        let route = self.route();
+        let title = match &route {
+            Some(route) if self.host != route.target().to_string() => format!("{} ({})", self.host, route.target()),
+            _ => self.title(),
+        };
+        let Some(chart) = &mut self.chart else {
+            return;
+        };
+        chart.set_period(*period);
+        match (&self.state, route.as_ref().and_then(|route| route.hops().last())) {
+            (State::Running(session), Some(hop)) => {
+                chart.show(ui, history_path, session.target_id, hop.ttl, &title, self.interval);
+            }
+            _ => {
+                ui.label(RichText::new(title).font(theme::heading_font(15.0)));
+                ui.weak("The chart appears once the trace runs.");
+            }
+        }
+        *period = chart.period();
     }
 
     /// Stores the running trace's interval, focus and timeline period for its target whenever they changed.
@@ -318,11 +359,17 @@ impl Tab {
 
     /// Current route with the tab's focus, if tracing.
     fn route(&self) -> Option<Route> {
+        let now_ms = history::unix_ms(SystemTime::now());
+        self.route_with(self.focus, self.timeline.visible_range(now_ms))
+    }
+
+    /// Current route summarized over `focus`, where Auto means `visible` (Unix ms), if tracing.
+    fn route_with(&self, focus: Focus, visible: (i64, i64)) -> Option<Route> {
         let State::Running(session) = &self.state else {
             return None;
         };
         let now_ms = history::unix_ms(SystemTime::now());
-        Some(session.tracer.snapshot(self.focus.range(self.timeline.visible_range(now_ms), now_ms)))
+        Some(session.tracer.snapshot(focus.range(visible, now_ms)))
     }
 
     /// Problem to show in the status bar, if any: a failed start, a probing failure (network down) — which matters
@@ -340,9 +387,16 @@ impl Tab {
         matches!(&self.state, State::Running(session) if session.tracer.is_paused())
     }
 
-    /// Final-hop numbers for the All Targets overview.
+    /// Final-hop numbers with the tab's own focus.
     pub fn overview(&self) -> Overview {
-        let route = self.route();
+        let now_ms = history::unix_ms(SystemTime::now());
+        self.overview_with(self.focus, self.timeline.visible_range(now_ms))
+    }
+
+    /// Final-hop numbers summarized over `focus`, where Auto means `visible` (Unix ms) — for the All targets page,
+    /// which has its own focus.
+    pub fn overview_with(&self, focus: Focus, visible: (i64, i64)) -> Overview {
+        let route = self.route_with(focus, visible);
         let target_hop = route
             .as_ref()
             .and_then(|route| route.hops().last().filter(|hop| hop.address == Some(route.target())));
@@ -414,156 +468,30 @@ impl Tab {
             }
             ui.add_space(12.0);
             ui.weak("Interval");
-            let before = self.interval;
-            egui::ComboBox::from_id_salt("interval")
-                .selected_text(interval_label(self.interval))
-                .show_ui(ui, |ui| {
-                    for (interval, label) in INTERVALS {
-                        ui.selectable_value(&mut self.interval, interval, label);
-                    }
-                });
-            if self.interval != before
-                && let State::Running(session) = &self.state
-            {
-                session.tracer.set_interval(self.interval);
+            let mut interval = self.interval;
+            if interval_choice(ui, &mut interval) {
+                self.set_interval(interval);
             }
             ui.weak("Focus");
-            egui::ComboBox::from_id_salt("focus").selected_text(self.focus.label()).show_ui(ui, |ui| {
-                for focus in Focus::ALL {
-                    ui.selectable_value(&mut self.focus, focus, focus.label());
-                }
-            });
+            focus_choice(ui, &mut self.focus);
             ui.with_layout(Layout::right_to_left(Align::Center), latency_bars::legend);
         });
         action
     }
 
-    /// Target field with the list of well-known targets and the Trace button (a spinner while resolving).
+    /// Target field and the Trace button (a spinner while resolving).
     fn target_entry(&mut self, ui: &mut Ui, targets: Option<&TargetList>) {
         let resolving = matches!(self.state, State::Resolving(_));
-        // Room on the right of the field for the arrow that opens the target list.
-        let field = TextEdit::singleline(&mut self.host_input)
-            .hint_text("Enter target name or IP")
-            .desired_width(ENTRY_WIDTH)
-            .margin(Margin { left: 6, right: ARROW_WIDTH as i8, top: 3, bottom: 3 });
-        let input = ui.add_enabled(!resolving, field);
-        if std::mem::take(&mut self.focus_input) {
-            input.request_focus();
-        }
-        let mut start = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-
-        // The arrow is a button set into the field's right end: own face, a divider, a hover state.
-        let arrow_rect =
-            Rect::from_min_max(pos2(input.rect.right() - ARROW_WIDTH, input.rect.top()), input.rect.max).shrink(2.0);
-        let arrow =
-            ui.interact(arrow_rect, input.id.with("target-list"), Sense::click()).on_hover_text("Saved targets");
-        let widgets = &ui.visuals().widgets;
-        let arrow_fill = if arrow.hovered() { widgets.hovered.weak_bg_fill } else { widgets.inactive.weak_bg_fill };
-        ui.painter().rect_filled(arrow_rect, CornerRadius::same(2), arrow_fill);
-        icons::paint(
-            ui,
-            arrow_rect.center(),
-            Icon::ArrowDown,
-            if arrow.hovered() { theme::INK } else { theme::INK_MUTED },
-        );
-        if !resolving && let Some(targets) = targets {
-            Popup::from_toggle_button_response(&arrow)
-                .anchor(input.rect)
-                .width(input.rect.width().max(TARGET_LIST_WIDTH))
-                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| {
-                    // Picking a target traces it right away.
-                    if let Some(address) = self.target_list(ui, targets) {
-                        self.host_input = address;
-                        start = true;
-                        ui.close();
-                    }
-                });
-        }
-        self.edit_dialog(ui.ctx(), targets);
-
+        let mut start = self.entry.show(ui, targets, !resolving);
         if resolving {
             ui.spinner();
             ui.weak(format!("Resolving {}…", self.host));
         } else if icons::button(ui, Icon::Play, Style::Primary, "Trace (Enter)").clicked() {
             start = true;
         }
-        if start && !resolving {
-            let host = self.host_input.clone();
+        if start {
+            let host = self.entry.text().to_owned();
             self.begin(host);
-        }
-    }
-
-    /// Rows of the saved target list: address on the left, name and IP version on the right, Edit and Delete.
-    /// Returns the address picked.
-    fn target_list(&mut self, ui: &mut Ui, targets: &TargetList) -> Option<String> {
-        let all = match targets.all() {
-            Ok(all) => all,
-            Err(error) => {
-                ui.colored_label(theme::BAD, format!("Cannot read the target list: {error}"));
-                return None;
-            }
-        };
-        if all.is_empty() {
-            ui.weak("No saved targets. Every target you trace is added here.");
-            return None;
-        }
-        let mut picked = None;
-        ScrollArea::vertical().max_height(TARGET_LIST_HEIGHT).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for target in all {
-                match target_row(ui, &target) {
-                    RowAction::Pick => picked = Some(target.address.clone()),
-                    RowAction::Edit => self.editing = Some(Draft::of(&target)),
-                    RowAction::Delete => {
-                        if let Err(error) = targets.delete(target.id) {
-                            log::error!("cannot delete {}: {error}", target.address);
-                        }
-                    }
-                    RowAction::None => {}
-                }
-            }
-        });
-        picked
-    }
-
-    /// Dialog editing a saved target's address and name.
-    fn edit_dialog(&mut self, ctx: &egui::Context, targets: Option<&TargetList>) {
-        let (Some(draft), Some(targets)) = (&mut self.editing, targets) else {
-            return;
-        };
-        let mut close = false;
-        egui::Modal::new(egui::Id::unique("edit-target")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.label(RichText::new("Edit target").font(theme::heading_font(17.0)));
-            ui.add_space(6.0);
-            egui::Grid::new("edit-target-fields").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                ui.weak("Address");
-                ui.add(TextEdit::singleline(&mut draft.address).desired_width(f32::INFINITY));
-                ui.end_row();
-                ui.weak("Name");
-                ui.add(TextEdit::singleline(&mut draft.name).hint_text("optional").desired_width(f32::INFINITY));
-                ui.end_row();
-            });
-            if let Some(error) = &draft.error {
-                ui.colored_label(theme::BAD, error);
-            }
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let can_save = !draft.address.trim().is_empty();
-                if ui.add_enabled(can_save, primary_button("Save")).clicked() {
-                    match targets.update(draft.id, &draft.address, &draft.name) {
-                        Ok(()) => close = true,
-                        Err(error) => draft.error = Some(format!("Not saved: {error}")),
-                    }
-                }
-                if ui.button("Cancel").clicked() {
-                    close = true;
-                }
-            });
-        });
-        if close {
-            self.editing = None;
         }
     }
 
@@ -605,7 +533,7 @@ impl Tab {
 
 /// Splits the pane area into the hop table (top, `table_share` of the height, kept by the app for all tabs), the splitter and the timeline
 /// (the rest). Computed from the window size every frame, so the panes are in place from the first frame.
-fn split(area: Rect, table_share: f32) -> (Rect, Rect, Rect) {
+pub fn split(area: Rect, table_share: f32) -> (Rect, Rect, Rect) {
     let usable = area.height() - SPLITTER_HEIGHT - PANE_GAP;
     let splitter_top = area.top() + usable * table_share;
     let timeline_top = splitter_top + SPLITTER_HEIGHT;
@@ -616,7 +544,7 @@ fn split(area: Rect, table_share: f32) -> (Rect, Rect, Rect) {
 }
 
 /// The bar between the panes: dragging it moves the border; it lights up under the pointer.
-fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
+pub fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
     let response = ui
         .interact(rect, ui.scope_id().with("pane-splitter"), egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::ResizeVertical);
@@ -635,7 +563,7 @@ fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
 
 /// Draws a framed pane exactly into `rect`: the content gets its own child ui clipped to the rect, so whatever it
 /// draws can never move or resize the pane.
-fn pane(ui: &mut Ui, rect: Rect, margin: Margin, content: impl FnOnce(&mut Ui)) {
+pub fn pane(ui: &mut Ui, rect: Rect, margin: Margin, content: impl FnOnce(&mut Ui)) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
     child.set_clip_rect(rect.intersect(ui.clip_rect()));
     theme::pane_frame().inner_margin(margin).show(&mut child, |ui| {
@@ -644,99 +572,31 @@ fn pane(ui: &mut Ui, rect: Rect, margin: Margin, content: impl FnOnce(&mut Ui)) 
     });
 }
 
-/// A saved target being edited.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Draft {
-    /// Row id in the list.
-    id: i64,
-    /// Address as edited.
-    address: String,
-    /// Name as edited.
-    name: String,
-    /// Why the last save failed.
-    error: Option<String>,
-}
-
-impl Draft {
-    /// Draft of `target` as it is now.
-    fn of(target: &SavedTarget) -> Self {
-        Self { id: target.id, address: target.address.clone(), name: target.name.clone(), error: None }
-    }
-}
-
-/// What a click on a target list row asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RowAction {
-    /// Nothing clicked.
-    None,
-    /// Put the address into the field.
-    Pick,
-    /// Open the edit dialog.
-    Edit,
-    /// Remove the entry.
-    Delete,
-}
-
-/// One row of the target list: the whole row highlights under the pointer and picks the address when clicked;
-/// the pencil and cross icons on the right sit on top of it, so clicking them edits or deletes instead.
-fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
-    let size = egui::vec2(ui.available_width(), TARGET_ROW_HEIGHT);
-    let (rect, row) = ui.allocate_exact_size(size, Sense::click());
-    let icon = egui::Vec2::splat(TARGET_ROW_HEIGHT);
-    let delete_rect = Rect::from_min_size(pos2(rect.right() - icon.x, rect.top()), icon);
-    let edit_rect = delete_rect.translate(egui::vec2(-icon.x, 0.0));
-    let edit = ui.interact(edit_rect, row.id.with("edit"), Sense::click()).on_hover_text("Edit");
-    let delete = ui.interact(delete_rect, row.id.with("delete"), Sense::click()).on_hover_text("Delete");
-
-    let painter = ui.painter();
-    if row.hovered() || edit.hovered() || delete.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(3), theme::PANE_HEADER);
-    }
-    let font = egui::FontId::proportional(15.0);
-    let text_y = rect.center().y;
-    painter.text(pos2(rect.left() + 8.0, text_y), egui::Align2::LEFT_CENTER, &target.address, font.clone(), theme::INK);
-    let description_right = edit_rect.left() - 8.0;
-    painter.text(
-        pos2(description_right, text_y),
-        egui::Align2::RIGHT_CENTER,
-        target_description(target),
-        font,
-        theme::INK_MUTED,
-    );
-    icons::paint(ui, edit_rect.center(), Icon::Pencil, if edit.hovered() { theme::SIGNAL } else { theme::INK_MUTED });
-    icons::paint(ui, delete_rect.center(), Icon::Cross, if delete.hovered() { theme::BAD } else { theme::INK_MUTED });
-
-    if delete.clicked() {
-        RowAction::Delete
-    } else if edit.clicked() {
-        RowAction::Edit
-    } else if row.clicked() {
-        RowAction::Pick
-    } else {
-        RowAction::None
-    }
-}
-
-/// Right-hand text of a target list row: its name and IP version, whichever are known ("Office router, ipv4").
-fn target_description(target: &SavedTarget) -> String {
-    let family = target.family.map(Family::label);
-    [Some(target.name.as_str()).filter(|name| !name.is_empty()), family]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// The main button of a group: signal-colored, so it reads as "the thing to press".
-fn primary_button(text: &str) -> Button<'_> {
-    Button::new(RichText::new(text).color(theme::CHASSIS)).fill(theme::SIGNAL)
-}
-
 /// "Focus: from – to" of a route, shown under its latency bars.
 fn focus_label(route: &Route) -> Option<String> {
     let from_ms = route.focus_start_ms()?;
     let to_ms = route.focus_end_ms().unwrap_or_else(|| history::unix_ms(SystemTime::now()));
     Some(format!("Focus {} – {}", clock(from_ms), clock(to_ms)))
+}
+
+/// Combo box choosing a probe interval; returns whether it changed.
+pub fn interval_choice(ui: &mut Ui, interval: &mut Duration) -> bool {
+    let before = *interval;
+    egui::ComboBox::from_id_salt("interval").selected_text(interval_label(*interval)).show_ui(ui, |ui| {
+        for (choice, label) in INTERVALS {
+            ui.selectable_value(interval, choice, label);
+        }
+    });
+    *interval != before
+}
+
+/// Combo box choosing the focus.
+pub fn focus_choice(ui: &mut Ui, focus: &mut Focus) {
+    egui::ComboBox::from_id_salt("focus").selected_text(focus.label()).show_ui(ui, |ui| {
+        for choice in Focus::ALL {
+            ui.selectable_value(focus, choice, choice.label());
+        }
+    });
 }
 
 /// Menu label of a probe interval.
@@ -748,7 +608,7 @@ fn interval_label(interval: Duration) -> String {
 }
 
 /// Local wall-clock time `HH:MM:SS` of Unix milliseconds.
-fn clock(ms: i64) -> String {
+pub fn clock(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|time| time.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
         .unwrap_or_default()

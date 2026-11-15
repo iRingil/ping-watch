@@ -1,14 +1,19 @@
 //! The window's state kept between runs: position and size (of the normal, not maximized window), whether it was
 //! maximized or minimized, the split between the hop table and the timeline, and the open tabs (their targets, which
-//! one was shown, whether each was tracing). Stored in the history database.
+//! one was shown, whether each was tracing or charted on the All targets page), and the All targets page's own
+//! settings. Stored in the history database.
 
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::focus::Focus;
 use crate::history::HistoryError;
+use crate::targets::TraceSettings;
+use crate::timeline::Period;
 
-/// Schema: window geometry as key/value rows, and the open tabs in order.
+/// Schema: window geometry as key/value rows, the open tabs in order, and the All targets settings (one row).
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS window_state (
         key   TEXT PRIMARY KEY,
@@ -18,7 +23,15 @@ const SCHEMA: &str = "
         position INTEGER PRIMARY KEY,
         host     TEXT NOT NULL,
         tracing  INTEGER NOT NULL, -- 1 tracing, 0 paused or not started
+        charted  INTEGER NOT NULL, -- 1 if charted on the All targets page
         shown    INTEGER NOT NULL  -- 1 for the tab that was shown
+    );
+    CREATE TABLE IF NOT EXISTS all_targets (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        interval_ms INTEGER NOT NULL,
+        focus       TEXT    NOT NULL,
+        period_s    INTEGER NOT NULL,
+        table_share REAL    NOT NULL
     );
 ";
 /// Stored keys, in the order of [`WindowState::values`].
@@ -77,8 +90,19 @@ pub struct SavedTab {
     pub host: String,
     /// Whether it was tracing (not paused).
     pub tracing: bool,
+    /// Whether it was charted on the All targets page.
+    pub charted: bool,
     /// Whether it was the shown tab.
     pub shown: bool,
+}
+
+/// Settings of the All targets page, kept apart from those of the target tabs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AllTargetsSettings {
+    /// Interval (set on every trace when changed), focus of the table and period of the charts.
+    pub trace: TraceSettings,
+    /// Share of the pane area taken by the table while charts are shown.
+    pub table_share: f32,
 }
 
 /// Connection to the stored window state.
@@ -150,9 +174,15 @@ impl WindowStore {
     ///
     /// [`HistoryError::Db`] if SQLite fails.
     pub fn load_tabs(&self) -> Result<Vec<SavedTab>, HistoryError> {
-        let mut statement = self.connection.prepare("SELECT host, tracing, shown FROM open_tabs ORDER BY position")?;
+        let mut statement =
+            self.connection.prepare("SELECT host, tracing, charted, shown FROM open_tabs ORDER BY position")?;
         let rows = statement.query_map([], |row| {
-            Ok(SavedTab { host: row.get(0)?, tracing: row.get::<_, i64>(1)? != 0, shown: row.get::<_, i64>(2)? != 0 })
+            Ok(SavedTab {
+                host: row.get(0)?,
+                tracing: row.get::<_, i64>(1)? != 0,
+                charted: row.get::<_, i64>(2)? != 0,
+                shown: row.get::<_, i64>(3)? != 0,
+            })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -167,11 +197,54 @@ impl WindowStore {
         transaction.execute("DELETE FROM open_tabs", [])?;
         for (position, tab) in (0_i64..).zip(tabs) {
             transaction.execute(
-                "INSERT INTO open_tabs (position, host, tracing, shown) VALUES (?1, ?2, ?3, ?4)",
-                params![position, tab.host, tab.tracing, tab.shown],
+                "INSERT INTO open_tabs (position, host, tracing, charted, shown) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![position, tab.host, tab.tracing, tab.charted, tab.shown],
             )?;
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// The All targets settings, `None` before the first save or if a stored value is unknown.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn load_all_targets(&self) -> Result<Option<AllTargetsSettings>, HistoryError> {
+        let row: Option<(i64, String, i64, f64)> = self
+            .connection
+            .query_row("SELECT interval_ms, focus, period_s, table_share FROM all_targets WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .optional()?;
+        let Some((interval_ms, focus, period_s, table_share)) = row else {
+            return Ok(None);
+        };
+        let interval = u64::try_from(interval_ms).ok().map(Duration::from_millis);
+        let focus = Focus::from_key(&focus);
+        let period = u64::try_from(period_s).ok().and_then(Period::from_seconds);
+        #[expect(clippy::cast_possible_truncation, reason = "stored from an f32")]
+        let table_share = table_share as f32;
+        Ok(interval.zip(focus).zip(period).map(|((interval, focus), period)| AllTargetsSettings {
+            trace: TraceSettings { interval, focus, period },
+            table_share,
+        }))
+    }
+
+    /// Stores the All targets settings.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn save_all_targets(&self, settings: AllTargetsSettings) -> Result<(), HistoryError> {
+        let interval_ms = i64::try_from(settings.trace.interval.as_millis()).unwrap_or(i64::MAX);
+        let period_s = i64::try_from(settings.trace.period.seconds()).unwrap_or(i64::MAX);
+        self.connection.execute(
+            "INSERT INTO all_targets (id, interval_ms, focus, period_s, table_share) VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT (id) DO UPDATE SET interval_ms = excluded.interval_ms, focus = excluded.focus,
+                 period_s = excluded.period_s, table_share = excluded.table_share",
+            params![interval_ms, settings.trace.focus.key(), period_s, f64::from(settings.table_share)],
+        )?;
         Ok(())
     }
 
@@ -231,13 +304,31 @@ mod tests {
         let mut store = WindowStore::open_in_memory().expect("store opens");
         assert_eq!(store.load_tabs().ok(), Some(Vec::new()));
         let tabs = vec![
-            SavedTab { host: "9.9.9.9".to_owned(), tracing: true, shown: false },
-            SavedTab { host: "github.com".to_owned(), tracing: false, shown: true },
+            SavedTab { host: "9.9.9.9".to_owned(), tracing: true, charted: true, shown: false },
+            SavedTab { host: "github.com".to_owned(), tracing: false, charted: false, shown: true },
         ];
         store.save_tabs(&tabs).expect("saved");
         assert_eq!(store.load_tabs().ok(), Some(tabs.clone()));
         store.save_tabs(&tabs[..1]).expect("saved fewer");
         assert_eq!(store.load_tabs().map(|loaded| loaded.len()).ok(), Some(1));
+    }
+
+    #[test]
+    fn all_targets_settings_round_trip() {
+        let store = WindowStore::open_in_memory().expect("store opens");
+        assert_eq!(store.load_all_targets().ok(), Some(None));
+        let settings = AllTargetsSettings {
+            trace: TraceSettings {
+                interval: Duration::from_millis(500),
+                focus: Focus::Minutes5,
+                period: Period::Minutes10,
+            },
+            table_share: 0.5,
+        };
+        store.save_all_targets(settings).expect("saved");
+        let changed = AllTargetsSettings { table_share: 0.7, ..settings };
+        store.save_all_targets(changed).expect("saved again");
+        assert_eq!(store.load_all_targets().ok(), Some(Some(changed)));
     }
 
     #[test]

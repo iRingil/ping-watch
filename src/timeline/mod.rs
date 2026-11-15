@@ -112,9 +112,16 @@ pub struct Timeline {
     menu_at_ms: Option<i64>,
     /// Comment being written.
     draft: Option<Draft>,
+    /// A small chart (All targets page): latency only, no jitter strip, no slider.
+    compact: bool,
 }
 
 impl Timeline {
+    /// A small chart for the All targets page: latency only, no jitter strip, no slider.
+    pub fn compact() -> Self {
+        Self { compact: true, ..Self::default() }
+    }
+
     /// Period shown.
     pub fn period(&self) -> Period {
         self.period
@@ -160,7 +167,7 @@ impl Timeline {
             });
             return;
         };
-        let (response, pointer) = draw_charts(ui, shown, self.period);
+        let (response, pointer) = draw_charts(ui, shown, self.period, self.compact);
         let oldest_ms = shown.oldest_ms;
         let bucket_ms = shown.request.window.bucket_ms;
         if response.secondary_clicked() {
@@ -169,7 +176,9 @@ impl Timeline {
         if let Some(choice) = self.menu(&response) {
             self.choose(choice, target_id);
         }
-        self.slider(ui, oldest_ms, bucket_ms, now_ms);
+        if !self.compact {
+            self.slider(ui, oldest_ms, bucket_ms, now_ms);
+        }
         self.comment_dialog(ui.ctx());
     }
 
@@ -329,7 +338,8 @@ impl Timeline {
 
 /// Draws the jitter strip and the latency chart; returns the chart's response and the time/latency under the
 /// pointer.
-fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<PlotPoint>) {
+/// `compact` leaves out the jitter strip and the slider's row.
+fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Response, Option<PlotPoint>) {
     let window = shown.request.window;
     let (from_s, to_s, bucket_s) = (seconds(window.from_ms), seconds(window.to_ms), seconds(window.bucket_ms));
     let utc_offset_s = i64::from(chrono::Local::now().offset().local_minus_utc());
@@ -363,26 +373,27 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
     };
 
     let jitter = &shown.series.jitter;
-    base("timeline-jitter", jitter.scale_ms, JITTER_HEIGHT)
-        .show_x(false)
-        .show_axes([false, true])
-        .show(ui, |plot| {
-            plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
-            plot.add(
-                Text::new("", PlotPoint::new(from_s, jitter.scale_ms), "Jitter (ms)")
-                    .anchor(Align2::LEFT_TOP)
-                    .color(JITTER_COLOR),
-            );
-            add_trace(plot, "Jitter", jitter, JITTER_COLOR);
-        });
-
-    // Room between the plots, so the jitter strip's "0" and the latency scale's top label don't overlap.
-    ui.add_space(PLOT_GAP);
+    if !compact {
+        base("timeline-jitter", jitter.scale_ms, JITTER_HEIGHT).show_x(false).show_axes([false, true]).show(
+            ui,
+            |plot| {
+                plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
+                plot.add(
+                    Text::new("", PlotPoint::new(from_s, jitter.scale_ms), "Jitter (ms)")
+                        .anchor(Align2::LEFT_TOP)
+                        .color(JITTER_COLOR),
+                );
+                add_trace(plot, "Jitter", jitter, JITTER_COLOR);
+            },
+        );
+        // Room between the plots, so the jitter strip's "0" and the latency scale's top label don't overlap.
+        ui.add_space(PLOT_GAP);
+    }
     let latency = &shown.series.latency;
     let scale = latency.scale_ms;
     // Leave exactly the slider's row: taking more than the panel has would grow the panel every frame.
-    let slider_row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
-    let height = (ui.available_height() - slider_row).max(80.0);
+    let slider_row = if compact { 0.0 } else { ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 };
+    let height = (ui.available_height() - slider_row).max(60.0);
     let response = base("timeline", scale, height)
         .x_axis_formatter(move |mark, _| clock(millis_of(mark.value), period.axis_format(mark.step_size)))
         .show(ui, |plot| {

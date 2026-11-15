@@ -1,17 +1,15 @@
-//! Main window: a tab bar ("All Targets", one tab per target, "+"), the All Targets overview and the active
-//! target tab. Keyboard shortcuts act on the active tab.
+//! Main window: a tab bar ("All targets", one tab per target, "+"), the All targets page or the active target tab,
+//! and the status bar. Keyboard shortcuts act on the active tab.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{
-    self, Align, Button, CornerRadius, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
-};
-use egui_extras::{Column, TableBuilder};
+use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
+use crate::all_targets::{AllTargets, Request};
 use crate::history::{self, Store};
-use crate::hop_table::{self, format_ms};
+use crate::hop_table::format_ms;
 use crate::names::NameCache;
 use crate::tab::{self, Action, Tab};
 use crate::targets::TargetList;
@@ -29,12 +27,6 @@ const TAB_HEIGHT: f32 = 30.0;
 const TAB_PADDING: f32 = 12.0;
 /// Width of a tab's close mark.
 const TAB_CLOSE_WIDTH: f32 = 16.0;
-/// Width of the overview's text columns (target, IP, status).
-const OVERVIEW_TEXT_WIDTH: f32 = 220.0;
-/// Width of the overview's numeric columns.
-const OVERVIEW_NUMBER_WIDTH: f32 = 70.0;
-/// Height of an overview table row.
-const ROW_HEIGHT: f32 = 22.0;
 
 /// Which page the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +66,8 @@ pub struct PingWatchApp {
     start_minimized: bool,
     /// The open tabs as last stored.
     tabs_saved: Vec<SavedTab>,
+    /// The All targets page.
+    all_targets: AllTargets,
 }
 
 impl PingWatchApp {
@@ -100,7 +94,7 @@ impl PingWatchApp {
             Vec::new()
         };
         let mut tabs: Vec<Tab> = hosts.into_iter().map(Tab::tracing).collect();
-        tabs.extend(saved_tabs.iter().map(|saved| Tab::restored(saved.host.clone(), saved.tracing)));
+        tabs.extend(saved_tabs.iter().map(Tab::restored));
         let page = match saved_tabs.iter().position(|saved| saved.shown) {
             Some(index) => Page::Target(index),
             None if !saved_tabs.is_empty() => Page::AllTargets,
@@ -123,7 +117,14 @@ impl PingWatchApp {
             minimized: false,
             table_share: tab::TABLE_SHARE,
         });
+        let all_targets = AllTargets::new(
+            window_store
+                .as_ref()
+                .and_then(|store| store.load_all_targets().inspect_err(|error| log::warn!("{error}")).ok())
+                .flatten(),
+        );
         Self {
+            all_targets,
             tabs,
             page,
             tabs_saved: saved_tabs,
@@ -194,7 +195,12 @@ impl PingWatchApp {
         if let Some((earlier, later)) = duplicate {
             log::info!("{} is already traced in another tab", self.tabs.get(later).map(Tab::title).unwrap_or_default());
             self.tabs.remove(later);
-            self.page = Page::Target(earlier);
+            // A target added on the All targets page leaves that page shown.
+            self.page = match self.page {
+                Page::Target(shown) if shown == later => Page::Target(earlier),
+                Page::Target(shown) if shown > later => Page::Target(shown.saturating_sub(1)),
+                page => page,
+            };
         }
     }
 
@@ -225,80 +231,6 @@ impl PingWatchApp {
         });
         if let Some(index) = close {
             self.close(index);
-        }
-    }
-
-    /// All Targets overview: one row per target with its final-hop numbers; a click opens the tab.
-    fn overview(&mut self, ui: &mut Ui) {
-        let overviews: Vec<_> = self.tabs.iter().map(Tab::overview).collect();
-        let mut open = None;
-        let row_width = OVERVIEW_TEXT_WIDTH * 3.0 + OVERVIEW_NUMBER_WIDTH * 6.0 + ui.spacing().item_spacing.x * 8.0;
-        TableBuilder::new(ui)
-            .striped(true)
-            .sense(Sense::click())
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .columns(Column::exact(OVERVIEW_TEXT_WIDTH).clip(true), 3)
-            .columns(Column::exact(OVERVIEW_NUMBER_WIDTH), 6)
-            .header(ROW_HEIGHT, |mut header| {
-                // Title and whether the column is numeric (right-aligned).
-                let columns = [
-                    ("Target", false),
-                    ("IP", false),
-                    ("Status", false),
-                    ("Hops", true),
-                    ("Avg", true),
-                    ("Min", true),
-                    ("Max", true),
-                    ("Cur", true),
-                    ("PL%", true),
-                ];
-                for (index, (title, numeric)) in columns.into_iter().enumerate() {
-                    header.col(|ui| hop_table::header_cell(ui, index == 0, numeric, title, row_width));
-                }
-            })
-            .body(|mut body| {
-                for (index, overview) in overviews.iter().enumerate() {
-                    body.row(ROW_HEIGHT, |mut row| {
-                        row.col(|ui| {
-                            hop_table::cell(ui, false, RichText::new(&overview.title).font(theme::heading_font(15.0)));
-                        });
-                        row.col(|ui| {
-                            hop_table::cell(ui, false, overview.target.map(|ip| ip.to_string()).unwrap_or_default());
-                        });
-                        row.col(|ui| hop_table::cell(ui, false, overview.status.as_str()));
-                        row.col(|ui| {
-                            hop_table::cell(ui, true, overview.hops.map(|hops| hops.to_string()).unwrap_or_default());
-                        });
-                        let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
-                        for value in [
-                            stats.and_then(|stats| stats.average()),
-                            stats.and_then(|stats| stats.best()),
-                            stats.and_then(|stats| stats.worst()),
-                            stats.and_then(|stats| stats.last()),
-                        ] {
-                            row.col(|ui| hop_table::cell(ui, true, format_ms(value)));
-                        }
-                        let loss = stats.map(|stats| format!("{:.1}", stats.loss_percent())).unwrap_or_default();
-                        row.col(|ui| hop_table::cell(ui, true, loss));
-                        if row.response().clicked() {
-                            open = Some(index);
-                        }
-                    });
-                }
-            });
-        if let Some(index) = open {
-            self.page = Page::Target(index);
-        }
-        if self.tabs.is_empty() {
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.weak("No targets yet.");
-                let add = Button::new(RichText::new("Add target").color(theme::CHASSIS)).fill(theme::SIGNAL);
-                if ui.add(add).on_hover_text("Ctrl+N").clicked() {
-                    self.apply(Action::NewTarget);
-                }
-            });
         }
     }
 }
@@ -399,9 +331,7 @@ impl PingWatchApp {
             .tabs
             .iter()
             .enumerate()
-            .filter_map(|(index, tab)| {
-                tab.remembered().map(|(host, tracing)| SavedTab { host, tracing, shown: shown == Some(index) })
-            })
+            .filter_map(|(index, tab)| tab.remembered().map(|saved| SavedTab { shown: shown == Some(index), ..saved }))
             .collect();
         if tabs == self.tabs_saved {
             return;
@@ -499,6 +429,7 @@ impl eframe::App for PingWatchApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.track_window(ctx);
         self.track_tabs();
+        self.all_targets.save(self.window_store.as_ref());
         let Some(tray) = &self.tray else {
             return;
         };
@@ -545,13 +476,17 @@ impl eframe::App for PingWatchApp {
         }
         let action = match self.page {
             Page::AllTargets => {
-                let frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::same(10));
-                egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-                    theme::pane_frame().inner_margin(Margin::same(1)).show(ui, |ui| {
-                        self.overview(ui);
-                        ui.take_available_space();
-                    });
-                });
+                let request = egui::CentralPanel::default()
+                    .frame(Frame::new())
+                    .show(ui, |ui| {
+                        self.all_targets.ui(ui, &mut self.tabs, self.targets.as_ref(), self.history_path.as_deref())
+                    })
+                    .inner;
+                match request {
+                    Some(Request::Open(index)) => self.page = Page::Target(index),
+                    Some(Request::Add(host)) => self.tabs.push(Tab::tracing_every(host, self.all_targets.interval())),
+                    None => {}
+                }
                 None
             }
             Page::Target(index) => self.tabs.get_mut(index).and_then(|tab| {
