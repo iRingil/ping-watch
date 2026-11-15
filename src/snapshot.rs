@@ -17,11 +17,11 @@ const WARN_MS: f64 = 200.0;
 /// Size of a latency bar in the table.
 const BAR: (f64, f64) = (220.0, 14.0);
 /// Size of a chart, and its left and bottom margins for the axis labels.
-const CHART: (f64, f64, f64, f64) = (1000.0, 300.0, 44.0, 22.0);
+const CHART: (f64, f64, f64, f64) = (1000.0, 160.0, 44.0, 20.0);
 /// Height of a chart's jitter strip.
-const JITTER_HEIGHT: f64 = 50.0;
+const JITTER_HEIGHT: f64 = 26.0;
 /// Space between the jitter strip and the latency plot.
-const PLOT_GAP: f64 = 10.0;
+const PLOT_GAP: f64 = 6.0;
 
 /// One hop of the table.
 #[derive(Debug, Clone, PartialEq)]
@@ -169,7 +169,7 @@ fn write_head(page: &mut String, title: &str) {
 <title>{title} · {APP_NAME}</title><style>\
 :root{{color-scheme:light}}\
 body{{margin:24px;background:{bg};color:{ink};font:14px/1.45 \"Segoe UI\",system-ui,sans-serif}}\
-h1{{margin:0;font-size:22px;font-weight:600}}h2{{margin:28px 0 8px;font-size:16px;font-weight:600}}\
+h1{{margin:0;font-size:22px;font-weight:600}}h2{{margin:28px 0 8px;font-size:16px;font-weight:600}}h3{{margin:16px 0 4px;font-size:14px;font-weight:600}}\
 .meta,.muted{{color:{muted}}}.meta{{margin:2px 0 0}}\
 table{{border-collapse:collapse;width:100%;background:{pane};border:1px solid {rule}}}\
 th{{background:{header};color:{muted};font-weight:500;text-align:left;padding:5px 8px;border-bottom:1px solid {rule}}}\
@@ -215,7 +215,7 @@ fn write_target(page: &mut String, report: &TargetReport) {
     }
     page.push_str("</table>");
     if let Some(chart) = &report.chart {
-        let _ = write!(page, "<h2>Latency and loss of the target</h2>{}", chart_svg(chart));
+        let _ = write!(page, "<h3>Latency and loss of the target</h3>{}", chart_svg(chart));
     }
     page.push_str("<h2>Alerts in this period</h2>");
     if report.alerts.is_empty() {
