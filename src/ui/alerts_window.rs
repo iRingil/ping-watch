@@ -4,17 +4,20 @@
 use std::time::Duration;
 
 use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Ui};
+use egui_extras::{Column, TableBuilder};
 
 use crate::alerts::{Condition, ConditionKind, Rule, Targets};
-use crate::store::alerts::{AlertStore, JournalEntry};
+use crate::store::alerts::AlertStore;
 use crate::ui::icons::{self, Icon, Style};
 use crate::ui::settings::{close_mark, label_first_row, page_tabs, settings_grid};
 use crate::ui::theme;
 
 /// Width of the window's content.
-const WIDTH: f32 = 640.0;
+const WIDTH: f32 = 720.0;
 /// Least height of a page, so switching pages doesn't make the window jump.
 const PAGE_HEIGHT: f32 = 340.0;
+/// Height of a journal row.
+const JOURNAL_ROW: f32 = 24.0;
 /// Periods a loss or latency rule can look back over.
 const WINDOWS: [Duration; 7] = [
     Duration::from_secs(30),
@@ -159,7 +162,9 @@ impl AlertsWindow {
         }
         let mut changed = false;
         let modal = egui::Modal::new(egui::Id::unique("alerts")).show(ctx, |ui| {
+            // Exactly this wide: content never widens the window (the journal cuts long texts instead).
             ui.set_width(WIDTH);
+            ui.set_max_width(WIDTH);
             let close = ui
                 .horizontal(|ui| {
                     ui.label(RichText::new("Alerts").font(theme::heading_font(18.0)));
@@ -362,7 +367,8 @@ fn period_choice(ui: &mut Ui, id: &str, value: &mut Duration, options: &[Duratio
     });
 }
 
-/// The journal page: newest first, with a button to clear it.
+/// The journal page: newest first, with a button to clear it. Fixed columns that fit the window; a long "What" is
+/// cut short, with the whole text on hover.
 fn journal_page(ui: &mut Ui, store: &AlertStore) {
     let journal = store
         .journal()
@@ -372,17 +378,55 @@ fn journal_page(ui: &mut Ui, store: &AlertStore) {
         ui.weak("Nothing has fired yet.");
         return;
     }
-    ScrollArea::vertical().max_height(PAGE_HEIGHT - 44.0).show(ui, |ui| {
-        egui::Grid::new("alert-journal").num_columns(5).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
-            for title in ["Started", "Target", "What", "Lasted", "Worst"] {
-                ui.weak(title);
-            }
-            ui.end_row();
-            for entry in &journal {
-                journal_row(ui, entry);
-                ui.end_row();
-            }
-        });
+    let palette = theme::palette(ui);
+    ui.push_id("alert-journal", |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .max_scroll_height(PAGE_HEIGHT - 76.0)
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .column(Column::exact(118.0))
+            .column(Column::exact(140.0).clip(true))
+            .column(Column::remainder().clip(true))
+            .column(Column::exact(74.0))
+            .column(Column::exact(58.0))
+            .header(JOURNAL_ROW, |mut header| {
+                for title in ["Started", "Target", "What", "Lasted", "Worst"] {
+                    header.col(|ui| {
+                        ui.weak(title);
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(JOURNAL_ROW, journal.len(), |mut row| {
+                    let Some(entry) = journal.get(row.index()) else {
+                        return;
+                    };
+                    row.col(|ui| {
+                        ui.label(time_of(entry.started_ms));
+                    });
+                    row.col(|ui| {
+                        ui.add(egui::Label::new(&entry.host).truncate());
+                    });
+                    row.col(|ui| {
+                        ui.add(egui::Label::new(&entry.what).truncate());
+                    });
+                    row.col(|ui| match entry.ended_ms {
+                        None => {
+                            ui.colored_label(palette.bad, "on now");
+                        }
+                        Some(ended) if ended == entry.started_ms => {}
+                        Some(ended) => {
+                            let seconds = u64::try_from(ended.saturating_sub(entry.started_ms) / 1_000).unwrap_or(0);
+                            ui.label(crate::alerts::span(Duration::from_secs(seconds.max(1))));
+                        }
+                    });
+                    row.col(|ui| {
+                        if let (Some(worst), Some(unit)) = (entry.worst, entry.unit.as_deref()) {
+                            ui.label(format!("{worst:.0} {unit}"));
+                        }
+                    });
+                });
+            });
     });
     ui.add_space(8.0);
     if ui.button("Clear the journal").clicked()
@@ -390,29 +434,6 @@ fn journal_page(ui: &mut Ui, store: &AlertStore) {
     {
         log::error!("cannot clear the alert journal: {error}");
     }
-}
-
-/// One row of the journal.
-fn journal_row(ui: &mut Ui, entry: &JournalEntry) {
-    ui.label(time_of(entry.started_ms));
-    ui.label(&entry.host);
-    ui.label(&entry.what);
-    match entry.ended_ms {
-        None => {
-            ui.colored_label(theme::palette(ui).bad, "on now");
-        }
-        Some(ended) if ended == entry.started_ms => {
-            ui.label("");
-        }
-        Some(ended) => {
-            let seconds = u64::try_from(ended.saturating_sub(entry.started_ms) / 1_000).unwrap_or(0);
-            ui.label(crate::alerts::span(Duration::from_secs(seconds.max(1))));
-        }
-    }
-    match (entry.worst, entry.unit.as_deref()) {
-        (Some(worst), Some(unit)) => ui.label(format!("{worst:.0} {unit}")),
-        _ => ui.label(""),
-    };
 }
 
 /// Local "15.11 13:05:12" of Unix ms.
