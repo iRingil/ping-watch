@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ping Watch</title>
+<meta name="description" content="Ping Watch traces the route to your targets, shows each hop's latency and loss, and keeps the history. For Windows.">
+<link rel="icon" href="icon.png">
+<style>
+  :root {
+    --chassis: #1a1f29;
+    --pane: #212835;
+    --rule: #364054;
+    --ink: #dcd7cb;
+    --muted: #8b93a5;
+    --signal: #6fb7d9;
+    --good: #52b094;
+    --warn: #e2a13e;
+    --bad: #e05f74;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: var(--chassis);
+    color: var(--ink);
+    font: 17px/1.5 "Segoe UI", system-ui, sans-serif;
+    padding: 24px 16px;
+  }
+  main { max-width: 34rem; }
+  img { width: 112px; height: 112px; display: block; }
+  h1 { font-size: 2.4rem; font-weight: 600; margin: 20px 0 4px; letter-spacing: -0.01em; }
+  p { margin: 0 0 14px; color: var(--muted); }
+  .zones { display: flex; height: 6px; width: 180px; margin: 22px 0; }
+  .zones span { flex: 1; }
+  .zones span:nth-child(1) { background: var(--good); }
+  .zones span:nth-child(2) { background: var(--warn); }
+  .zones span:nth-child(3) { background: var(--bad); }
+  a { color: var(--signal); }
+  a:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
+</style>
+</head>
+<body>
+<main>
+  <img src="icon.png" alt="">
+  <h1>Ping Watch</h1>
+  <p>Traces the route to your targets, shows each hop's latency and loss, and keeps the history. For Windows.</p>
+  <div class="zones" aria-hidden="true"><span></span><span></span><span></span></div>
+  <p>There is no release to download yet. The source code is on <a href="https://github.com/iRingil/ping-watch">GitHub</a>.</p>
+</main>
+</body>
+</html>

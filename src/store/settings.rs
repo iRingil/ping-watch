@@ -51,7 +51,7 @@ impl Default for AppSettings {
         Self {
             close_to_tray: false,
             defaults: TraceSettings {
-                interval: Duration::from_secs(1),
+                interval: Duration::from_millis(2_500),
                 focus: Focus::default(),
                 period: Period::default(),
             },

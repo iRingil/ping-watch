@@ -9,6 +9,7 @@ use eframe::egui::{self, Align, Grid, Layout, RichText, Ui};
 use crate::APP_NAME;
 use crate::store::autostart;
 use crate::store::settings::{AppSettings, MAX_HOPS, RETENTIONS, TIMEOUTS};
+use crate::ui::icons::{self, Icon};
 use crate::ui::tab;
 use crate::ui::theme;
 use crate::ui::timeline::Period;
@@ -17,6 +18,12 @@ use crate::ui::timeline::Period;
 const WIDTH: f32 = 520.0;
 /// Least height of a page, so switching pages doesn't make the window jump.
 const PAGE_HEIGHT: f32 = 290.0;
+/// Side of the logo on the About page.
+const LOGO_SIZE: f32 = 96.0;
+/// The project's web page.
+const SITE_URL: &str = "https://iringil.github.io/ping-watch/";
+/// The project's source code.
+const REPO_URL: &str = "https://github.com/iRingil/ping-watch";
 /// Width of the drop-down lists, the same for all.
 const COMBO_WIDTH: f32 = 150.0;
 /// Space between the label column and the controls.
@@ -55,7 +62,7 @@ impl Page {
 }
 
 /// State of the Settings window.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SettingsWindow {
     /// Whether the window is shown.
     open: bool,
@@ -65,6 +72,25 @@ pub struct SettingsWindow {
     autostart: bool,
     /// Why reading or changing autostart failed.
     autostart_error: Option<String>,
+    /// The app logo for the About page, loaded on first show.
+    logo: Option<egui::TextureHandle>,
+    /// The update check was asked for (there is nothing to check against yet).
+    update_asked: bool,
+}
+
+impl std::fmt::Debug for SettingsWindow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The logo texture has no Debug; whether it is loaded is enough.
+        formatter
+            .debug_struct("SettingsWindow")
+            .field("open", &self.open)
+            .field("page", &self.page)
+            .field("autostart", &self.autostart)
+            .field("autostart_error", &self.autostart_error)
+            .field("logo", &self.logo.is_some())
+            .field("update_asked", &self.update_asked)
+            .finish()
+    }
 }
 
 impl SettingsWindow {
@@ -85,9 +111,18 @@ impl SettingsWindow {
         if !self.open {
             return;
         }
+        if self.logo.is_none() {
+            self.logo = load_logo(ctx);
+        }
         let modal = egui::Modal::new(egui::Id::unique("settings")).show(ctx, |ui| {
             ui.set_width(WIDTH);
-            ui.label(RichText::new("Settings").font(theme::heading_font(18.0)));
+            // Title with the close mark at the right end, where windows have it.
+            let close = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new("Settings").font(theme::heading_font(18.0)));
+                    ui.with_layout(Layout::right_to_left(Align::Center), close_mark).inner
+                })
+                .inner;
             ui.add_space(8.0);
             self.tabs(ui);
             ui.add_space(12.0);
@@ -99,11 +134,10 @@ impl SettingsWindow {
                     Page::Tracing => tracing(ui, settings),
                     Page::Appearance => appearance(ui),
                     Page::Language => language(ui),
-                    Page::About => about(ui, data_folder),
+                    Page::About => self.about(ui, data_folder),
                 }
             });
-            ui.separator();
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.button("Close").clicked()).inner
+            close
         });
         if modal.inner || modal.should_close() {
             self.open = false;
@@ -189,14 +223,19 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
     ui.weak("Targets you traced before keep their own interval, focus and period. Timeout and hop limit apply to traces started from now on.");
 }
 
-/// Appearance: the theme (only the dark one so far).
+/// Appearance: the theme — follow Windows, dark or light (only dark so far).
 fn appearance(ui: &mut Ui) {
     settings_grid(ui, "settings-appearance", |ui| {
         ui.weak("Theme");
         ui.horizontal(|ui| {
-            ui.add_enabled(false, egui::RadioButton::new(true, "Dark"));
-            ui.add_enabled(false, egui::RadioButton::new(false, "Light"))
-                .on_disabled_hover_text("The light theme isn't ready yet");
+            ui.spacing_mut().item_spacing.x = 18.0;
+            let themes = [(Icon::Auto, "Auto", false), (Icon::Moon, "Dark", true), (Icon::Sun, "Light", false)];
+            for (icon, label, selected) in themes {
+                let response = icon_option(ui, icon, label, selected);
+                if !selected {
+                    response.on_disabled_hover_text("Needs the light theme, which isn't ready yet");
+                }
+            }
         });
         ui.end_row();
     });
@@ -206,19 +245,78 @@ fn appearance(ui: &mut Ui) {
 fn language(ui: &mut Ui) {
     settings_grid(ui, "settings-language", |ui| {
         ui.weak("Interface");
-        ui.add_enabled(false, egui::RadioButton::new(true, "English"))
-            .on_disabled_hover_text("Other languages aren't ready yet");
+        icon_option(ui, Icon::Globe, "English", true).on_disabled_hover_text("Other languages aren't ready yet");
         ui.end_row();
     });
 }
 
-/// About: name, version, what the app does, where its data lives, the font's license.
-fn about(ui: &mut Ui, data_folder: Option<&Path>) {
-    ui.label(RichText::new(APP_NAME).font(theme::heading_font(20.0)));
-    ui.weak(format!("Version {}", env!("CARGO_PKG_VERSION")));
-    ui.add_space(8.0);
-    ui.label("Traces the route to your targets, shows each hop's latency and loss, and keeps the history.");
-    ui.add_space(14.0);
+/// A choice shown as its icon and a radio button; disabled while only one choice exists.
+fn icon_option(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+        icons::paint(ui, rect.center(), icon, if selected { theme::INK } else { theme::INK_MUTED });
+        ui.add_enabled(false, egui::RadioButton::new(selected, label))
+    })
+    .inner
+}
+
+/// The close mark of the title row; returns whether it was clicked.
+fn close_mark(ui: &mut Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), theme::PANE_HEADER);
+    }
+    icons::paint(ui, rect.center(), Icon::Cross, if response.hovered() { theme::INK } else { theme::INK_MUTED });
+    response.on_hover_text("Close (Esc)").clicked()
+}
+
+/// The app logo as a texture, `None` if the embedded PNG can't be decoded.
+fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let icon = eframe::icon_data::from_png_bytes(crate::ICON_PNG)
+        .inspect_err(|error| log::warn!("cannot load the logo: {error}"))
+        .ok()?;
+    let size = [usize::try_from(icon.width).ok()?, usize::try_from(icon.height).ok()?];
+    let image = egui::ColorImage::from_rgba_unmultiplied(size, &icon.rgba);
+    Some(ctx.load_texture("logo", image, egui::TextureOptions::LINEAR))
+}
+
+impl SettingsWindow {
+    /// About: logo, name, version with the update check, what the app does, links, where its data lives, the
+    /// font's license.
+    fn about(&mut self, ui: &mut Ui, data_folder: Option<&Path>) {
+        ui.horizontal_top(|ui| {
+            if let Some(logo) = &self.logo {
+                ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(LOGO_SIZE, LOGO_SIZE)));
+                ui.add_space(12.0);
+            }
+            ui.vertical(|ui| {
+                ui.label(RichText::new(APP_NAME).font(theme::heading_font(20.0)));
+                ui.horizontal(|ui| {
+                    ui.weak(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    if ui.small_button("Check for updates").clicked() {
+                        self.update_asked = true;
+                    }
+                });
+                if self.update_asked {
+                    ui.weak("No releases are published yet.");
+                }
+                ui.add_space(6.0);
+                ui.label("Traces the route to your targets, shows each hop's latency and loss, and keeps the history.");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.hyperlink_to("Website", SITE_URL);
+                    ui.hyperlink_to("Source code", REPO_URL);
+                });
+            });
+        });
+        ui.add_space(14.0);
+        about_details(ui, data_folder);
+    }
+}
+
+/// Data folder and font license rows of the About page.
+fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
     settings_grid(ui, "settings-about", |ui| {
         ui.weak("Data folder");
         ui.horizontal(|ui| match data_folder {

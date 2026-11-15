@@ -22,6 +22,14 @@ pub enum Icon {
     Cross,
     /// Cog wheel: settings and the app menu.
     Gear,
+    /// Sun with rays: the light theme.
+    Sun,
+    /// Crescent: the dark theme.
+    Moon,
+    /// Circle half filled: a theme following Windows.
+    Auto,
+    /// Globe with a meridian and the equator: language.
+    Globe,
 }
 
 /// Look of an icon button.
@@ -78,6 +86,43 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
                 painter.line_segment([at(4.5), at(8.5)], tooth);
             }
             painter.circle_stroke(c, 5.0, Stroke::new(2.8, color));
+        }
+        Icon::Sun => {
+            painter.circle_filled(c, 3.6, color);
+            let ray = Stroke::new(1.6, color);
+            for step in 0..8_u8 {
+                let angle = f32::from(step) * std::f32::consts::FRAC_PI_4;
+                let (dx, dy) = (angle.cos(), angle.sin());
+                painter.line_segment([pos2(c.x + dx * 5.6, c.y + dy * 5.6), pos2(c.x + dx * 8.0, c.y + dy * 8.0)], ray);
+            }
+        }
+        Icon::Moon => {
+            // A disc with a disc of the background color cut out of its upper right.
+            painter.circle_filled(c, 7.0, color);
+            painter.circle_filled(pos2(c.x + 3.6, c.y - 2.6), 5.8, ui.visuals().window_fill);
+        }
+        Icon::Auto => {
+            painter.circle_stroke(c, 6.6, Stroke::new(1.6, color));
+            let half: Vec<Pos2> = (0..=16_u8)
+                .map(|step| {
+                    let angle = std::f32::consts::FRAC_PI_2 + f32::from(step) * std::f32::consts::PI / 16.0;
+                    pos2(c.x + angle.cos() * 6.6, c.y + angle.sin() * 6.6)
+                })
+                .collect();
+            painter.add(egui::Shape::convex_polygon(half, color, Stroke::NONE));
+        }
+        Icon::Globe => {
+            let stroke = Stroke::new(1.5, color);
+            painter.circle_stroke(c, 7.0, stroke);
+            painter.line_segment([pos2(c.x - 7.0, c.y), pos2(c.x + 7.0, c.y)], stroke);
+            // The meridian as an ellipse: a narrow polygon outline.
+            let meridian: Vec<Pos2> = (0..32_u8)
+                .map(|step| {
+                    let angle = f32::from(step) * std::f32::consts::TAU / 32.0;
+                    pos2(c.x + angle.cos() * 3.0, c.y + angle.sin() * 7.0)
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(meridian, stroke));
         }
     }
 }
