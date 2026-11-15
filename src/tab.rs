@@ -311,7 +311,7 @@ impl Tab {
         pane(ui, timeline_rect, Margin::same(8), |ui| match (&self.state, &route, ttl) {
             (State::Running(session), Some(route), Some(ttl)) => {
                 let title = hop_title(route, ttl, context.names);
-                self.timeline.show(ui, context.history_path, session.target_id, ttl, &title);
+                self.timeline.show(ui, context.history_path, session.target_id, ttl, &title, self.interval);
             }
             _ => {
                 ui.weak("The history of the selected hop appears here once a trace runs.");

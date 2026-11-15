@@ -121,14 +121,23 @@ impl Timeline {
 
     /// Draws the pane for hop `ttl` (described by `title`) of target `target_id`, from the history at
     /// `history_path`.
-    pub fn show(&mut self, ui: &mut Ui, history_path: Option<&Path>, target_id: Option<i64>, ttl: u8, title: &str) {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        history_path: Option<&Path>,
+        target_id: Option<i64>,
+        ttl: u8,
+        title: &str,
+        interval: Duration,
+    ) {
         let now_ms = history::unix_ms(SystemTime::now());
         self.header(ui, title, now_ms);
         let (Some(path), Some(target_id)) = (history_path, target_id) else {
             ui.label("History is off, so there is nothing to chart.");
             return;
         };
-        if let Some(error) = self.sync(path, target_id, ttl, now_ms) {
+        let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
+        if let Some(error) = self.sync(path, target_id, ttl, now_ms, interval_ms) {
             ui.colored_label(theme::BAD, error);
             return;
         }
@@ -175,7 +184,7 @@ impl Timeline {
 
     /// Takes arrived answers and queries again when the data on screen no longer fits. Returns an error to show
     /// instead of the chart.
-    fn sync(&mut self, path: &Path, target_id: i64, ttl: u8, now_ms: i64) -> Option<String> {
+    fn sync(&mut self, path: &Path, target_id: i64, ttl: u8, now_ms: i64, interval_ms: i64) -> Option<String> {
         if self.fetcher.is_none() && self.fetcher_error.is_none() {
             match Fetcher::start(path) {
                 Ok(fetcher) => self.fetcher = Some(fetcher),
@@ -192,12 +201,15 @@ impl Timeline {
                 Err(error) => log::error!("cannot read history: {error}"),
             }
         }
-        let window = Window::ending_at(self.end_ms.unwrap_or(now_ms), self.period);
+        let window = Window::ending_at(self.end_ms.unwrap_or(now_ms), self.period, interval_ms);
         let request = Request { target_id, ttl, period: self.period, window };
         let stale = self.refresh_now
             || self.shown.as_ref().is_none_or(|shown| {
                 let old = shown.request;
-                let moved = old.target_id != target_id || old.ttl != ttl || old.period != self.period;
+                let moved = old.target_id != target_id
+                    || old.ttl != ttl
+                    || old.period != self.period
+                    || old.window.bucket_ms != window.bucket_ms;
                 let live_due = self.end_ms.is_none() && {
                     let bucket = Duration::from_millis(u64::try_from(window.bucket_ms).unwrap_or(u64::MAX));
                     shown.received.elapsed() >= bucket.min(MAX_REFRESH)
@@ -413,7 +425,8 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
 /// Adds a trace's line segments and its clipped-spike markers to `plot`.
 fn add_trace(plot: &mut egui_plot::PlotUi<'_>, name: &str, trace: &Trace, color: Color32) {
     for segment in &trace.segments {
-        plot.line(Line::new(name, PlotPoints::from(segment.clone())).color(color).width(1.0));
+        // Steps repeat x at every riser; without `allow_band(false)` egui_plot fills those as a min–max band.
+        plot.line(Line::new(name, PlotPoints::from(segment.clone())).color(color).width(1.0).allow_band(false));
     }
     if !trace.clipped.is_empty() {
         let points = Points::new(format!("{name} above scale"), PlotPoints::from(trace.clipped.clone()));

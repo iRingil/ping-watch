@@ -6,8 +6,6 @@ use crate::latency_bars::millis;
 
 /// Roughly how many buckets a period is split into: about one per pixel column of the chart.
 const TARGET_BUCKETS: i64 = 600;
-/// Smallest bucket: the probe interval, so short periods show every sample.
-const MIN_BUCKET_MS: i64 = 1_000;
 /// Smallest latency scale of the chart.
 const MIN_SCALE_MS: f64 = 50.0;
 /// Smallest jitter scale of the jitter strip.
@@ -139,18 +137,19 @@ pub struct Window {
 }
 
 impl Window {
-    /// Window of `period` ending at `end_ms`.
-    pub fn ending_at(end_ms: i64, period: Period) -> Self {
+    /// Window of `period` ending at `end_ms`. Buckets are never shorter than `interval_ms`, the probe interval,
+    /// so short periods show every sample as its own step and no bucket is left empty.
+    pub fn ending_at(end_ms: i64, period: Period, interval_ms: i64) -> Self {
         let period_ms = period.millis();
-        let bucket_ms = period_ms.checked_div(TARGET_BUCKETS).unwrap_or(0).max(MIN_BUCKET_MS);
+        let bucket_ms = period_ms.checked_div(TARGET_BUCKETS).unwrap_or(0).max(interval_ms).max(1);
         let start = end_ms.saturating_sub(period_ms);
         let from_ms = start.saturating_sub(start.checked_rem_euclid(bucket_ms).unwrap_or(0));
         Self { from_ms, to_ms: end_ms.saturating_add(1), bucket_ms }
     }
 }
 
-/// One chart line: segments of `[time s, value ms]` broken at gaps, the points clipped at the scale, and the
-/// scale itself.
+/// One chart line, drawn as steps: each bucket's value is held across the bucket's width. Segments of
+/// `[time s, value ms]` broken at gaps, the points clipped at the scale, and the scale itself.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Trace {
     /// Line segments, values clamped to `scale_ms`.
@@ -162,9 +161,10 @@ pub struct Trace {
 }
 
 impl Trace {
-    /// Builds a trace from `(x, value)` points in time order, `None` meaning no value in that bucket; `gap_before`
-    /// tells whether a point doesn't directly follow the previous one.
-    fn build(points: &[(f64, Option<f64>, bool)], min_scale_ms: f64) -> Self {
+    /// Builds a trace from `(x, value)` points in time order — `x` is a bucket's center, `half_width_s` half its
+    /// width, `None` means no value in that bucket — and `gap_before`, whether a point doesn't directly follow the
+    /// previous one.
+    fn build(points: &[(f64, Option<f64>, bool)], half_width_s: f64, min_scale_ms: f64) -> Self {
         let values: Vec<f64> = points.iter().filter_map(|(_, value, _)| *value).collect();
         let scale_ms = scale(&values, min_scale_ms);
         let mut trace = Self { scale_ms, ..Self::default() };
@@ -175,7 +175,9 @@ impl Trace {
             }
             match value {
                 Some(value) => {
-                    current.push([x, value.min(scale_ms)]);
+                    let level = value.min(scale_ms);
+                    current.push([x - half_width_s, level]);
+                    current.push([x + half_width_s, level]);
                     if value > scale_ms {
                         trace.clipped.push([x, scale_ms]);
                     }
@@ -223,8 +225,8 @@ impl Series {
             previous_start = Some(bucket.start_ms);
         }
         Self {
-            latency: Trace::build(&latency, MIN_SCALE_MS),
-            jitter: Trace::build(&jitter, MIN_JITTER_SCALE_MS),
+            latency: Trace::build(&latency, seconds(bucket_ms) / 2.0, MIN_SCALE_MS),
+            jitter: Trace::build(&jitter, seconds(bucket_ms) / 2.0, MIN_JITTER_SCALE_MS),
             loss,
             first_s: buckets.first().map(|bucket| seconds(bucket.start_ms)),
         }
@@ -321,15 +323,21 @@ mod tests {
 
     #[test]
     fn short_periods_use_one_second_buckets() {
-        let window = Window::ending_at(1_000_500, Period::Minute);
+        let window = Window::ending_at(1_000_500, Period::Minute, 1_000);
         assert_eq!(window.bucket_ms, 1_000);
         assert_eq!(window.from_ms, 940_000);
         assert_eq!(window.to_ms, 1_000_501);
     }
 
     #[test]
+    fn buckets_follow_a_short_probe_interval() {
+        assert_eq!(Window::ending_at(1_000_000, Period::Minute, 500).bucket_ms, 500);
+        assert_eq!(Window::ending_at(1_000_000, Period::Minutes10, 2_500).bucket_ms, 2_500);
+    }
+
+    #[test]
     fn long_periods_use_coarser_aligned_buckets() {
-        let window = Window::ending_at(1_000_000_000, Period::Days7);
+        let window = Window::ending_at(1_000_000_000, Period::Days7, 1_000);
         assert_eq!(window.bucket_ms, 7 * 24 * 3_600 * 1_000 / 600);
         assert_eq!(window.from_ms.rem_euclid(window.bucket_ms), 0);
         assert!(window.from_ms <= 1_000_000_000 - 7 * 24 * 3_600 * 1_000);
@@ -345,7 +353,15 @@ mod tests {
             bucket(5_000, 1, 1, Some(40)), // gap before
         ];
         let series = Series::from_buckets(&buckets, 1_000);
-        assert_eq!(series.latency.segments, vec![vec![[0.5, 10.0], [1.5, 20.0]], vec![[3.5, 30.0]], vec![[5.5, 40.0]]]);
+        // Steps: every value spans its whole bucket.
+        assert_eq!(
+            series.latency.segments,
+            vec![
+                vec![[0.0, 10.0], [1.0, 10.0], [1.0, 20.0], [2.0, 20.0]],
+                vec![[3.0, 30.0], [4.0, 30.0]],
+                vec![[5.0, 40.0], [6.0, 40.0]],
+            ]
+        );
         assert_eq!(series.loss, vec![(2.5, 100.0)]);
     }
 

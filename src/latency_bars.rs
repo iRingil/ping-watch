@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use eframe::egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 use crate::stats::HopStats;
 use crate::theme::{self, BAD, GOOD, INK_MUTED, WARN};
@@ -107,6 +107,17 @@ pub fn cell(ui: &mut Ui, stats: &HopStats, answering: bool, scale_ms: f64) -> Op
     for (from, to, color) in zones {
         let zone = Rect::from_x_y_ranges(x_of(rect, from, scale_ms)..=x_of(rect, to, scale_ms), rect.y_range());
         painter.rect_filled(zone, 0.0, color);
+    }
+    // Packet loss as in PingPlotter: a dark red bar from the left, as long as the loss share of the row.
+    let loss = stats.loss_percent();
+    if loss > 0.0 {
+        let width = rect.width() * (loss / 100.0).clamp(0.0, 1.0) as f32;
+        let bar = Rect::from_min_size(
+            pos2(rect.left(), rect.center().y - rect.height() * 0.3),
+            vec2(width, rect.height() * 0.6),
+        );
+        painter.rect_filled(bar, 0.0, LOST_ROW);
+        painter.rect_stroke(bar, 0.0, Stroke::new(1.0, BAD), egui::StrokeKind::Inside);
     }
     let y = rect.center().y;
     if let (Some(best), Some(worst)) = (stats.best(), stats.worst()) {

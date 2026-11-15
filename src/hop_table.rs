@@ -186,7 +186,8 @@ fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats) {
     row.col(|ui| cell(ui, true, loss_text));
 }
 
-/// Hop number in a circle colored by loss; plain number for a hop that never answered.
+/// Hop number in a circle colored by the hop's average latency zone, as in PingPlotter (loss shows in the PL%
+/// column and as a red bar in the latency column); plain number for a hop that never answered.
 fn badge(ui: &mut Ui, hop: &Hop) {
     let text = hop.ttl.to_string();
     if hop.address.is_none() {
@@ -194,10 +195,22 @@ fn badge(ui: &mut Ui, hop: &Hop) {
         return;
     }
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(BADGE_SIZE), Sense::hover());
-    let color = LossLevel::of(hop.stats.loss_percent()).color();
+    let color = hop.stats.average().map_or(theme::INK_MUTED, latency_color);
     ui.painter().circle_filled(rect.center(), BADGE_SIZE / 2.0, color);
     ui.painter()
         .text(rect.center(), Align2::CENTER_CENTER, text, theme::heading_font(12.0), theme::CHASSIS);
+}
+
+/// Color of a latency's zone: green below 100 ms, amber below 200 ms, red above.
+fn latency_color(latency: Duration) -> Color32 {
+    let ms = latency_bars::millis(latency);
+    if ms < latency_bars::GOOD_MS {
+        theme::GOOD
+    } else if ms < latency_bars::WARN_MS {
+        theme::WARN
+    } else {
+        theme::BAD
+    }
 }
 
 /// Adds a label, right-aligned if `numeric`.
@@ -224,6 +237,13 @@ mod tests {
         assert_eq!(LossLevel::of(5.0), LossLevel::Some);
         assert_eq!(LossLevel::of(10.0), LossLevel::Heavy);
         assert_eq!(LossLevel::of(100.0), LossLevel::Heavy);
+    }
+
+    #[test]
+    fn badge_color_follows_latency_zones() {
+        assert_eq!(latency_color(Duration::from_millis(52)), theme::GOOD);
+        assert_eq!(latency_color(Duration::from_millis(177)), theme::WARN);
+        assert_eq!(latency_color(Duration::from_millis(260)), theme::BAD);
     }
 
     #[test]
