@@ -1,6 +1,6 @@
 <!--suppress ALL -->
 <p align="center">
-    <img src="assets/social-preview.png" alt="Ping Watch" width="640">
+    <img src="https://repository-images.githubusercontent.com/1458618272/f76bcbfe-1965-418a-9b3a-ad29c432b0c5" alt="Ping Watch" width="640">
 </p>
 <p align="center">
     <a href="https://doc.rust-lang.org/edition-guide/rust-2024/">
