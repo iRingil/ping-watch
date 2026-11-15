@@ -24,9 +24,9 @@ use crate::window_state::{AllTargetsSettings, WindowStore};
 const ROW_HEIGHT: f32 = 24.0;
 /// Width of the Status column (check box and state).
 const STATUS_WIDTH: f32 = 120.0;
-/// Width of the Target column.
+/// Widest the Target column gets.
 const TARGET_WIDTH: f32 = 200.0;
-/// Width of the IP column (room for most IPv6 addresses).
+/// Widest the IP column gets (room for most IPv6 addresses).
 const IP_WIDTH: f32 = 230.0;
 /// Width of a numeric column.
 const NUMBER_WIDTH: f32 = 62.0;
@@ -167,6 +167,13 @@ impl AllTargets {
             overviews.iter().filter_map(|overview| overview.target_hop.as_ref()).map(|hop| &hop.stats),
         );
         let row_width = ui.available_width();
+        // In a narrow window Target and IP give up room (clipped), so the numbers and the bars stay in view.
+        #[expect(clippy::cast_precision_loss, reason = "a handful of columns")]
+        let fixed = STATUS_WIDTH
+            + NUMBER_WIDTH * NUMBER_COLUMNS as f32
+            + LATENCY_MIN_WIDTH
+            + ui.spacing().item_spacing.x * (NUMBER_COLUMNS + 3) as f32;
+        let squeeze = ((row_width - fixed) / (TARGET_WIDTH + IP_WIDTH)).clamp(0.3, 1.0);
         let mut request = None;
         let mut toggle = None;
         TableBuilder::new(ui)
@@ -174,8 +181,8 @@ impl AllTargets {
             .sense(Sense::click())
             .cell_layout(Layout::left_to_right(Align::Center))
             .column(Column::exact(STATUS_WIDTH).clip(true))
-            .column(Column::exact(TARGET_WIDTH).clip(true))
-            .column(Column::exact(IP_WIDTH).clip(true))
+            .column(Column::exact(TARGET_WIDTH * squeeze).clip(true))
+            .column(Column::exact(IP_WIDTH * squeeze).clip(true))
             .columns(Column::exact(NUMBER_WIDTH), NUMBER_COLUMNS)
             .column(Column::remainder().at_least(LATENCY_MIN_WIDTH).clip(true))
             .header(ROW_HEIGHT, |mut header| {

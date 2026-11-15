@@ -39,6 +39,9 @@ pub const APP_NAME: &str = "Ping Watch";
 
 /// Inner size of the window on the very first start, logical points.
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [1200.0, 760.0];
+/// Smallest inner size of the window, logical points: the toolbar and the table columns still fit, and it fits a
+/// 1366 × 768 screen with the taskbar.
+const MIN_WINDOW_SIZE: [f32; 2] = [1000.0, 640.0];
 
 /// Window and taskbar icon (the executable's own icon comes from `build.rs`).
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
@@ -66,7 +69,10 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .and_then(|store| store.load().inspect_err(|error| log::warn!("{error}")).ok().flatten())
         .filter(WindowState::is_plausible);
-    let mut viewport = egui::ViewportBuilder::default().with_title(APP_NAME).with_inner_size(DEFAULT_WINDOW_SIZE);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(APP_NAME)
+        .with_inner_size(DEFAULT_WINDOW_SIZE)
+        .with_min_inner_size(MIN_WINDOW_SIZE);
     if let Some(state) = saved_window {
         viewport = viewport
             .with_position([state.x, state.y])
