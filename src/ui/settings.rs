@@ -24,6 +24,10 @@ const LOGO_SIZE: f32 = 96.0;
 const SITE_URL: &str = "https://iringil.github.io/ping-watch/";
 /// The project's source code.
 const REPO_URL: &str = "https://github.com/iRingil/ping-watch";
+/// Where problems and ideas are reported (the issue form picker).
+const ISSUES_URL: &str = "https://github.com/iRingil/ping-watch/issues/new/choose";
+/// Where vulnerabilities are reported privately.
+const VULNERABILITY_URL: &str = "https://github.com/iRingil/ping-watch/security/advisories/new";
 /// The license's text.
 const LICENSE_URL: &str = "https://polyformproject.org/licenses/noncommercial/1.0.0/";
 /// Width of the label column of the choice lists.
@@ -386,6 +390,13 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
             None => {
                 ui.weak("none, history is off");
             }
+        });
+        ui.end_row();
+        // Feedback goes in its own row, apart from the project links next to the name.
+        ui.weak("Feedback");
+        ui.horizontal(|ui| {
+            ui.hyperlink_to("Report a problem or idea", ISSUES_URL);
+            ui.hyperlink_to("Report a vulnerability", VULNERABILITY_URL);
         });
         ui.end_row();
         ui.weak("License");
