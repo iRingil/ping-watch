@@ -32,6 +32,10 @@ const TAB_CLOSE_WIDTH: f32 = 16.0;
 const TAB_GAP: f32 = 4.0;
 /// Width of a tab bar scroll arrow.
 const ARROW_WIDTH: f32 = 22.0;
+/// Least room for the next tab to peek into the end of a scrolled tab strip.
+const PEEK_MIN_WIDTH: f32 = 16.0;
+/// Width of the fade at the end of a scrolled tab strip.
+const FADE_WIDTH: f32 = 48.0;
 /// Width of the "+" (new target) button.
 const PLUS_WIDTH: f32 = 24.0;
 
@@ -285,7 +289,27 @@ impl PingWatchApp {
             }
             if let Some(strip) = strip {
                 // The right arrow and "+" stay pinned to the right edge however wide the shown tabs are.
-                ui.add_space((strip + TAB_GAP - used).max(0.0));
+                let room = (strip + TAB_GAP - used).max(0.0);
+                // The next tab peeks into the room left, fading out before the arrow.
+                if let Some(title) = titles.get(last)
+                    && room > PEEK_MIN_WIDTH
+                {
+                    let peek = Rect::from_min_size(ui.cursor().min, Vec2::new(room - TAB_GAP, TAB_HEIGHT));
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new().max_rect(peek).layout(egui::Layout::left_to_right(egui::Align::Min)),
+                    );
+                    child.set_clip_rect(peek.intersect(ui.clip_rect()));
+                    if tab_widget(&mut child, self.page == Page::Target(last), title, false).0.clicked() {
+                        self.page = Page::Target(last);
+                    }
+                    let fade_width = peek.width().min(FADE_WIDTH);
+                    let fade = Rect::from_min_max(
+                        egui::pos2(peek.right() - fade_width, peek.top()),
+                        egui::pos2(peek.right(), peek.bottom() - 1.0),
+                    );
+                    fade_out(ui, fade, theme::WELL);
+                }
+                ui.add_space(room);
                 if scroll_arrow(ui, false, last < titles.len()) {
                     self.tab_first = first.saturating_add(1);
                 }
@@ -302,6 +326,19 @@ impl PingWatchApp {
             self.close(index);
         }
     }
+}
+
+/// Covers `rect` with `color` fading in from transparent on the left to opaque on the right.
+fn fade_out(ui: &Ui, rect: Rect, color: egui::Color32) {
+    let clear = egui::Color32::TRANSPARENT;
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), clear);
+    mesh.colored_vertex(rect.right_top(), color);
+    mesh.colored_vertex(rect.right_bottom(), color);
+    mesh.colored_vertex(rect.left_bottom(), clear);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(mesh);
 }
 
 /// Width of a tab titled `title`, with a close mark if `closable`.
