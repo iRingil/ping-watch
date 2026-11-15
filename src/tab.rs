@@ -270,6 +270,21 @@ impl Tab {
         Some(session.tracer.snapshot(self.focus.range(self.timeline.visible_range(now_ms), now_ms)))
     }
 
+    /// Problem to show in the status bar, if any: a failed start, a probing failure (network down) — which matters
+    /// more than the history warning — or the history warning.
+    pub fn problem(&self) -> Option<String> {
+        match &self.state {
+            State::Editing(Some(error)) => Some(error.clone()),
+            State::Running(session) => session.tracer.last_error().or_else(|| self.warning.clone()),
+            State::Editing(None) | State::Resolving(_) => self.warning.clone(),
+        }
+    }
+
+    /// Whether the trace is paused.
+    pub fn is_paused(&self) -> bool {
+        matches!(&self.state, State::Running(session) if session.tracer.is_paused())
+    }
+
     /// Final-hop numbers for the All Targets overview.
     pub fn overview(&self) -> Overview {
         let route = self.route();
@@ -393,18 +408,7 @@ impl Tab {
                     ui.selectable_value(&mut self.focus, focus, focus.label());
                 }
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                latency_bars::legend(ui);
-                let problem = match &self.state {
-                    State::Editing(Some(error)) => Some(error.clone()),
-                    // A probing failure (network down) matters more than the history warning.
-                    State::Running(session) => session.tracer.last_error().or_else(|| self.warning.clone()),
-                    _ => self.warning.clone(),
-                };
-                if let Some(problem) = problem {
-                    ui.colored_label(theme::BAD, problem);
-                }
-            });
+            ui.with_layout(Layout::right_to_left(Align::Center), latency_bars::legend);
         });
         action
     }

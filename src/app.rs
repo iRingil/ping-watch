@@ -287,6 +287,72 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Re
     (response, close_clicked)
 }
 
+impl PingWatchApp {
+    /// Status bar: a problem of the shown tab in red (network down, history off, unknown host) or, normally, its key
+    /// numbers; on the overview, how many targets are traced and how many have problems.
+    fn status_bar(&self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            let tab = match self.page {
+                Page::Target(index) => self.tabs.get(index),
+                Page::AllTargets => None,
+            };
+            let Some(tab) = tab else {
+                let problems = self.tabs.iter().filter(|tab| tab.problem().is_some()).count();
+                status_segment(ui, "Targets", self.tabs.len().to_string());
+                if problems > 0 {
+                    ui.separator();
+                    status_problem(ui, &format!("{problems} with problems"));
+                }
+                return;
+            };
+            if let Some(problem) = tab.problem() {
+                status_problem(ui, &problem);
+                return;
+            }
+            let overview = tab.overview();
+            let Some(target) = overview.target else {
+                ui.weak(&overview.status);
+                return;
+            };
+            // "9.9.9.9 / 9.9.9.9" says nothing twice: the host only when it isn't the address itself.
+            let target_text = if overview.title == target.to_string() {
+                overview.title.clone()
+            } else {
+                format!("{target} / {}", overview.title)
+            };
+            status_segment(ui, "Target", target_text);
+            let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
+            ui.separator();
+            status_segment(ui, "Avg", format!("{} ms", format_ms(stats.and_then(|stats| stats.average()))));
+            ui.separator();
+            status_segment(
+                ui,
+                "Loss",
+                stats.map_or_else(|| "-".to_owned(), |stats| format!("{:.1} %", stats.loss_percent())),
+            );
+            ui.separator();
+            status_segment(ui, "Hops", overview.hops.map_or_else(|| "-".to_owned(), |hops| hops.to_string()));
+            if tab.is_paused() {
+                ui.separator();
+                ui.colored_label(theme::WARN, "Paused");
+            }
+        });
+    }
+}
+
+/// A "label value" pair of the status bar.
+fn status_segment(ui: &mut Ui, label: &str, value: String) {
+    ui.weak(label);
+    ui.label(value);
+}
+
+/// A problem in the status bar: a red dot and the message.
+fn status_problem(ui: &mut Ui, message: &str) {
+    let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+    ui.painter().circle_filled(dot.center(), 4.0, theme::BAD);
+    ui.colored_label(theme::BAD, message);
+}
+
 /// The action of a pressed keyboard shortcut, if any (consumed so widgets don't see it).
 fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
     let shortcuts = [
@@ -331,6 +397,11 @@ impl eframe::App for PingWatchApp {
             .frame(bar_frame)
             .show_separator_line(false)
             .show(ui, |ui| self.tab_bar(ui));
+        let status_frame = Frame::new().fill(theme::WELL).inner_margin(Margin::symmetric(12, 5));
+        egui::Panel::bottom("status-bar")
+            .frame(status_frame)
+            .resizable(false)
+            .show(ui, |ui| self.status_bar(ui));
         let context = tab::Context {
             names: &self.names,
             reader: self.reader.as_ref(),
