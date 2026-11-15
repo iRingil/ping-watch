@@ -27,6 +27,8 @@ pub const INK: Color32 = Color32::from_rgb(0xdc, 0xd7, 0xcb);
 pub const INK_MUTED: Color32 = Color32::from_rgb(0x8b, 0x93, 0xa5);
 /// Selection, keyboard focus and the average markers.
 pub const SIGNAL: Color32 = Color32::from_rgb(0x6f, 0xb7, 0xd9);
+/// Signal blue under the pointer.
+pub const SIGNAL_HOVER: Color32 = Color32::from_rgb(0x8f, 0xc9, 0xe4);
 
 /// Green zone background (latency below 100 ms).
 pub const GOOD_ZONE: Color32 = Color32::from_rgb(0x2c, 0x4b, 0x3b);

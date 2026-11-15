@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Ui, Vec2};
+use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
 use crate::theme;
 use egui_extras::{Column, TableBuilder, TableRow};
@@ -125,7 +125,7 @@ pub fn show(
                 });
             }
             if let Some(hop) = target_hop {
-                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus));
+                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus, available));
             }
         });
     latency_bars::connect(ui, &averages);
@@ -154,9 +154,10 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
 }
 
 /// Fills the summary row of the whole round trip (the target hop), with the focus period under the bars.
-fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&str>) {
+/// The row reads as a summary, not another hop: a header-colored band with a rule above it.
+fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&str>, row_width: f32) {
     let emphasis = |text: String| RichText::new(text).font(theme::heading_font(14.5));
-    row.col(|_| {});
+    row.col(|ui| summary_band(ui, row_width));
     row.col(|ui| cell(ui, true, emphasis(stats.sent().to_string())));
     row.col(|_| {});
     row.col(|ui| cell(ui, true, emphasis("Round trip (ms)".to_owned())));
@@ -166,6 +167,17 @@ fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&s
             cell(ui, true, RichText::new(focus).small().color(theme::INK_MUTED));
         }
     });
+}
+
+/// Paints the summary row's band and the rule above it once, across the whole row of width `row_width` starting
+/// at the first cell (cells clip their painting, so it is done with a painter clipped to the row instead).
+fn summary_band(ui: &mut Ui, row_width: f32) {
+    let cell = ui.max_rect();
+    let row = eframe::egui::Rect::from_min_size(cell.min, Vec2::new(row_width, cell.height()));
+    let mut painter = ui.painter().clone();
+    painter.set_clip_rect(row.expand(1.0));
+    painter.rect_filled(row, 0.0, theme::PANE_HEADER);
+    painter.hline(row.x_range(), row.top() + 0.5, Stroke::new(1.5, theme::INK_MUTED));
 }
 
 /// Fills the Avg, Min, Max, Cur, Jitter and PL% columns.

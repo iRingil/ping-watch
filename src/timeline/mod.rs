@@ -395,6 +395,9 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
             for (value, _) in value_marks(scale, height).into_iter().skip(1) {
                 plot.hline(HLine::new("", value).color(GRID_OVER_ZONES).width(1.0).allow_hover(false));
             }
+            for (value, _) in time_marks(from_s, to_s, utc_offset_s) {
+                plot.vline(VLine::new("", value).color(GRID_OVER_ZONES).width(1.0).allow_hover(false));
+            }
             // Titled inside, like the jitter strip, so both charts share one y-axis width and line up.
             plot.add(
                 Text::new("", PlotPoint::new(from_s, scale), "Latency (ms)")

@@ -15,6 +15,7 @@ use eframe::egui::{
 use crate::focus::Focus;
 use crate::history::{self, Recorder, Store};
 use crate::hop_table;
+use crate::icons::{self, Icon, Style};
 use crate::latency_bars;
 use crate::names::{NameCache, resolve};
 use crate::route::{Hop, Route};
@@ -410,18 +411,30 @@ impl Tab {
         }
         let mut start = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
 
-        let arrow_rect = Rect::from_min_max(pos2(input.rect.right() - ARROW_WIDTH, input.rect.top()), input.rect.max);
+        // The arrow is a button set into the field's right end: own face, a divider, a hover state.
+        let arrow_rect =
+            Rect::from_min_max(pos2(input.rect.right() - ARROW_WIDTH, input.rect.top()), input.rect.max).shrink(2.0);
         let arrow =
             ui.interact(arrow_rect, input.id.with("target-list"), Sense::click()).on_hover_text("Saved targets");
-        paint_arrow(ui, arrow_rect, if arrow.hovered() { theme::INK } else { theme::INK_MUTED });
+        let widgets = &ui.visuals().widgets;
+        let arrow_fill = if arrow.hovered() { widgets.hovered.weak_bg_fill } else { widgets.inactive.weak_bg_fill };
+        ui.painter().rect_filled(arrow_rect, CornerRadius::same(2), arrow_fill);
+        icons::paint(
+            ui,
+            arrow_rect.center(),
+            Icon::ArrowDown,
+            if arrow.hovered() { theme::INK } else { theme::INK_MUTED },
+        );
         if !resolving && let Some(targets) = targets {
             Popup::from_toggle_button_response(&arrow)
                 .anchor(input.rect)
                 .width(input.rect.width().max(TARGET_LIST_WIDTH))
                 .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| {
+                    // Picking a target traces it right away.
                     if let Some(address) = self.target_list(ui, targets) {
                         self.host_input = address;
+                        start = true;
                         ui.close();
                     }
                 });
@@ -431,7 +444,7 @@ impl Tab {
         if resolving {
             ui.spinner();
             ui.weak(format!("Resolving {}…", self.host));
-        } else if ui.add(primary_button("Trace")).clicked() {
+        } else if icons::button(ui, Icon::Play, Style::Primary, "Trace (Enter)").clicked() {
             start = true;
         }
         if start && !resolving {
@@ -522,15 +535,16 @@ impl Tab {
         ui.label(RichText::new(format!("{} / {}", session.target, self.host)).font(theme::heading_font(17.0)));
         ui.add_space(8.0);
         let paused = session.tracer.is_paused();
-        let pause = if paused { primary_button("Resume") } else { Button::new("Pause") };
-        if ui
-            .add(pause)
-            .on_hover_text(if paused { "Continue probing" } else { "Stop probing, keep the numbers" })
-            .clicked()
-        {
+        // One split button, as in PingPlotter: the face pauses or resumes, the arrow lists the other actions.
+        let split = if paused {
+            icons::split_button(ui, Icon::Play, theme::GOOD, "Resume probing")
+        } else {
+            icons::split_button(ui, Icon::Pause, theme::SIGNAL, "Pause probing (the numbers are kept)")
+        };
+        if split.main.clicked() {
             session.tracer.set_paused(!paused);
         }
-        ui.menu_button("More", |ui| {
+        Popup::from_toggle_button_response(&split.menu).show(|ui| {
             let items = [
                 ("Reset and restart", RESTART_SHORTCUT, Action::Restart),
                 ("New target", NEW_TARGET_SHORTCUT, Action::NewTarget),
@@ -618,8 +632,8 @@ fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
         font,
         theme::INK_MUTED,
     );
-    paint_pencil(ui, edit_rect, if edit.hovered() { theme::SIGNAL } else { theme::INK_MUTED });
-    paint_cross(ui, delete_rect, if delete.hovered() { theme::BAD } else { theme::INK_MUTED });
+    icons::paint(ui, edit_rect.center(), Icon::Pencil, if edit.hovered() { theme::SIGNAL } else { theme::INK_MUTED });
+    icons::paint(ui, delete_rect.center(), Icon::Cross, if delete.hovered() { theme::BAD } else { theme::INK_MUTED });
 
     if delete.clicked() {
         RowAction::Delete
@@ -632,24 +646,6 @@ fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
     }
 }
 
-/// Paints a pencil icon centered in `rect`.
-fn paint_pencil(ui: &Ui, rect: Rect, color: egui::Color32) {
-    let c = rect.center();
-    let painter = ui.painter();
-    // Body from the tip (bottom left) to the end (top right), with the tip drawn as a small wedge.
-    painter.line_segment([pos2(c.x - 3.0, c.y + 3.0), pos2(c.x + 4.5, c.y - 4.5)], Stroke::new(3.0, color));
-    let tip = vec![pos2(c.x - 6.0, c.y + 6.0), pos2(c.x - 4.6, c.y + 1.8), pos2(c.x - 1.8, c.y + 4.6)];
-    painter.add(egui::Shape::convex_polygon(tip, color, Stroke::NONE));
-}
-
-/// Paints a cross icon centered in `rect`.
-fn paint_cross(ui: &Ui, rect: Rect, color: egui::Color32) {
-    let c = rect.center();
-    let stroke = Stroke::new(1.8, color);
-    ui.painter().line_segment([pos2(c.x - 4.5, c.y - 4.5), pos2(c.x + 4.5, c.y + 4.5)], stroke);
-    ui.painter().line_segment([pos2(c.x - 4.5, c.y + 4.5), pos2(c.x + 4.5, c.y - 4.5)], stroke);
-}
-
 /// Right-hand text of a target list row: its name and IP version, whichever are known ("Office router, ipv4").
 fn target_description(target: &SavedTarget) -> String {
     let family = target.family.map(Family::label);
@@ -658,17 +654,6 @@ fn target_description(target: &SavedTarget) -> String {
         .flatten()
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Paints the down-pointing triangle that opens the target list.
-fn paint_arrow(ui: &Ui, rect: Rect, color: egui::Color32) {
-    let center = rect.center();
-    let points = vec![
-        pos2(center.x - 5.0, center.y - 2.5),
-        pos2(center.x + 5.0, center.y - 2.5),
-        pos2(center.x, center.y + 3.5),
-    ];
-    ui.painter().add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
 /// The main button of a group: signal-colored, so it reads as "the thing to press".

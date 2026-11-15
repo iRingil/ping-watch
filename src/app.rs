@@ -206,7 +206,14 @@ impl PingWatchApp {
         }
         if self.tabs.is_empty() {
             ui.add_space(12.0);
-            ui.weak("No targets yet. Add one with + or Ctrl+N.");
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.weak("No targets yet.");
+                let add = Button::new(RichText::new("Add target").color(theme::CHASSIS)).fill(theme::SIGNAL);
+                if ui.add(add).on_hover_text("Ctrl+N").clicked() {
+                    self.apply(Action::NewTarget);
+                }
+            });
         }
     }
 }

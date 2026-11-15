@@ -10,6 +10,7 @@ mod focus;
 mod history;
 mod hop_table;
 mod icmp;
+mod icons;
 mod latency_bars;
 mod names;
 mod presets;
