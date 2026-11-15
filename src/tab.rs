@@ -43,8 +43,6 @@ pub const TABLE_SHARE: f32 = 0.66;
 const TABLE_SHARE_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.85;
 /// Height of the draggable bar between the panes.
 const SPLITTER_HEIGHT: f32 = 10.0;
-/// Gap between the panes and the window edge.
-pub const PANE_GAP: f32 = 10.0;
 /// Restarts the trace with fresh statistics.
 pub const RESTART_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
 /// Opens a tab for a new target.
@@ -433,7 +431,7 @@ impl Tab {
                 .filter(|ttl| route.hops().iter().any(|hop| hop.ttl == *ttl))
                 .or_else(|| route.hops().last().map(|hop| hop.ttl))
         });
-        let area = ui.available_rect_before_wrap().shrink2(egui::vec2(PANE_GAP, 0.0));
+        let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, egui::Sense::hover());
         let (table_rect, splitter_rect, timeline_rect) = split(area, *table_share);
         splitter(ui, splitter_rect, area, table_share);
@@ -539,12 +537,12 @@ impl Tab {
 /// Splits the pane area into the hop table (top, `table_share` of the height, kept by the app for all tabs), the splitter and the timeline
 /// (the rest). Computed from the window size every frame, so the panes are in place from the first frame.
 pub fn split(area: Rect, table_share: f32) -> (Rect, Rect, Rect) {
-    let usable = area.height() - SPLITTER_HEIGHT - PANE_GAP;
+    let usable = area.height() - SPLITTER_HEIGHT;
     let splitter_top = area.top() + usable * table_share;
     let timeline_top = splitter_top + SPLITTER_HEIGHT;
     let table = Rect::from_min_max(area.min, pos2(area.right(), splitter_top));
     let splitter = Rect::from_min_max(pos2(area.left(), splitter_top), pos2(area.right(), timeline_top));
-    let timeline = Rect::from_min_max(pos2(area.left(), timeline_top), pos2(area.right(), area.bottom() - PANE_GAP));
+    let timeline = Rect::from_min_max(pos2(area.left(), timeline_top), area.max);
     (table, splitter, timeline)
 }
 
@@ -553,7 +551,7 @@ pub fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
     let response = ui
         .interact(rect, ui.scope_id().with("pane-splitter"), egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    let usable = (area.height() - SPLITTER_HEIGHT - PANE_GAP).max(1.0);
+    let usable = (area.height() - SPLITTER_HEIGHT).max(1.0);
     if response.dragged() {
         let share = *table_share + response.drag_delta().y / usable;
         *table_share = share.clamp(*TABLE_SHARE_RANGE.start(), *TABLE_SHARE_RANGE.end());

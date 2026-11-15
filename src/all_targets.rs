@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use eframe::egui::{self, Align, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Ui, pos2, vec2};
+use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
 
 use crate::focus::Focus;
@@ -113,7 +113,7 @@ impl AllTargets {
             .show(ui, |ui| self.toolbar(ui, tabs, targets))
             .inner;
 
-        let area = ui.available_rect_before_wrap().shrink2(vec2(tab::PANE_GAP, 0.0));
+        let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, Sense::hover());
         let now_ms = history::unix_ms(SystemTime::now());
         let visible = (now_ms.saturating_sub(self.settings.trace.period.millis()), now_ms);
@@ -125,8 +125,7 @@ impl AllTargets {
             });
             tab::pane(ui, charts_rect, Margin::same(8), |ui| self.charts(ui, tabs, history_path));
         } else {
-            let table_rect = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - tab::PANE_GAP));
-            tab::pane(ui, table_rect, Margin::same(1), |ui| {
+            tab::pane(ui, area, Margin::same(1), |ui| {
                 request = request.take().or(self.table(ui, tabs, visible, now_ms));
             });
         }
