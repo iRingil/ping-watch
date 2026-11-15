@@ -119,14 +119,32 @@ pub struct Comment {
     pub text: String,
 }
 
-/// Default database location: `%LOCALAPPDATA%\Ping Watch\history.sqlite`.
+/// Marker file next to the executable that makes the copy portable.
+pub const PORTABLE_MARKER: &str = "portable.txt";
+/// Folder of a portable copy's data, next to the executable.
+const PORTABLE_DATA: &str = "userdata";
+
+/// Default database location: `userdata\history.sqlite` next to the executable of a portable copy (one with
+/// [`PORTABLE_MARKER`] beside it), otherwise `%LOCALAPPDATA%\Ping Watch\history.sqlite`.
 ///
 /// # Errors
 ///
-/// [`HistoryError::NoDataDir`] if `%LOCALAPPDATA%` is not set.
+/// [`HistoryError::NoDataDir`] if the copy isn't portable and `%LOCALAPPDATA%` is not set.
 pub fn default_path() -> Result<PathBuf, HistoryError> {
-    let base = std::env::var_os("LOCALAPPDATA").ok_or(HistoryError::NoDataDir)?;
-    Ok(PathBuf::from(base).join(crate::APP_NAME).join("history.sqlite"))
+    let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let portable = exe_dir.filter(|dir| dir.join(PORTABLE_MARKER).is_file());
+    data_dir(portable.as_deref(), std::env::var_os("LOCALAPPDATA").as_deref())
+        .map(|dir| dir.join("history.sqlite"))
+        .ok_or(HistoryError::NoDataDir)
+}
+
+/// The data folder: `userdata` in `portable_dir` (the folder of a portable copy), else `Ping Watch` in
+/// `local_app_data`; `None` if neither is known.
+fn data_dir(portable_dir: Option<&Path>, local_app_data: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    match portable_dir {
+        Some(dir) => Some(dir.join(PORTABLE_DATA)),
+        None => local_app_data.map(|base| PathBuf::from(base).join(crate::APP_NAME)),
+    }
 }
 
 /// Converts a wall-clock time to Unix milliseconds (0 for times before 1970).
@@ -423,6 +441,17 @@ mod tests {
         let store = Store::open_in_memory().expect("in-memory database opens");
         let target = store.target_id("example").expect("target registers");
         (store, target)
+    }
+
+    #[test]
+    fn portable_copies_keep_data_beside_the_program() {
+        let local = std::ffi::OsStr::new(r"C:\Users\me\AppData\Local");
+        assert_eq!(
+            data_dir(Some(Path::new(r"E:\Tools\Ping Watch")), Some(local)),
+            Some(PathBuf::from(r"E:\Tools\Ping Watch\userdata"))
+        );
+        assert_eq!(data_dir(None, Some(local)), Some(PathBuf::from(r"C:\Users\me\AppData\Local\Ping Watch")));
+        assert_eq!(data_dir(None, None), None);
     }
 
     #[test]
