@@ -10,6 +10,9 @@ mod store;
 mod sync;
 mod ui;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::anyhow;
 use eframe::egui;
 
@@ -76,13 +79,16 @@ fn main() -> anyhow::Result<()> {
             // Ctrl+C, Ctrl+Break, a closed console, logoff and shutdown (an IDE's Stop button sends Ctrl+C) close
             // the window like its close button: tabs and history are saved and the process exits normally.
             let context = creation.egui_ctx.clone();
+            let quit = Arc::new(AtomicBool::new(false));
+            let quit_on_signal = Arc::clone(&quit);
             if let Err(error) = ctrlc::set_handler(move || {
+                quit_on_signal.store(true, Ordering::Relaxed);
                 context.send_viewport_cmd(egui::ViewportCommand::Close);
                 context.request_repaint();
             }) {
                 log::warn!("cannot handle Ctrl+C: {error}");
             }
-            Ok(Box::new(PingWatchApp::new(hosts, tray, window_store, saved_window)))
+            Ok(Box::new(PingWatchApp::new(hosts, tray, window_store, saved_window, quit)))
         }),
     )
     // `eframe::Error` isn't `Send + Sync`, so it can't go into `anyhow` directly.

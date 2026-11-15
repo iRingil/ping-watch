@@ -15,6 +15,7 @@ use crate::probe::names::{NameCache, resolve};
 use crate::probe::route::{Hop, Route};
 use crate::probe::tracer::{TraceConfig, Tracer};
 use crate::store::history::{self, HopKey, Recorder, Store};
+use crate::store::settings::AppSettings;
 use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::SavedTab;
 use crate::ui::focus::Focus;
@@ -72,6 +73,8 @@ pub struct Context<'a> {
     pub history_path: Option<&'a Path>,
     /// The user's target list, `None` if history is off.
     pub targets: Option<&'a TargetList>,
+    /// The app's settings (probe timeout, hop limit, history retention).
+    pub settings: &'a AppSettings,
 }
 
 /// A running trace of one target.
@@ -150,17 +153,19 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// An empty tab asking for a host.
-    pub fn new() -> Self {
+    /// An empty tab asking for a host, with the interval, focus and timeline period of `defaults`.
+    pub fn new(defaults: TraceSettings) -> Self {
+        let mut timeline = Timeline::default();
+        timeline.set_period(defaults.period);
         Self {
             entry: TargetEntry::new(true),
             host: String::new(),
             state: State::Editing(None),
             warning: None,
             selected_ttl: None,
-            timeline: Timeline::default(),
-            interval: Duration::from_secs(1),
-            focus: Focus::default(),
+            timeline,
+            interval: defaults.interval,
+            focus: defaults.focus,
             chart: None,
             saved_settings: None,
             start_paused: false,
@@ -170,24 +175,17 @@ impl Tab {
     }
 
     /// A tab that starts tracing `host` right away.
-    pub fn tracing(host: String) -> Self {
-        let mut tab = Self::new();
+    pub fn tracing(host: String, defaults: TraceSettings) -> Self {
+        let mut tab = Self::new(defaults);
         tab.entry.set_text(&host);
         tab.begin(host);
         tab
     }
 
-    /// A tab that starts tracing `host` right away with `interval`, unless the target has remembered settings.
-    pub fn tracing_every(host: String, interval: Duration) -> Self {
-        let mut tab = Self::tracing(host);
-        tab.interval = interval;
-        tab
-    }
-
     /// A tab restored from the last run: traces `saved.host` again, starting paused if it wasn't tracing then,
     /// with its chart on the All targets page if it had one.
-    pub fn restored(saved: &SavedTab) -> Self {
-        let mut tab = Self::tracing(saved.host.clone());
+    pub fn restored(saved: &SavedTab, defaults: TraceSettings) -> Self {
+        let mut tab = Self::tracing(saved.host.clone(), defaults);
         tab.start_paused = !saved.tracing;
         tab.set_charted(saved.charted);
         tab
@@ -357,13 +355,18 @@ impl Tab {
             .and_then(|reader| reader.target_id(&key).inspect_err(|error| log::warn!("{error}")).ok());
         let recorder = match context.history_path {
             None => Err("history is off: no data folder".to_owned()),
-            Some(path) => Recorder::start(path, &key).map_err(|error| format!("history is off: {error}")),
+            Some(path) => Recorder::start(path, &key, context.settings.retention)
+                .map_err(|error| format!("history is off: {error}")),
         };
         if let Err(warning) = &recorder {
             log::warn!("{warning}");
         }
         let recorder = recorder.map_err(|warning| self.warning = Some(warning)).ok();
-        let config = TraceConfig { interval: self.interval, ..TraceConfig::default() };
+        let config = TraceConfig {
+            interval: self.interval,
+            timeout: context.settings.timeout,
+            max_hops: context.settings.max_hops,
+        };
         match Tracer::start(target, config, recorder.as_ref().and_then(Recorder::sender)) {
             Ok(tracer) => {
                 if std::mem::take(&mut self.start_paused) {

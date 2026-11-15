@@ -6,6 +6,7 @@ pub mod focus;
 pub mod hop_table;
 pub mod icons;
 pub mod latency_bars;
+pub mod settings;
 pub mod tab;
 pub mod tab_strip;
 pub mod target_entry;

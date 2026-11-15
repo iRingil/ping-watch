@@ -1,6 +1,6 @@
 //! Probe history in SQLite: a background [`Recorder`] writes samples in batches, [`Store::buckets`] aggregates
-//! them into time buckets for the charts; user comments on the timeline live here too. Samples older than
-//! [`RETENTION`] are deleted.
+//! them into time buckets for the charts; user comments on the timeline live here too. Samples older than the
+//! retention period (a setting) are deleted.
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -20,8 +20,6 @@ macro_rules! jitter_window_preceding {
     };
 }
 
-/// How long samples are kept: the longest period the timeline can show.
-pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How often the recorder writes collected samples.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the recorder deletes expired samples.
@@ -331,18 +329,19 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Opens the database at `path` and starts recording samples of the target called `target`.
+    /// Opens the database at `path` and starts recording samples of the target called `target`; samples older than
+    /// `retention` are deleted.
     ///
     /// # Errors
     ///
     /// [`HistoryError`] if the database can't be opened or the thread can't be started.
-    pub fn start(path: &Path, target: &str) -> Result<Self, HistoryError> {
+    pub fn start(path: &Path, target: &str, retention: Duration) -> Result<Self, HistoryError> {
         let store = Store::open(path)?;
         let target_id = store.target_id(target)?;
         let (sender, receiver) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("history".to_owned())
-            .spawn(move || record_loop(store, target_id, &receiver))?;
+            .spawn(move || record_loop(store, target_id, retention, &receiver))?;
         Ok(Self { sender: Some(sender), worker: Some(worker) })
     }
 
@@ -365,7 +364,7 @@ impl Drop for Recorder {
 }
 
 /// Writer body: collects samples, writes them every [`FLUSH_INTERVAL`], prunes every [`PRUNE_INTERVAL`].
-fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Sample>) {
+fn record_loop(mut store: Store, target_id: i64, retention: Duration, receiver: &Receiver<Sample>) {
     let mut batch = Vec::new();
     let mut last_prune: Option<Instant> = None;
     let mut connected = true;
@@ -389,7 +388,7 @@ fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Sample>) {
             batch.clear();
         }
         if last_prune.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL) {
-            let retention_ms = i64::try_from(RETENTION.as_millis()).unwrap_or(i64::MAX);
+            let retention_ms = i64::try_from(retention.as_millis()).unwrap_or(i64::MAX);
             match store.prune(unix_ms(SystemTime::now()).saturating_sub(retention_ms)) {
                 Ok(deleted) => log::debug!("pruned {deleted} expired samples"),
                 Err(error) => log::error!("cannot prune history: {error}"),
@@ -544,7 +543,7 @@ mod tests {
     fn recorder_flushes_on_drop() {
         let folder = std::env::temp_dir().join(format!("ping-watch-test-{}", std::process::id()));
         let path = folder.join("history.sqlite");
-        let recorder = Recorder::start(&path, "example").expect("recorder starts");
+        let recorder = Recorder::start(&path, "example", Duration::from_secs(3_600)).expect("recorder starts");
         let sender = recorder.sender().expect("sender available");
         // A current timestamp, or the recorder's first prune would delete the sample as expired.
         let now = unix_ms(SystemTime::now());

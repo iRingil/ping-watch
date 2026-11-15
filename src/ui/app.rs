@@ -3,17 +3,21 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::probe::names::NameCache;
 use crate::store::history::{self, Store};
-use crate::store::targets::TargetList;
+use crate::store::settings::{AppSettings, SettingsStore};
+use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::{SavedTab, WindowState, WindowStore};
 use crate::ui::all_targets::{AllTargets, Request};
 use crate::ui::hop_table::format_ms;
 use crate::ui::icons;
+use crate::ui::settings::SettingsWindow;
 use crate::ui::tab::{self, Action, Tab};
 use crate::ui::tab_strip;
 use crate::ui::theme;
@@ -86,19 +90,38 @@ pub struct PingWatchApp {
     tabs_saved: Vec<SavedTab>,
     /// The All targets page.
     all_targets: AllTargets,
+    /// The app's settings as changed in the Settings window.
+    settings: AppSettings,
+    /// The settings as last stored.
+    settings_saved: AppSettings,
+    /// Where the settings are kept, `None` if history is off.
+    settings_store: Option<SettingsStore>,
+    /// The Settings window.
+    settings_window: SettingsWindow,
+    /// Set when the app must really quit (tray Exit, Ctrl+C), even if the close button only hides the window.
+    quit: Arc<AtomicBool>,
 }
 
 impl PingWatchApp {
     /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab, the `tray`
     /// icon, and the window state as stored in `window_store` (`saved_window`, already applied to the window's
-    /// geometry by the caller).
+    /// geometry by the caller). `quit` is set by whoever wants the app to quit for good (Ctrl+C).
     pub fn new(
         hosts: Vec<String>,
         tray: Option<Tray>,
         window_store: Option<WindowStore>,
         saved_window: Option<WindowState>,
+        quit: Arc<AtomicBool>,
     ) -> Self {
         let history_path = history::default_path().inspect_err(|error| log::warn!("{error}")).ok();
+        let settings_store = history_path
+            .as_deref()
+            .and_then(|path| SettingsStore::open(path).inspect_err(|error| log::warn!("{error}")).ok());
+        let settings = settings_store
+            .as_ref()
+            .and_then(|store| store.load().inspect_err(|error| log::warn!("{error}")).ok())
+            .unwrap_or_default();
+        let defaults = settings.defaults;
         let reader = history_path
             .as_deref()
             .and_then(|path| Store::open(path).inspect_err(|error| log::warn!("{error}")).ok());
@@ -111,15 +134,15 @@ impl PingWatchApp {
         } else {
             Vec::new()
         };
-        let mut tabs: Vec<Tab> = hosts.into_iter().map(Tab::tracing).collect();
-        tabs.extend(saved_tabs.iter().map(Tab::restored));
+        let mut tabs: Vec<Tab> = hosts.into_iter().map(|host| Tab::tracing(host, defaults)).collect();
+        tabs.extend(saved_tabs.iter().map(|saved| Tab::restored(saved, defaults)));
         let page = match saved_tabs.iter().position(|saved| saved.shown) {
             Some(index) => Page::Target(index),
             None if !saved_tabs.is_empty() => Page::AllTargets,
             None => Page::Target(0),
         };
         if tabs.is_empty() {
-            tabs.push(Tab::new());
+            tabs.push(Tab::new(defaults));
         }
         let targets = history_path
             .as_deref()
@@ -158,6 +181,35 @@ impl PingWatchApp {
             window_saved: saved_window,
             window_saved_at: Instant::now(),
             start_minimized: saved_window.is_some_and(|state| state.minimized),
+            settings,
+            settings_saved: settings,
+            settings_store,
+            settings_window: SettingsWindow::default(),
+            quit,
+        }
+    }
+
+    /// Stores the settings whenever they changed.
+    fn save_settings(&mut self) {
+        if self.settings == self.settings_saved {
+            return;
+        }
+        if let Some(store) = &mut self.settings_store
+            && let Err(error) = store.save(&self.settings)
+        {
+            log::warn!("cannot save the settings: {error}");
+        }
+        // One attempt per change, not one per frame.
+        self.settings_saved = self.settings;
+    }
+
+    /// With "hide to the tray" set, the close button hides the window instead of quitting, unless the app was told
+    /// to quit for good (tray Exit, Ctrl+C).
+    fn hide_instead_of_closing(&self, ctx: &egui::Context) {
+        let closing = ctx.input(|input| input.viewport().close_requested());
+        if closing && self.settings.close_to_tray && !self.quit.load(Ordering::Relaxed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
     }
 
@@ -165,7 +217,7 @@ impl PingWatchApp {
     fn apply(&mut self, action: Action) {
         match action {
             Action::NewTarget => {
-                self.tabs.push(Tab::new());
+                self.tabs.push(Tab::new(self.settings.defaults));
                 self.page = Page::Target(self.tabs.len().saturating_sub(1));
             }
             Action::Restart => {
@@ -325,7 +377,9 @@ impl PingWatchApp {
                 new_target = true;
             }
             ui.add_space((ui.available_width() - GEAR_WIDTH - TAB_GAP).max(0.0));
-            gear_button(ui);
+            if gear_button(ui).clicked() {
+                self.settings_window.open();
+            }
         });
         if new_target {
             self.apply(Action::NewTarget);
@@ -618,9 +672,11 @@ fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
 impl eframe::App for PingWatchApp {
     /// Handles the tray icon and keeps the window state; runs even while the window is minimized or hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.hide_instead_of_closing(ctx);
         self.track_window(ctx);
         self.track_tabs();
         self.all_targets.save(self.window_store.as_ref());
+        self.save_settings();
         let Some(tray) = &self.tray else {
             return;
         };
@@ -631,7 +687,10 @@ impl eframe::App for PingWatchApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
-                TrayCommand::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                TrayCommand::Exit => {
+                    self.quit.store(true, Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
         }
     }
@@ -661,6 +720,7 @@ impl eframe::App for PingWatchApp {
             reader: self.reader.as_ref(),
             history_path: self.history_path.as_deref(),
             targets: self.targets.as_ref(),
+            settings: &self.settings,
         };
         for tab in &mut self.tabs {
             tab.poll(context);
@@ -672,7 +732,11 @@ impl eframe::App for PingWatchApp {
                 });
                 match request {
                     Some(Request::Open(index)) => self.page = Page::Target(index),
-                    Some(Request::Add(host)) => self.tabs.push(Tab::tracing_every(host, self.all_targets.interval())),
+                    Some(Request::Add(host)) => {
+                        let defaults =
+                            TraceSettings { interval: self.all_targets.interval(), ..self.settings.defaults };
+                        self.tabs.push(Tab::tracing(host, defaults));
+                    }
                     None => {}
                 }
                 None
@@ -685,6 +749,8 @@ impl eframe::App for PingWatchApp {
         if let Some(action) = action {
             self.apply(action);
         }
+        let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
+        self.settings_window.show(ui.ctx(), &mut self.settings, data_folder);
         ui.ctx().request_repaint_after(REFRESH);
     }
 }

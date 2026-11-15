@@ -17,6 +17,7 @@ rusqlite = { version = "0.42.0", features = ["bundled"] }
 thiserror = "2.0.21"
 tray-icon = "0.26.1"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_IO"] }
+windows-registry = "0.100.0"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
