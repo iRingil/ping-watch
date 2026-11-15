@@ -18,6 +18,8 @@ const SCALE_HEADROOM: f64 = 2.0;
 /// Number of consecutive buckets averaged to find the scale: a spike narrower than this can't stretch the scale
 /// by itself — it is drawn clipped at the top instead — while a sustained rise moves the scale with it.
 const SMOOTHING_BUCKETS: usize = 15;
+/// Empty buckets in a row that the line bridges by holding the previous value; more is a real pause.
+const MAX_BRIDGED_BUCKETS: i64 = 2;
 /// Candidate steps between time axis marks, in seconds.
 const TIME_STEPS_S: [i64; 17] =
     [1, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1_800, 3_600, 7_200, 10_800, 21_600, 43_200, 86_400];
@@ -176,7 +178,14 @@ impl Trace {
             match value {
                 Some(value) => {
                     let level = value.min(scale_ms);
-                    current.push([x - half_width_s, level]);
+                    let start = x - half_width_s;
+                    // Across bridged empty buckets the previous step holds until this one starts.
+                    if let Some(&[last_x, last_level]) = current.last()
+                        && last_x < start
+                    {
+                        current.push([start, last_level]);
+                    }
+                    current.push([start, level]);
                     current.push([x + half_width_s, level]);
                     if value > scale_ms {
                         trace.clipped.push([x, scale_ms]);
@@ -215,7 +224,10 @@ impl Series {
         let mut previous_start: Option<i64> = None;
         for bucket in buckets {
             let x = seconds(bucket.start_ms) + seconds(bucket_ms) / 2.0;
-            let gap_before = previous_start.is_some_and(|start| start.saturating_add(bucket_ms) != bucket.start_ms);
+            // Probes drift a little against the bucket grid, so a bucket now and then stays empty while its
+            // neighbour gets two samples; only longer pauses break the line.
+            let bridgeable = bucket_ms.saturating_mul(MAX_BRIDGED_BUCKETS.saturating_add(1));
+            let gap_before = previous_start.is_some_and(|start| bucket.start_ms.saturating_sub(start) > bridgeable);
             latency.push((x, bucket.avg.map(millis), gap_before));
             jitter.push((x, bucket.jitter.map(millis), gap_before));
             if bucket.sent > bucket.received {
@@ -350,7 +362,7 @@ mod tests {
             bucket(1_000, 1, 1, Some(20)),
             bucket(2_000, 1, 0, None), // lost
             bucket(3_000, 1, 1, Some(30)),
-            bucket(5_000, 1, 1, Some(40)), // gap before
+            bucket(7_000, 1, 1, Some(40)), // a real pause before: three empty buckets
         ];
         let series = Series::from_buckets(&buckets, 1_000);
         // Steps: every value spans its whole bucket.
@@ -359,10 +371,20 @@ mod tests {
             vec![
                 vec![[0.0, 10.0], [1.0, 10.0], [1.0, 20.0], [2.0, 20.0]],
                 vec![[3.0, 30.0], [4.0, 30.0]],
-                vec![[5.0, 40.0], [6.0, 40.0]],
+                vec![[7.0, 40.0], [8.0, 40.0]],
             ]
         );
         assert_eq!(series.loss, vec![(2.5, 100.0)]);
+    }
+
+    #[test]
+    fn a_missing_bucket_is_bridged_by_holding_the_step() {
+        let buckets = [bucket(0, 1, 1, Some(10)), bucket(2_000, 2, 2, Some(20))];
+        let series = Series::from_buckets(&buckets, 1_000);
+        assert_eq!(
+            series.latency.segments,
+            vec![vec![[0.0, 10.0], [1.0, 10.0], [2.0, 10.0], [2.0, 20.0], [3.0, 20.0]]]
+        );
     }
 
     #[test]
