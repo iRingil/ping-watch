@@ -9,6 +9,7 @@ pub mod icons;
 pub mod latency_bars;
 pub mod notify;
 pub mod settings;
+pub mod single_instance;
 pub mod tab;
 pub mod tab_strip;
 pub mod target_entry;

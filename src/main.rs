@@ -51,6 +51,15 @@ fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
 /// Program entry point.
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    // A second start shows the running window instead (its hosts, if any, are not opened).
+    let first_instance = match ui::single_instance::claim() {
+        ui::single_instance::Claim::First(first) => Some(first),
+        ui::single_instance::Claim::Other => {
+            log::info!("Ping Watch is already running; its window was asked to show");
+            return Ok(());
+        }
+        ui::single_instance::Claim::Unknown => None,
+    };
     let hosts: Vec<String> = std::env::args().skip(1).collect();
     // The window comes back where and as it was left.
     let window_store = store::history::default_path()
@@ -84,6 +93,15 @@ fn main() -> anyhow::Result<()> {
                 .ok();
             // Ctrl+C, Ctrl+Break, a closed console, logoff and shutdown (an IDE's Stop button sends Ctrl+C) close
             // the window like its close button: tabs and history are saved and the process exits normally.
+            if let Some(first) = first_instance {
+                let context = creation.egui_ctx.clone();
+                first.on_show(move || {
+                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    context.request_repaint();
+                });
+            }
             let context = creation.egui_ctx.clone();
             let quit = Arc::new(AtomicBool::new(false));
             let quit_on_signal = Arc::clone(&quit);

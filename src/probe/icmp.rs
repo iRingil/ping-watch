@@ -116,6 +116,12 @@ impl Pinger {
             IpAddr::V4(_) => parse_v4(&buffer),
             IpAddr::V6(_) => parse_v6(&buffer),
         };
+        // With no reply counted, only a buffer the call really filled (with the router's answer) is taken: an
+        // untouched, zeroed buffer would read as "success from 0.0.0.0 in 0 ms".
+        if replies == 0 && status != IP_TTL_EXPIRED_TRANSIT {
+            log::debug!("probe {target} ttl {ttl}: no reply in the buffer");
+            return Ok(ProbeOutcome::Lost);
+        }
         Ok(match status {
             IP_SUCCESS | IP_TTL_EXPIRED_TRANSIT => ProbeOutcome::Reply { from, rtt: round_trip(measured, kernel_ms) },
             status => {
