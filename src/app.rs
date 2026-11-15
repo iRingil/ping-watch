@@ -374,7 +374,7 @@ fn scroll_arrow(ui: &mut Ui, left: bool, active: bool) -> bool {
 }
 
 /// A tab of the tab bar: a box with rounded top corners. Every tab keeps its outline; the open one is filled with
-/// the toolbar color (so it joins the toolbar below) and has a signal-blue top edge. Returns the tab's response
+/// the toolbar color (so it joins the toolbar below) and has a signal-blue line along its bottom. Returns the tab's response
 /// and whether its close mark was clicked.
 fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Response, bool) {
     let font = theme::heading_font(14.5);
@@ -395,10 +395,11 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Re
     let painter = ui.painter();
     painter.rect(rect, corners, fill, Stroke::new(1.0, theme::RULE), StrokeKind::Inside);
     if open {
-        // Open the bottom edge into the toolbar and mark the top.
+        // Open the bottom edge into the toolbar and mark it with a signal line just above (a line along the top
+        // would cut across the rounded corners).
         let inner = (rect.left() + 1.0)..=(rect.right() - 1.0);
         painter.hline(inner.clone(), rect.bottom() - 0.5, Stroke::new(2.0, fill));
-        painter.hline(inner, rect.top() + 1.0, Stroke::new(2.0, theme::SIGNAL));
+        painter.hline(inner, rect.bottom() - 3.0, Stroke::new(2.0, theme::SIGNAL));
     }
     let text_pos = egui::pos2(rect.left() + TAB_PADDING, rect.center().y - galley.size().y / 2.0);
     painter.galley(text_pos, galley, text_color);
