@@ -20,6 +20,8 @@ pub enum Icon {
     Pencil,
     /// Diagonal cross: delete, close.
     Cross,
+    /// Cog wheel: settings and the app menu.
+    Gear,
 }
 
 /// Look of an icon button.
@@ -65,6 +67,17 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
             let stroke = Stroke::new(1.8, color);
             painter.line_segment([pos2(c.x - 4.5, c.y - 4.5), pos2(c.x + 4.5, c.y + 4.5)], stroke);
             painter.line_segment([pos2(c.x - 4.5, c.y + 4.5), pos2(c.x + 4.5, c.y - 4.5)], stroke);
+        }
+        Icon::Gear => {
+            // Eight teeth around a ring; the ring's open middle is the axle hole.
+            let tooth = Stroke::new(3.2, color);
+            for step in 0..8_u8 {
+                let angle = f32::from(step) * std::f32::consts::FRAC_PI_4;
+                let (dx, dy) = (angle.cos(), angle.sin());
+                let at = |radius: f32| pos2(c.x + dx * radius, c.y + dy * radius);
+                painter.line_segment([at(4.5), at(8.5)], tooth);
+            }
+            painter.circle_stroke(c, 5.0, Stroke::new(2.8, color));
         }
     }
 }

@@ -13,6 +13,7 @@ use crate::store::targets::TargetList;
 use crate::store::window_state::{SavedTab, WindowState, WindowStore};
 use crate::ui::all_targets::{AllTargets, Request};
 use crate::ui::hop_table::format_ms;
+use crate::ui::icons;
 use crate::ui::tab::{self, Action, Tab};
 use crate::ui::tab_strip;
 use crate::ui::theme;
@@ -38,6 +39,8 @@ const PEEK_MIN_WIDTH: f32 = 16.0;
 const FADE_WIDTH: f32 = 48.0;
 /// Width of the "+" (new target) button.
 const PLUS_WIDTH: f32 = 24.0;
+/// Width of the gear (app menu) button at the right end of the tab bar.
+const GEAR_WIDTH: f32 = 28.0;
 
 /// Which page the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +249,8 @@ impl PingWatchApp {
             let widths: Vec<f32> = titles.iter().map(|title| tab_width(ui, title, true)).collect();
             let all_width: f32 = widths.iter().map(|width| width + TAB_GAP).sum();
             let available = ui.available_width();
+            // The gear keeps its place at the right end whatever the tabs do.
+            let available = available - GEAR_WIDTH - TAB_GAP;
             let (first, count, strip) = if all_width + PLUS_WIDTH <= available {
                 (0, titles.len(), None)
             } else {
@@ -319,6 +324,8 @@ impl PingWatchApp {
             if ui.add_sized([PLUS_WIDTH, TAB_HEIGHT], plus).on_hover_text("New target (Ctrl+N)").clicked() {
                 new_target = true;
             }
+            ui.add_space((ui.available_width() - GEAR_WIDTH - TAB_GAP).max(0.0));
+            gear_button(ui);
         });
         if new_target {
             self.apply(Action::NewTarget);
@@ -340,6 +347,18 @@ fn fade_out(ui: &Ui, rect: Rect, color: egui::Color32) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     ui.painter().add(mesh);
+}
+
+/// The gear at the right end of the tab bar: will open the app menu (settings, alerts, copy, about).
+fn gear_button(ui: &mut Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(GEAR_WIDTH, TAB_HEIGHT), Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), theme::PANE_HEADER);
+    }
+    let color = if response.hovered() { theme::INK } else { theme::INK_MUTED };
+    icons::paint(ui, rect.center(), icons::Icon::Gear, color);
+    response.on_hover_text("Settings and more")
 }
 
 /// Width of a tab titled `title`, with a close mark if `closable`.
