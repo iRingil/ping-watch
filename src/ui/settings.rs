@@ -245,18 +245,20 @@ fn appearance(ui: &mut Ui) {
 fn language(ui: &mut Ui) {
     settings_grid(ui, "settings-language", |ui| {
         ui.weak("Interface");
-        icon_option(ui, Icon::Globe, "English", true).on_disabled_hover_text("Other languages aren't ready yet");
+        icon_option(ui, Icon::FlagGb, "English", true).on_disabled_hover_text("Other languages aren't ready yet");
         ui.end_row();
     });
 }
 
-/// A choice shown as its icon and a radio button; disabled while only one choice exists.
+/// A choice shown as a radio button, its icon and its label; disabled while only one choice exists.
 fn icon_option(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> egui::Response {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+        let radio = ui.add_enabled(false, egui::RadioButton::new(selected, ""));
+        let (rect, icon_response) = ui.allocate_exact_size(egui::vec2(22.0, 18.0), egui::Sense::hover());
         icons::paint(ui, rect.center(), icon, if selected { theme::INK } else { theme::INK_MUTED });
-        ui.add_enabled(false, egui::RadioButton::new(selected, label))
+        let text = ui.add_enabled(false, egui::Label::new(label));
+        radio.union(icon_response).union(text)
     })
     .inner
 }
@@ -294,7 +296,7 @@ impl SettingsWindow {
                 ui.label(RichText::new(APP_NAME).font(theme::heading_font(20.0)));
                 ui.horizontal(|ui| {
                     ui.weak(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                    if ui.small_button("Check for updates").clicked() {
+                    if ui.button("Check for updates").clicked() {
                         self.update_asked = true;
                     }
                 });
@@ -322,7 +324,7 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
         ui.horizontal(|ui| match data_folder {
             Some(folder) => {
                 ui.label(folder.display().to_string());
-                if ui.small_button("Open").clicked()
+                if ui.button("Open").clicked()
                     && let Err(error) = std::process::Command::new("explorer").arg(folder).spawn()
                 {
                     log::warn!("cannot open {}: {error}", folder.display());

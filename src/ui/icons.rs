@@ -28,8 +28,8 @@ pub enum Icon {
     Moon,
     /// Circle half filled: a theme following Windows.
     Auto,
-    /// Globe with a meridian and the equator: language.
-    Globe,
+    /// Flag of the United Kingdom: English.
+    FlagGb,
 }
 
 /// Look of an icon button.
@@ -111,18 +111,23 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
                 .collect();
             painter.add(egui::Shape::convex_polygon(half, color, Stroke::NONE));
         }
-        Icon::Globe => {
-            let stroke = Stroke::new(1.5, color);
-            painter.circle_stroke(c, 7.0, stroke);
-            painter.line_segment([pos2(c.x - 7.0, c.y), pos2(c.x + 7.0, c.y)], stroke);
-            // The meridian as an ellipse: a narrow polygon outline.
-            let meridian: Vec<Pos2> = (0..32_u8)
-                .map(|step| {
-                    let angle = f32::from(step) * std::f32::consts::TAU / 32.0;
-                    pos2(c.x + angle.cos() * 3.0, c.y + angle.sin() * 7.0)
-                })
-                .collect();
-            painter.add(egui::Shape::closed_line(meridian, stroke));
+        Icon::FlagGb => {
+            // The Union Jack, simplified to read at 20 x 12 points: blue field, white and red saltires, white and
+            // red crosses. Drawn in its own colors; `color` only dims it for an unselected choice.
+            let flag = Rect::from_center_size(c, vec2(20.0, 12.0));
+            let dim = |rgb: Color32| if color == theme::INK { rgb } else { rgb.gamma_multiply(0.6) };
+            let mut clipped = painter.clone();
+            clipped.set_clip_rect(flag);
+            clipped.rect_filled(flag, 0.0, dim(Color32::from_rgb(0x01, 0x21, 0x69)));
+            let (white, red) = (dim(Color32::WHITE), dim(Color32::from_rgb(0xc8, 0x10, 0x2e)));
+            for (from, to) in [(flag.left_top(), flag.right_bottom()), (flag.left_bottom(), flag.right_top())] {
+                clipped.line_segment([from, to], Stroke::new(3.0, white));
+                clipped.line_segment([from, to], Stroke::new(1.0, red));
+            }
+            clipped.line_segment([pos2(c.x, flag.top()), pos2(c.x, flag.bottom())], Stroke::new(4.0, white));
+            clipped.line_segment([pos2(flag.left(), c.y), pos2(flag.right(), c.y)], Stroke::new(4.0, white));
+            clipped.line_segment([pos2(c.x, flag.top()), pos2(c.x, flag.bottom())], Stroke::new(2.2, red));
+            clipped.line_segment([pos2(flag.left(), c.y), pos2(flag.right(), c.y)], Stroke::new(2.2, red));
         }
     }
 }
