@@ -151,6 +151,8 @@ pub struct Tab {
     editing: Option<Draft>,
     /// Settings as last stored for this target; compared each frame to store changes.
     saved_settings: Option<TraceSettings>,
+    /// Pause the trace as soon as it starts (a tab restored from a paused one).
+    start_paused: bool,
 }
 
 impl Tab {
@@ -168,6 +170,7 @@ impl Tab {
             focus_input: true,
             editing: None,
             saved_settings: None,
+            start_paused: false,
         }
     }
 
@@ -177,6 +180,27 @@ impl Tab {
         tab.host_input.clone_from(&host);
         tab.begin(host);
         tab
+    }
+
+    /// A tab restored from the last run: traces `host` again, starting paused if it wasn't `tracing` then.
+    pub fn restored(host: String, tracing: bool) -> Self {
+        let mut tab = Self::tracing(host);
+        tab.start_paused = !tracing;
+        tab
+    }
+
+    /// What to remember about this tab: its host and whether it is tracing (resolving counts as about to trace);
+    /// `None` for a tab without a host.
+    pub fn remembered(&self) -> Option<(String, bool)> {
+        if self.host.is_empty() {
+            return None;
+        }
+        let tracing = match &self.state {
+            State::Running(session) => !session.tracer.is_paused(),
+            State::Resolving(_) => !self.start_paused,
+            State::Editing(_) => false,
+        };
+        Some((self.host.clone(), tracing))
     }
 
     /// Stores the running trace's interval, focus and timeline period for its target whenever they changed.
@@ -276,7 +300,12 @@ impl Tab {
         let recorder = recorder.map_err(|warning| self.warning = Some(warning)).ok();
         let config = TraceConfig { interval: self.interval, ..TraceConfig::default() };
         match Tracer::start(target, config, recorder.as_ref().and_then(Recorder::sender)) {
-            Ok(tracer) => self.state = State::Running(Session { target, target_id, tracer, recorder }),
+            Ok(tracer) => {
+                if std::mem::take(&mut self.start_paused) {
+                    tracer.set_paused(true);
+                }
+                self.state = State::Running(Session { target, target_id, tracer, recorder });
+            }
             Err(error) => self.fail(error.to_string()),
         }
     }

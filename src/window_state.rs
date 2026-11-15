@@ -1,6 +1,6 @@
 //! The window's state kept between runs: position and size (of the normal, not maximized window), whether it was
-//! maximized or minimized, and the split between the hop table and the timeline. Stored as key/value rows in the
-//! history database.
+//! maximized or minimized, the split between the hop table and the timeline, and the open tabs (their targets, which
+//! one was shown, whether each was tracing). Stored in the history database.
 
 use std::path::Path;
 
@@ -8,12 +8,18 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::history::HistoryError;
 
-/// Schema of the key/value table.
+/// Schema: window geometry as key/value rows, and the open tabs in order.
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS window_state (
         key   TEXT PRIMARY KEY,
         value REAL NOT NULL
     ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS open_tabs (
+        position INTEGER PRIMARY KEY,
+        host     TEXT NOT NULL,
+        tracing  INTEGER NOT NULL, -- 1 tracing, 0 paused or not started
+        shown    INTEGER NOT NULL  -- 1 for the tab that was shown
+    );
 ";
 /// Stored keys, in the order of [`WindowState::values`].
 const KEYS: [&str; 7] = ["x", "y", "width", "height", "maximized", "minimized", "table_share"];
@@ -62,6 +68,17 @@ impl WindowState {
             && self.x.abs() < MAX_COORDINATE
             && self.y.abs() < MAX_COORDINATE
     }
+}
+
+/// An open tab as remembered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedTab {
+    /// Target host as entered.
+    pub host: String,
+    /// Whether it was tracing (not paused).
+    pub tracing: bool,
+    /// Whether it was the shown tab.
+    pub shown: bool,
 }
 
 /// Connection to the stored window state.
@@ -127,6 +144,37 @@ impl WindowStore {
         }))
     }
 
+    /// The remembered tabs in order; empty if none were open.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn load_tabs(&self) -> Result<Vec<SavedTab>, HistoryError> {
+        let mut statement = self.connection.prepare("SELECT host, tracing, shown FROM open_tabs ORDER BY position")?;
+        let rows = statement.query_map([], |row| {
+            Ok(SavedTab { host: row.get(0)?, tracing: row.get::<_, i64>(1)? != 0, shown: row.get::<_, i64>(2)? != 0 })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Replaces the remembered tabs with `tabs`.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails; then nothing is changed.
+    pub fn save_tabs(&mut self, tabs: &[SavedTab]) -> Result<(), HistoryError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM open_tabs", [])?;
+        for (position, tab) in (0_i64..).zip(tabs) {
+            transaction.execute(
+                "INSERT INTO open_tabs (position, host, tracing, shown) VALUES (?1, ?2, ?3, ?4)",
+                params![position, tab.host, tab.tracing, tab.shown],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Stores `state`.
     ///
     /// # Errors
@@ -176,6 +224,20 @@ mod tests {
         let changed = WindowState { maximized: true, ..state() };
         store.save(changed).expect("saved again");
         assert_eq!(store.load().ok(), Some(Some(changed)));
+    }
+
+    #[test]
+    fn tabs_round_trip_in_order() {
+        let mut store = WindowStore::open_in_memory().expect("store opens");
+        assert_eq!(store.load_tabs().ok(), Some(Vec::new()));
+        let tabs = vec![
+            SavedTab { host: "9.9.9.9".to_owned(), tracing: true, shown: false },
+            SavedTab { host: "github.com".to_owned(), tracing: false, shown: true },
+        ];
+        store.save_tabs(&tabs).expect("saved");
+        assert_eq!(store.load_tabs().ok(), Some(tabs.clone()));
+        store.save_tabs(&tabs[..1]).expect("saved fewer");
+        assert_eq!(store.load_tabs().map(|loaded| loaded.len()).ok(), Some(1));
     }
 
     #[test]

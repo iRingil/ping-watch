@@ -17,7 +17,7 @@ use crate::tab::{self, Action, Tab};
 use crate::targets::TargetList;
 use crate::theme;
 use crate::tray::{Tray, TrayCommand};
-use crate::window_state::{WindowState, WindowStore};
+use crate::window_state::{SavedTab, WindowState, WindowStore};
 
 /// Least time between two stores of the window state while it changes (moving, resizing).
 const WINDOW_SAVE_INTERVAL: Duration = Duration::from_secs(1);
@@ -72,6 +72,8 @@ pub struct PingWatchApp {
     window_saved_at: Instant,
     /// Minimize the window on the first frame (it was left minimized).
     start_minimized: bool,
+    /// The open tabs as last stored.
+    tabs_saved: Vec<SavedTab>,
 }
 
 impl PingWatchApp {
@@ -88,7 +90,22 @@ impl PingWatchApp {
         let reader = history_path
             .as_deref()
             .and_then(|path| Store::open(path).inspect_err(|error| log::warn!("{error}")).ok());
+        // Hosts given on the command line win; otherwise the tabs of the last run come back.
+        let saved_tabs = if hosts.is_empty() {
+            window_store
+                .as_ref()
+                .and_then(|store| store.load_tabs().inspect_err(|error| log::warn!("{error}")).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut tabs: Vec<Tab> = hosts.into_iter().map(Tab::tracing).collect();
+        tabs.extend(saved_tabs.iter().map(|saved| Tab::restored(saved.host.clone(), saved.tracing)));
+        let page = match saved_tabs.iter().position(|saved| saved.shown) {
+            Some(index) => Page::Target(index),
+            None if !saved_tabs.is_empty() => Page::AllTargets,
+            None => Page::Target(0),
+        };
         if tabs.is_empty() {
             tabs.push(Tab::new());
         }
@@ -108,7 +125,8 @@ impl PingWatchApp {
         });
         Self {
             tabs,
-            page: Page::Target(0),
+            page,
+            tabs_saved: saved_tabs,
             names: NameCache::default(),
             history_path,
             reader,
@@ -371,6 +389,31 @@ impl PingWatchApp {
         self.window_saved_at = Instant::now();
     }
 
+    /// Stores the open tabs (targets, the shown one, tracing or not) whenever they changed.
+    fn track_tabs(&mut self) {
+        let shown = match self.page {
+            Page::Target(index) => Some(index),
+            Page::AllTargets => None,
+        };
+        let tabs: Vec<SavedTab> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                tab.remembered().map(|(host, tracing)| SavedTab { host, tracing, shown: shown == Some(index) })
+            })
+            .collect();
+        if tabs == self.tabs_saved {
+            return;
+        }
+        if let Some(store) = &mut self.window_store
+            && let Err(error) = store.save_tabs(&tabs)
+        {
+            log::warn!("cannot save the open tabs: {error}");
+        }
+        self.tabs_saved = tabs;
+    }
+
     /// Status bar: a problem of the shown tab in red (network down, history off, unknown host) or, normally, its key
     /// numbers; on the overview, how many targets are traced and how many have problems.
     fn status_bar(&self, ui: &mut Ui) {
@@ -455,6 +498,7 @@ impl eframe::App for PingWatchApp {
     /// Handles the tray icon and keeps the window state; runs even while the window is minimized or hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.track_window(ctx);
+        self.track_tabs();
         let Some(tray) = &self.tray else {
             return;
         };
