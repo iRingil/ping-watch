@@ -18,6 +18,8 @@ const WARN_MS: f64 = 200.0;
 const BAR: (f64, f64) = (220.0, 14.0);
 /// Size of a chart, and its left and bottom margins for the axis labels.
 const CHART: (f64, f64, f64, f64) = (1000.0, 160.0, 44.0, 20.0);
+/// Room a time label needs from the chart's right edge to stay centred on its mark.
+const EDGE_LABEL_ROOM: f64 = 32.0;
 /// Height of a chart's jitter strip.
 const JITTER_HEIGHT: f64 = 26.0;
 /// Space between the jitter strip and the latency plot.
@@ -144,8 +146,8 @@ pub fn html(snapshot: &Snapshot, taken: &str, version: &str) -> String {
     };
     let mut page = String::new();
     write_head(&mut page, &title);
-    let _ = write!(
-        page,
+    // The first section's heading on the left, the title and when the snapshot was taken on the right, in one row.
+    let header = format!(
         "<header><h1>{}</h1><p class=\"meta\">{} {} · snapshot of {}</p></header>",
         escape(&title),
         APP_NAME,
@@ -153,8 +155,8 @@ pub fn html(snapshot: &Snapshot, taken: &str, version: &str) -> String {
         escape(taken)
     );
     match snapshot {
-        Snapshot::Target(report) => write_target(&mut page, report),
-        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, focus, rows, charts),
+        Snapshot::Target(report) => write_target(&mut page, &header, report),
+        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, &header, focus, rows, charts),
     }
     page.push_str("</body></html>\n");
     page
@@ -171,6 +173,8 @@ fn write_head(page: &mut String, title: &str) {
 body{{margin:24px;background:{bg};color:{ink};font:14px/1.45 \"Segoe UI\",system-ui,sans-serif}}\
 h1{{margin:0;font-size:22px;font-weight:600}}h2{{margin:28px 0 8px;font-size:16px;font-weight:600}}h3{{margin:16px 0 4px;font-size:14px;font-weight:600}}\
 .meta,.muted{{color:{muted}}}.meta{{margin:2px 0 0}}\
+.top{{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:8px}}\
+.top h2{{margin:0}}.top p{{margin:2px 0 0}}header{{text-align:right}}\
 table{{border-collapse:collapse;width:100%;background:{pane};border:1px solid {rule}}}\
 th{{background:{header};color:{muted};font-weight:500;text-align:left;padding:5px 8px;border-bottom:1px solid {rule}}}\
 td{{padding:4px 8px;border-top:1px solid {stripe};white-space:nowrap}}\
@@ -191,8 +195,12 @@ svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top
 }
 
 /// The page of a target: table, chart, alerts.
-fn write_target(page: &mut String, report: &TargetReport) {
-    let _ = write!(page, "<h2>Route</h2><p class=\"muted\">Focus {}</p>", escape(&report.focus));
+fn write_target(page: &mut String, header: &str, report: &TargetReport) {
+    let _ = write!(
+        page,
+        "<div class=\"top\"><div><h2>Route</h2><p class=\"muted\">Focus {}</p></div>{header}</div>",
+        escape(&report.focus)
+    );
     let scale = bar_scale(report.hops.iter().filter_map(|hop| hop.avg));
     page.push_str("<table><tr><th class=\"num\">Hop</th><th class=\"num\">Count</th><th>IP</th><th>Name</th>");
     for title in ["Avg", "Min", "Max", "Cur", "Jitter", "PL%"] {
@@ -237,8 +245,12 @@ fn write_target(page: &mut String, report: &TargetReport) {
 }
 
 /// The page of All targets: table and the ticked charts.
-fn write_all(page: &mut String, focus: &str, rows: &[SummaryRow], charts: &[(String, Chart)]) {
-    let _ = write!(page, "<h2>Targets</h2><p class=\"muted\">Focus {}</p>", escape(focus));
+fn write_all(page: &mut String, header: &str, focus: &str, rows: &[SummaryRow], charts: &[(String, Chart)]) {
+    let _ = write!(
+        page,
+        "<div class=\"top\"><div><h2>Targets</h2><p class=\"muted\">Focus {}</p></div>{header}</div>",
+        escape(focus)
+    );
     let scale = bar_scale(rows.iter().filter_map(|row| row.numbers.as_ref().and_then(|hop| hop.avg)));
     page.push_str("<table><tr><th>Status</th><th>Target</th><th>IP</th><th class=\"num\">Hops</th>");
     for title in ["Avg", "Min", "Max", "Cur", "Jitter", "PL%"] {
@@ -390,10 +402,13 @@ fn chart_svg(chart: &Chart) -> String {
     );
     for (value, step) in time_marks(from_s, to_s, utc_offset_s) {
         let label = clock(timeline_millis(value), chart.period.axis_format(step));
+        // Labels near the right edge end there instead of being cut off.
+        let at = x(value);
+        let anchor = if at > width - EDGE_LABEL_ROOM { "end" } else { "middle" };
         let _ = write!(
             svg,
-            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" text-anchor=\"middle\" fill=\"{}\">{}</text>",
-            x(value),
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" text-anchor=\"{anchor}\" fill=\"{}\">{}</text>",
+            at.min(width - 2.0),
             height - 6.0,
             hex(p.ink_muted),
             escape(&label)
