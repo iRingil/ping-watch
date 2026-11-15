@@ -14,7 +14,7 @@ use crate::ui::theme;
 /// Width of the target field.
 const ENTRY_WIDTH: f32 = 360.0;
 /// Width of the arrow area at the right end of the target field.
-const ARROW_WIDTH: f32 = 24.0;
+const ARROW_WIDTH: f32 = 28.0;
 /// Width of the target list: wider than the field, so a full IPv6 address and the description fit side by side.
 const TARGET_LIST_WIDTH: f32 = 600.0;
 /// Height of a target list row (also the size of its icon buttons).
@@ -71,8 +71,9 @@ impl TargetEntry {
         // The arrow is a button set into the field's right end: own face, a divider, a hover state.
         let arrow_rect =
             Rect::from_min_max(pos2(input.rect.right() - ARROW_WIDTH, input.rect.top()), input.rect.max).shrink(2.0);
-        let arrow =
-            ui.interact(arrow_rect, input.id.with("target-list"), Sense::click()).on_hover_text("Saved targets");
+        let arrow = ui
+            .interact(arrow_rect, input.id.with("target-list"), Sense::click())
+            .on_hover_text(tr!(ui, "Saved targets"));
         let widgets = &ui.visuals().widgets;
         let arrow_fill = if arrow.hovered() { widgets.hovered.weak_bg_fill } else { widgets.inactive.weak_bg_fill };
         ui.painter().rect_filled(arrow_rect, CornerRadius::same(2), arrow_fill);
@@ -220,8 +221,8 @@ fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
     let icon = egui::Vec2::splat(TARGET_ROW_HEIGHT);
     let delete_rect = Rect::from_min_size(pos2(rect.right() - icon.x, rect.top()), icon);
     let edit_rect = delete_rect.translate(egui::vec2(-icon.x, 0.0));
-    let edit = ui.interact(edit_rect, row.id.with("edit"), Sense::click()).on_hover_text("Edit");
-    let delete = ui.interact(delete_rect, row.id.with("delete"), Sense::click()).on_hover_text("Delete");
+    let edit = ui.interact(edit_rect, row.id.with("edit"), Sense::click()).on_hover_text(tr!(ui, "Edit"));
+    let delete = ui.interact(delete_rect, row.id.with("delete"), Sense::click()).on_hover_text(tr!(ui, "Delete"));
 
     let painter = ui.painter();
     if row.hovered() || edit.hovered() || delete.hovered() {

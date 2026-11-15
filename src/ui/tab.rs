@@ -52,8 +52,8 @@ const SPLITTER_HEIGHT: f32 = 10.0;
 pub const RESTART_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
 /// Opens a tab for a new target.
 pub const NEW_TARGET_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::N);
-/// Stops the trace and closes its tab.
-pub const CLOSE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Q);
+/// Stops the trace and closes its tab (Ctrl+W, as tabs close everywhere on Windows; Ctrl+Q would mean "quit").
+pub const CLOSE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::W);
 
 /// What the user asked for in a tab's menu or with a shortcut; carried out by the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,7 +312,8 @@ impl Tab {
         }
         let (sender, receiver) = mpsc::channel();
         let name = self.host.clone();
-        let spawned = thread::Builder::new().name(format!("resolve-{name}")).spawn(move || {
+        // A fixed thread name: the host may hold anything, and a NUL in a thread name panics.
+        let spawned = thread::Builder::new().name("resolve".to_owned()).spawn(move || {
             // The tab may be gone by now; then nobody needs the answer.
             sender.send(resolve(&name)).ok();
         });
@@ -344,10 +345,13 @@ impl Tab {
         let target = match receiver.try_recv() {
             Ok(Ok(target)) => target,
             Ok(Err(ResolveError::Lookup { host, source })) => {
-                return self.fail(trf!(self.language, "Cannot resolve {host}: {error}", host = host, error = source));
+                return self.fail(lookup_message(&host, &source, self.language));
             }
             Ok(Err(ResolveError::NoAddress(host))) => {
                 return self.fail(trf!(self.language, "{host} has no address", host = host));
+            }
+            Ok(Err(ResolveError::Invalid(_))) => {
+                return self.fail(tr!(self.language, "This is not a host name or an IP address").to_owned());
             }
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
@@ -672,15 +676,20 @@ impl Tab {
             session.tracer.set_paused(!paused);
         }
         // Only actions on this trace; a new target is opened with "+".
-        Popup::from_toggle_button_response(&split.menu).width(TRACE_MENU_WIDTH).show(|ui| {
+        let items = [
+            (tr!(ui, "Reset and restart"), ui.ctx().format_shortcut(&RESTART_SHORTCUT), Action::Restart),
+            (tr!(ui, "Close and stop"), ui.ctx().format_shortcut(&CLOSE_SHORTCUT), Action::Close),
+        ];
+        // As wide as the longest row needs in the current language, never narrower than TRACE_MENU_WIDTH.
+        let width = items
+            .iter()
+            .map(|(label, shortcut, _)| icons::menu_row_width(ui, label, shortcut))
+            .fold(TRACE_MENU_WIDTH, f32::max);
+        Popup::from_toggle_button_response(&split.menu).width(width).show(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            let items = [
-                (tr!(ui, "Reset and restart"), RESTART_SHORTCUT, Action::Restart),
-                (tr!(ui, "Close and stop"), CLOSE_SHORTCUT, Action::Close),
-            ];
-            for (label, shortcut, item) in items {
-                if icons::menu_row(ui, label, &ui.ctx().format_shortcut(&shortcut)).clicked() {
-                    action = Some(item);
+            for (label, shortcut, item) in &items {
+                if icons::menu_row(ui, label, shortcut).clicked() {
+                    action = Some(*item);
                     ui.close();
                 }
             }
@@ -785,6 +794,23 @@ fn target_label(target: IpAddr, host: &str, name: Option<&str>, reverse: Option<
     match description {
         Some(description) => format!("{target} / {description}"),
         None => target.to_string(),
+    }
+}
+
+/// A failed lookup of `host` in words: the usual Windows resolver errors get their own message, anything else
+/// keeps the system's text.
+fn lookup_message(host: &str, error: &std::io::Error, language: Language) -> String {
+    /// WSAHOST_NOT_FOUND: no such name.
+    const HOST_NOT_FOUND: i32 = 11_001;
+    /// WSATRY_AGAIN: the DNS server didn't answer.
+    const TRY_AGAIN: i32 = 11_002;
+    /// WSANO_DATA: the name exists without an address.
+    const NO_DATA: i32 = 11_004;
+    match error.raw_os_error() {
+        Some(HOST_NOT_FOUND) => trf!(language, "{host} is not known to DNS: check the spelling", host = host),
+        Some(TRY_AGAIN) => trf!(language, "DNS didn't answer for {host}: is the network up?", host = host),
+        Some(NO_DATA) => trf!(language, "{host} has no address", host = host),
+        _ => trf!(language, "Cannot resolve {host}: {error}", host = host, error = error),
     }
 }
 

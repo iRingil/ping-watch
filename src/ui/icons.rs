@@ -5,6 +5,7 @@ use eframe::egui::{
     self, Color32, CornerRadius, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
+use crate::i18n::tr;
 use crate::ui::theme;
 
 /// What an icon shows.
@@ -252,7 +253,9 @@ pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str)
     let main_rect = Rect::from_min_size(rect.min, vec2(main_width, height));
     let menu_rect = Rect::from_min_max(pos2(main_rect.right(), rect.top()), rect.max);
     let main = ui.interact(main_rect, ui.next_auto_id().with("split-main"), Sense::click()).on_hover_text(tooltip);
-    let menu = ui.interact(menu_rect, main.id.with("split-menu"), Sense::click()).on_hover_text("More actions");
+    let menu = ui
+        .interact(menu_rect, main.id.with("split-menu"), Sense::click())
+        .on_hover_text(tr!(ui, "More actions"));
 
     let painter = ui.painter();
     let (main_fill, _) = colors(ui, Style::Normal, main.hovered());
@@ -271,16 +274,33 @@ pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str)
     Split { main, menu }
 }
 
-/// A menu entry drawn as a row: the whole row lights up under the pointer, the label on the left, the keyboard
-/// shortcut dimmed on the right. Takes the menu's full width.
+/// Font of the menu rows.
+fn menu_font() -> egui::FontId {
+    egui::FontId::proportional(15.0)
+}
+
+/// Inset of a menu row's texts from its edges.
+const MENU_ROW_INSET: f32 = 8.0;
+/// Least space between a menu row's label and its shortcut.
+const MENU_ROW_GAP: f32 = 24.0;
+
+/// Width a menu row needs to show `label` and `shortcut` side by side.
+pub fn menu_row_width(ui: &Ui, label: &str, shortcut: &str) -> f32 {
+    let measure =
+        |text: &str| ui.painter().layout_no_wrap(text.to_owned(), menu_font(), theme::palette(ui).ink).size().x;
+    measure(label) + measure(shortcut) + MENU_ROW_GAP + 2.0 * MENU_ROW_INSET
+}
+
+/// A menu entry drawn as a row: the whole row lights up under the pointer (or keyboard focus), the label on the
+/// left, the keyboard shortcut dimmed on the right. Takes the menu's full width.
 pub fn menu_row(ui: &mut Ui, label: &str, shortcut: &str) -> Response {
     let size = vec2(ui.available_width(), ui.spacing().interact_size.y + 2.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
-    if response.hovered() {
+    if response.hovered() || response.has_focus() {
         painter.rect_filled(rect, CornerRadius::same(3), theme::palette(ui).pane_header);
     }
-    let font = egui::FontId::proportional(15.0);
+    let font = menu_font();
     painter.text(
         pos2(rect.left() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,

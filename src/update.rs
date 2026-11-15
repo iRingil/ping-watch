@@ -90,11 +90,13 @@ fn check(repository: &str, current: &str) -> Result<Outcome, UpdateError> {
         Err(error) => return Err(UpdateError::Network(error.to_string())),
     };
     let body = response.body_mut().read_to_string().map_err(|error| UpdateError::Network(error.to_string()))?;
-    outcome(&body, current)
+    outcome(&body, repository, current)
 }
 
-/// The outcome of GitHub's answer `body` (the latest release as JSON) for this version `current`.
-fn outcome(body: &str, current: &str) -> Result<Outcome, UpdateError> {
+/// The outcome of GitHub's answer `body` (the latest release of `repository` as JSON) for this version `current`.
+/// The download link is opened by the Windows shell, so only a release page of `repository` is taken from the
+/// answer; anything else gives way to the repository's own releases page.
+fn outcome(body: &str, repository: &str, current: &str) -> Result<Outcome, UpdateError> {
     let release: serde_json::Value =
         serde_json::from_str(body).map_err(|error| UpdateError::Answer(error.to_string()))?;
     let tag = release.get("tag_name").and_then(serde_json::Value::as_str).unwrap_or_default();
@@ -104,7 +106,14 @@ fn outcome(body: &str, current: &str) -> Result<Outcome, UpdateError> {
     };
     if latest > this {
         let version = tag.trim_start_matches(['v', 'V']).to_owned();
-        Ok(Outcome::Newer { version, url: url.to_owned() })
+        let releases = format!("https://github.com/{repository}/releases/");
+        let url = if url.starts_with(&releases) && !url.chars().any(char::is_whitespace) {
+            url.to_owned()
+        } else {
+            log::warn!("unexpected release link {url:?}, using the releases page");
+            format!("{releases}latest")
+        };
+        Ok(Outcome::Newer { version, url })
     } else {
         Ok(Outcome::UpToDate)
     }
@@ -135,16 +144,35 @@ mod tests {
     fn the_answer_decides() {
         let release = r#"{"tag_name": "v1.3.0", "html_url": "https://github.com/o/r/releases/tag/v1.3.0"}"#;
         assert_eq!(
-            outcome(release, "1.0.0"),
+            outcome(release, "o/r", "1.0.0"),
             Ok(Outcome::Newer {
                 version: "1.3.0".to_owned(),
                 url: "https://github.com/o/r/releases/tag/v1.3.0".to_owned()
             })
         );
-        assert_eq!(outcome(release, "1.3.0"), Ok(Outcome::UpToDate));
-        assert_eq!(outcome(release, "2.0.0"), Ok(Outcome::UpToDate), "a newer build than the release");
-        assert!(outcome("{}", "1.0.0").is_err());
-        assert!(outcome("not json", "1.0.0").is_err());
+        assert_eq!(outcome(release, "o/r", "1.3.0"), Ok(Outcome::UpToDate));
+        assert_eq!(outcome(release, "o/r", "2.0.0"), Ok(Outcome::UpToDate), "a newer build than the release");
+        assert!(outcome("{}", "o/r", "1.0.0").is_err());
+        assert!(outcome("not json", "o/r", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn only_a_release_page_of_the_repository_is_linked() {
+        let newer_url = |link: &str| {
+            let body = format!(r#"{{"tag_name": "v9.0.0", "html_url": "{link}"}}"#);
+            match outcome(&body, "o/r", "1.0.0") {
+                Ok(Outcome::Newer { url, .. }) => url,
+                other => panic!("{other:?}"),
+            }
+        };
+        let fallback = "https://github.com/o/r/releases/latest";
+        assert_eq!(
+            newer_url("https://github.com/o/r/releases/tag/v9.0.0"),
+            "https://github.com/o/r/releases/tag/v9.0.0"
+        );
+        assert_eq!(newer_url("file:///C:/Windows/System32/calc.exe"), fallback);
+        assert_eq!(newer_url("https://evil.example/o/r/releases/"), fallback);
+        assert_eq!(newer_url("https://github.com/other/r/releases/tag/v9.0.0"), fallback);
     }
 
     /// Asks the real GitHub (run with `cargo test -- --ignored`): a repository with releases and this one.

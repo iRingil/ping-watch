@@ -456,6 +456,14 @@ impl SettingsWindow {
     }
 }
 
+/// Full path of Windows Explorer. A bare "explorer" would be looked up in the app's own folder first, where a
+/// planted `explorer.exe` (a portable copy on a USB stick) would run instead.
+fn explorer() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot")
+        .map_or_else(|| std::path::PathBuf::from(r"C:\Windows"), std::path::PathBuf::from)
+        .join("explorer.exe")
+}
+
 /// Data folder and font license rows of the About page.
 fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
     settings_grid(ui, "settings-about", |ui| {
@@ -464,7 +472,7 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
             Some(folder) => {
                 ui.label(folder.display().to_string());
                 if ui.button(tr!(ui, "Open")).clicked()
-                    && let Err(error) = std::process::Command::new("explorer").arg(folder).spawn()
+                    && let Err(error) = std::process::Command::new(explorer()).arg(folder).spawn()
                 {
                     log::warn!("cannot open {}: {error}", folder.display());
                 }

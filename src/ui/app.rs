@@ -39,12 +39,12 @@ const REFRESH: Duration = Duration::from_millis(250);
 const TAB_HEIGHT: f32 = 30.0;
 /// Space between a tab's edge and its title.
 const TAB_PADDING: f32 = 12.0;
-/// Width of a tab's close mark.
-const TAB_CLOSE_WIDTH: f32 = 16.0;
+/// Width of a tab's close mark (its click target is a square this wide: WCAG 2.5.8 asks for 24).
+const TAB_CLOSE_WIDTH: f32 = 24.0;
 /// Space between tabs.
 const TAB_GAP: f32 = 4.0;
 /// Width of a tab bar scroll arrow.
-const ARROW_WIDTH: f32 = 22.0;
+const ARROW_WIDTH: f32 = 24.0;
 /// Least room for the next tab to peek into the end of a scrolled tab strip.
 const PEEK_MIN_WIDTH: f32 = 16.0;
 /// Width of the fade at the end of a scrolled tab strip.
@@ -474,10 +474,10 @@ impl PingWatchApp {
     }
 
     /// With "hide to the tray" set, the close button hides the window instead of quitting, unless the app was told
-    /// to quit for good (tray Exit, Ctrl+C).
+    /// to quit for good (tray Exit, Ctrl+C) or there is no tray icon to bring the window back with.
     fn hide_instead_of_closing(&self, ctx: &egui::Context) {
         let closing = ctx.input(|input| input.viewport().close_requested());
-        if closing && self.settings.close_to_tray && !self.quit.load(Ordering::Relaxed) {
+        if closing && self.settings.close_to_tray && self.tray.is_some() && !self.quit.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -749,8 +749,8 @@ fn bell_button(ui: &mut Ui, active: usize) -> egui::Response {
         ui.painter().text(
             badge,
             egui::Align2::CENTER_CENTER,
-            active.min(9).to_string(),
-            theme::heading_font(11.0),
+            if active > 9 { "9+".to_owned() } else { active.to_string() },
+            theme::heading_font(if active > 9 { 9.5 } else { 11.0 }),
             palette.on_signal,
         );
     }
