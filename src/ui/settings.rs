@@ -190,7 +190,7 @@ impl SettingsWindow {
     /// General: what the close button does, starting with Windows.
     fn general(&mut self, ui: &mut Ui, settings: &mut AppSettings) {
         settings_grid(ui, "settings-general", |ui| {
-            ui.weak("Close button");
+            label_first_row(ui, "Close button", 2, ui.spacing().interact_size.y);
             ui.vertical(|ui| {
                 ui.radio_value(&mut settings.close_to_tray, false, "Quit Ping Watch");
                 ui.radio_value(&mut settings.close_to_tray, true, "Hide to the tray and keep tracing");
@@ -282,6 +282,19 @@ fn language(ui: &mut Ui) {
     });
 }
 
+/// A muted grid label for a cell holding `lines` rows of `line_height` each, drawn level with the first row (grid
+/// rows center their cells, which would put a lone label between the rows).
+fn label_first_row(ui: &mut Ui, label: &str, lines: u8, line_height: f32) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let palette = theme::palette(ui);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, palette.ink_muted);
+    let extra_rows = f32::from(lines.saturating_sub(1));
+    let height = line_height + extra_rows * (line_height + ui.spacing().item_spacing.y);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(galley.size().x, height), egui::Sense::hover());
+    let top = rect.top() + (line_height - galley.size().y) / 2.0;
+    ui.painter().galley(egui::pos2(rect.left(), top), galley, palette.ink_muted);
+}
+
 /// A muted `label` on the left, level with the top of `content` (a list of choices) on the right.
 fn label_on_top(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
     ui.horizontal_top(|ui| {
@@ -365,6 +378,9 @@ impl SettingsWindow {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.hyperlink_to("Website", SITE_URL);
+                    // A painted dot: a bigger glyph would move the baseline of the links beside it.
+                    let (dot, _) = ui.allocate_exact_size(egui::vec2(6.0, 12.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 2.0, theme::palette(ui).ink_muted);
                     ui.hyperlink_to("Source code", REPO_URL);
                 });
             });
@@ -393,8 +409,8 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
         });
         ui.end_row();
         // Feedback goes in its own row, apart from the project links next to the name.
-        ui.weak("Feedback");
-        ui.horizontal(|ui| {
+        label_first_row(ui, "Feedback", 2, ui.text_style_height(&egui::TextStyle::Body));
+        ui.vertical(|ui| {
             ui.hyperlink_to("Report a problem or idea", ISSUES_URL);
             ui.hyperlink_to("Report a vulnerability", VULNERABILITY_URL);
         });
