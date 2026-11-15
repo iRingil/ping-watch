@@ -362,12 +362,7 @@ pub fn close_mark(ui: &mut Ui) -> bool {
     if response.hovered() {
         ui.painter().rect_filled(rect, egui::CornerRadius::same(3), theme::palette(ui).pane_header);
     }
-    icons::paint(
-        ui,
-        rect.center(),
-        Icon::Cross,
-        if response.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
-    );
+    icons::paint(ui, rect.center(), Icon::Cross, icons::lit_color(ui, response.hovered()));
     icons::focus_ring(ui, &response, rect);
     let hint = tr!(ui, "Close (Esc)");
     response.on_hover_text(hint).clicked()

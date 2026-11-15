@@ -333,7 +333,7 @@ fn has_tables(connection: &Connection) -> Result<bool, HistoryError> {
 }
 
 /// The journal rows of the target stored as `target_id` (in the history's `targets` table) that touch
-/// `from_ms..=to_ms`, oldest first, for the timeline marks; none if the alert tables don't exist yet.
+/// the time from `from_ms` to `to_ms`, oldest first, for the timeline marks; none if the alert tables don't exist yet.
 ///
 /// # Errors
 ///

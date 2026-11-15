@@ -83,7 +83,7 @@ pub fn legend(ui: &mut Ui) {
         let left = bar.left() + third * index as f32;
         painter.rect_filled(Rect::from_x_y_ranges(left..=left + third, bar.y_range()), 0.0, color);
     }
-    let font = eframe::egui::FontId::proportional(12.0);
+    let font = egui::FontId::proportional(12.0);
     for (index, ms) in [(1.0, 100), (2.0, 200)] {
         let label = trf!(ui, "{ms} ms", ms = ms);
         let x = bar.left() + third * index;

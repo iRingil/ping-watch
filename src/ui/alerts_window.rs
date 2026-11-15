@@ -177,7 +177,7 @@ impl AlertsWindow {
         }
         let mut changed = false;
         let modal = egui::Modal::new(egui::Id::unique("alerts")).show(ctx, |ui| {
-            // Exactly this wide: content never widens the window (the journal cuts long texts instead).
+            // The window keeps exactly this width: content never widens it (the journal wraps long texts instead).
             ui.set_width(WIDTH);
             ui.set_max_width(WIDTH);
             let close = ui

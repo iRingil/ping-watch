@@ -1,6 +1,6 @@
 //! Translations of the interface into English, Russian, German, French and Spanish.
 //!
-//! Texts are written in English in the code and marked with [`tr!`] (a plain text), [`trf!`] (with `{name}`
+//! Texts are written in English in the code and marked with the macro [`tr!`] (a plain text), [`trf!`] (with `{name}`
 //! placeholders) or [`trn!`] (a count: "1 target|{n} targets"); [`n!`] marks a text that is translated later, where
 //! it is shown (menu labels kept in tables). The English text is the key into each language's table; a text missing
 //! from a table shows in English. The language lives in the egui context ([`set`], [`get`]), so drawing code asks
@@ -259,7 +259,7 @@ mod tests {
             let mut rest = source;
             while let Some(at) = rest.find(marker) {
                 rest = rest.get(at.saturating_add(marker.len())..).unwrap_or_default();
-                // `n!(` also matches the end of `trn!(`; those are found by `trn!(` already.
+                // The pattern for `n!` also matches the end of `trn!`, whose texts are found already.
                 let preceded_by_word = source.len() > rest.len() && {
                     let start = source.len().saturating_sub(rest.len()).saturating_sub(marker.len());
                     source
@@ -338,10 +338,10 @@ mod tests {
     #[test]
     fn translations_keep_placeholders_and_plural_forms() {
         for (name, entries, forms) in tables() {
-            for (english, translated) in entries {
-                assert_eq!(placeholders(english), placeholders(translated), "{name}: {english} → {translated}");
-                if english.contains('|') {
-                    assert_eq!(translated.split('|').count(), forms, "{name}: {english} → {translated}");
+            for (original, translated) in entries {
+                assert_eq!(placeholders(original), placeholders(translated), "{name}: {original} → {translated}");
+                if original.contains('|') {
+                    assert_eq!(translated.split('|').count(), forms, "{name}: {original} → {translated}");
                 }
             }
         }

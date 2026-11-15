@@ -107,7 +107,7 @@ enum State {
     Running(Session),
 }
 
-/// The final-hop numbers of a tab for the All Targets overview.
+/// The final-hop numbers of a tab for the overview page.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Overview {
     /// Host as entered, or a placeholder for an empty tab.
@@ -146,7 +146,7 @@ pub struct Tab {
     interval: Duration,
     /// Period the hop table summarizes.
     focus: Focus,
-    /// The target's chart on the All targets page, `None` while it isn't charted there.
+    /// The target's chart on the overview page, `None` while it isn't charted there.
     chart: Option<Timeline>,
     /// Settings as last stored for this target; compared each frame to store changes.
     saved_settings: Option<TraceSettings>,
@@ -190,7 +190,7 @@ impl Tab {
     }
 
     /// A tab restored from the last run: traces `saved.host` again, starting paused if it wasn't tracing then,
-    /// with its chart on the All targets page if it had one.
+    /// with its chart on the overview page if it had one.
     pub fn restored(saved: &SavedTab, defaults: TraceSettings) -> Self {
         let mut tab = Self::tracing(saved.host.clone(), defaults);
         tab.start_paused = !saved.tracing;
@@ -225,19 +225,19 @@ impl Tab {
         self.interval
     }
 
-    /// Whether the target is charted on the All targets page.
+    /// Whether the target is charted on the overview page.
     pub fn is_charted(&self) -> bool {
         self.chart.is_some()
     }
 
-    /// Shows or hides the target's chart on the All targets page.
+    /// Shows or hides the target's chart on the overview page.
     pub fn set_charted(&mut self, charted: bool) {
         if charted != self.is_charted() {
             self.chart = charted.then(Timeline::compact);
         }
     }
 
-    /// Draws the target's chart for the All targets page (the target hop over `period`, which the chart's own
+    /// Draws the target's chart for the overview page (the target hop over `period`, which the chart's own
     /// controls may change).
     pub fn chart(&mut self, ui: &mut Ui, history_path: Option<&Path>, period: &mut Period) {
         let route = self.route();
@@ -549,7 +549,7 @@ impl Tab {
         self.overview_with(self.focus, self.timeline.visible_range(now_ms))
     }
 
-    /// Final-hop numbers summarized over `focus`, where Auto means `visible` (Unix ms) — for the All targets page,
+    /// Final-hop numbers summarized over `focus`, where Auto means `visible` (Unix ms) — for the overview page,
     /// which has its own focus.
     pub fn overview_with(&self, focus: Focus, visible: (i64, i64)) -> Overview {
         let route = self.route_with(focus, visible);
@@ -597,8 +597,8 @@ impl Tab {
         let typing = ui.ctx().memory(|memory| memory.focused().is_some());
         if let (Some(route), Some(current), false) = (&route, ttl, typing) {
             let (up, down) = ui.input(|input| (input.key_pressed(Key::ArrowUp), input.key_pressed(Key::ArrowDown)));
-            let ttls: Vec<u8> = route.hops().iter().map(|hop| hop.ttl).collect();
-            if let Some(position) = ttls.iter().position(|hop| *hop == current) {
+            let hops: Vec<u8> = route.hops().iter().map(|hop| hop.ttl).collect();
+            if let Some(position) = hops.iter().position(|hop| *hop == current) {
                 let moved = if up {
                     position.checked_sub(1)
                 } else if down {
@@ -606,7 +606,7 @@ impl Tab {
                 } else {
                     None
                 };
-                if let Some(next) = moved.and_then(|index| ttls.get(index)) {
+                if let Some(next) = moved.and_then(|index| hops.get(index)) {
                     self.selected_ttl = Some(*next);
                     ttl = Some(*next);
                 }
@@ -846,7 +846,7 @@ pub fn clock(ms: i64) -> String {
 
 /// Label of a traced target, "address / description": the description is the `name` from the target list if it
 /// has one, else the `host` as entered if that is a domain name, else (an IP was entered) the `reverse` DNS name of
-/// the address, if any — "9.9.9.9 / Quad9 DNS", "140.82.121.4 / github.com", "1.1.1.1 / one.one.one.one".
+/// the address, if any — `9.9.9.9 / Quad9 DNS`, `140.82.121.4 / github.com`, `1.1.1.1 / one.one.one.one`.
 fn target_label(target: IpAddr, host: &str, name: Option<&str>, reverse: Option<&str>) -> String {
     let entered_ip = host.trim().parse::<IpAddr>().is_ok();
     let description = name.or(if entered_ip { reverse } else { Some(host.trim()) });

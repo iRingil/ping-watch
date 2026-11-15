@@ -1,4 +1,4 @@
-//! The All targets page: a toolbar (target field, interval, focus), one table row per target with its final-hop
+//! The overview page ("All targets"): a toolbar (target field, interval, focus), one table row per target with its final-hop
 //! numbers and latency bar, and below it the charts of the targets ticked in the Status column, all over the same
 //! period. Its interval, focus and chart period are its own, remembered apart from the target tabs.
 
@@ -25,7 +25,7 @@ use crate::ui::timeline::Period;
 
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 24.0;
-/// Width of the Status column (check box and state).
+/// Width of the Status column (checkbox and state).
 const STATUS_WIDTH: f32 = 120.0;
 /// Widest the Target column gets.
 const TARGET_WIDTH: f32 = 200.0;
@@ -51,7 +51,7 @@ pub enum Request {
     Add(String),
 }
 
-/// State of the All targets page.
+/// State of the overview page.
 #[derive(Debug)]
 pub struct AllTargets {
     /// Target field of the toolbar.
@@ -139,7 +139,7 @@ impl AllTargets {
         if let Some(store) = store
             && let Err(error) = store.save_all_targets(self.settings)
         {
-            log::warn!("cannot save the All targets settings: {error}");
+            log::warn!("cannot save the overview page settings: {error}");
         }
         // One attempt per change, not one per frame.
         self.saved = Some(self.settings);
@@ -210,7 +210,7 @@ impl AllTargets {
         request
     }
 
-    /// The table: one row per target. A click selects a row, a double click shows or hides its chart, the check box
+    /// The table: one row per target. A click selects a row, a double click shows or hides its chart, the checkbox
     /// does the same, and the target's link opens its tab. Returns the tab to open.
     fn table(
         &mut self,

@@ -13,7 +13,7 @@ const MIN_SCALE_MS: f64 = 50.0;
 const MIN_JITTER_SCALE_MS: f64 = 10.0;
 /// Scales are rounded up to a multiple of this.
 const SCALE_STEP_MS: f64 = 5.0;
-/// Head room above the smoothed peak: the usual line sits in the lower part of the chart and spikes up to twice
+/// Headroom above the smoothed peak: the usual line sits in the lower part of the chart and spikes up to twice
 /// the usual level stay fully visible.
 const SCALE_HEADROOM: f64 = 2.0;
 /// Number of consecutive buckets averaged to find the scale: a spike narrower than this can't stretch the scale
@@ -169,9 +169,9 @@ pub struct Trace {
 }
 
 impl Trace {
-    /// Builds a trace from `(x, value)` points in time order — `x` is a bucket's center, `half_width_s` half its
-    /// width, `None` means no value in that bucket — and `gap_before`, whether a point doesn't directly follow the
-    /// previous one.
+    /// Builds a trace from `(x, value, gap_before)` points in time order. `x` is a bucket's center and
+    /// `half_width_s` half its width; `None` means no value in that bucket; `gap_before` tells whether a point
+    /// doesn't directly follow the previous one.
     fn build(points: &[(f64, Option<f64>, bool)], half_width_s: f64, min_scale_ms: f64) -> Self {
         let values: Vec<f64> = points.iter().filter_map(|(_, value, _)| *value).collect();
         let scale_ms = scale(&values, min_scale_ms);
@@ -231,7 +231,7 @@ impl Series {
         for bucket in buckets {
             let x = seconds(bucket.start_ms) + seconds(bucket_ms) / 2.0;
             // Probes drift a little against the bucket grid, so a bucket now and then stays empty while its
-            // neighbour gets two samples; only longer pauses break the line.
+            // neighbor gets two samples; only longer pauses break the line.
             let bridgeable = bucket_ms.saturating_mul(MAX_BRIDGED_BUCKETS.saturating_add(1));
             let gap_before = previous_start.is_some_and(|start| bucket.start_ms.saturating_sub(start) > bridgeable);
             latency.push((x, bucket.avg.map(millis), gap_before));
@@ -258,12 +258,12 @@ fn smoothed_peak(values: &[f64]) -> f64 {
     values.windows(width).map(|window| window.iter().sum::<f64>() / width as f64).fold(0.0, f64::max)
 }
 
-/// Chart scale for `values`: the smoothed peak plus head room, rounded up, at least `min_scale_ms`.
+/// Chart scale for `values`: the smoothed peak plus headroom, rounded up, at least `min_scale_ms`.
 fn scale(values: &[f64], min_scale_ms: f64) -> f64 {
     ((smoothed_peak(values) * SCALE_HEADROOM / SCALE_STEP_MS).ceil() * SCALE_STEP_MS).max(min_scale_ms)
 }
 
-/// Unix milliseconds as fractional seconds, the chart's x unit.
+/// Unix milliseconds as fractional seconds, the unit of the chart's x values.
 #[expect(clippy::cast_precision_loss, reason = "Unix milliseconds fit into f64's 52-bit mantissa until year 287396")]
 pub fn seconds(ms: i64) -> f64 {
     ms as f64 / 1_000.0
@@ -298,9 +298,9 @@ pub fn time_marks(min_s: f64, max_s: f64, utc_offset_s: i64) -> Vec<(f64, f64)> 
         .collect()
 }
 
-/// Value axis marks from 0 to `max` for a plot `height` points tall, on the roundest step that keeps the marks at
-/// most [`MAX_VALUE_MARKS`] and at least [`MIN_VALUE_MARK_SPACING`] apart (20 ms rather than 10 ms for a 140 ms
-/// scale). Returns `(value, step)` pairs.
+/// Value axis marks from 0 to `max` for a plot `height` points tall. The step is the roundest one that keeps at
+/// most [`MAX_VALUE_MARKS`] marks, at least [`MIN_VALUE_MARK_SPACING`] apart (20 ms rather than 10 ms for a
+/// 140 ms scale). Returns `(value, step)` pairs.
 pub fn value_marks(max: f64, height: f32) -> Vec<(f64, f64)> {
     let fitting = f64::from((height / MIN_VALUE_MARK_SPACING).floor()).clamp(1.0, MAX_VALUE_MARKS);
     let step = VALUE_STEPS_MS.into_iter().find(|step| max / step <= fitting).unwrap_or(1_000.0);
@@ -407,7 +407,7 @@ mod tests {
         }
         let series = Series::from_buckets(&steady(&averages), 1_000);
         let scale = series.latency.scale_ms;
-        // Smoothed peak (14 × 50 + 600) / 15 ≈ 86.7, × 2 head room → 175.
+        // Smoothed peak (14 × 50 + 600) / 15 ≈ 86.7, × 2 headroom → 175.
         assert_eq!(scale, 175.0);
         assert_eq!(series.latency.clipped, vec![[60.5, scale]]);
         assert!(series.latency.segments.iter().flatten().all(|point| point[1] <= scale));

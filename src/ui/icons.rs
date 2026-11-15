@@ -21,7 +21,7 @@ pub enum Icon {
     Pencil,
     /// Diagonal cross: delete, close.
     Cross,
-    /// Cog wheel: settings and the app menu.
+    /// Cogwheel: settings and the app menu.
     Gear,
     /// Sun with rays: the light theme.
     Sun,
@@ -186,7 +186,7 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
                 painter.rect_filled(rect, 0.0, band);
                 start += weight;
             }
-            painter.rect_stroke(flag, 0.0, Stroke::new(0.5, theme::palette(ui).rule), egui::StrokeKind::Outside);
+            painter.rect_stroke(flag, 0.0, Stroke::new(0.5, theme::palette(ui).rule), StrokeKind::Outside);
         }
         Icon::FlagGb => {
             // The Union Jack, simplified to read at 20 x 12 points: blue field, white and red saltires, white and
@@ -280,6 +280,11 @@ pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str)
         if menu.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
     );
     Split { main, menu }
+}
+
+/// Color of a painted icon: ink while `lit` (under the pointer), muted otherwise.
+pub fn lit_color(ui: &Ui, lit: bool) -> Color32 {
+    if lit { theme::palette(ui).ink } else { theme::palette(ui).ink_muted }
 }
 
 /// Outlines `rect` in the signal color while `response` has the keyboard focus, so painted buttons show where Tab

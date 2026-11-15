@@ -1,5 +1,5 @@
 //! The target field: a text field for a host name or IP address with an arrow that opens the saved target list
-//! (pick, edit, delete). Used by target tabs and by the All targets page.
+//! (pick, edit, delete). Used by target tabs and by the overview page.
 
 use eframe::egui::{
     self, Button, CornerRadius, Key, Margin, Popup, PopupCloseBehavior, Rect, RichText, ScrollArea, Sense, TextEdit,
@@ -93,12 +93,7 @@ impl TargetEntry {
         let widgets = &ui.visuals().widgets;
         let arrow_fill = if arrow.hovered() { widgets.hovered.weak_bg_fill } else { widgets.inactive.weak_bg_fill };
         ui.painter().rect_filled(arrow_rect, CornerRadius::same(2), arrow_fill);
-        icons::paint(
-            ui,
-            arrow_rect.center(),
-            Icon::ArrowDown,
-            if arrow.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
-        );
+        icons::paint(ui, arrow_rect.center(), Icon::ArrowDown, icons::lit_color(ui, arrow.hovered()));
         icons::focus_ring(ui, &arrow, arrow_rect);
         if enabled && let Some(targets) = targets {
             Popup::from_toggle_button_response(&arrow)

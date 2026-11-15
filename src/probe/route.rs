@@ -110,7 +110,7 @@ pub struct RouteState {
 }
 
 impl RouteState {
-    /// Creates an empty route to `target` that probes TTLs `1..=max_hops`.
+    /// Creates an empty route to `target` that probes the TTLs from 1 to `max_hops`.
     pub fn new(target: IpAddr, max_hops: u8) -> Self {
         let hop = HopState { address: None, total: HopStats::default(), recent: VecDeque::new() };
         Self { target, hops: vec![hop; usize::from(max_hops)], target_ttl: None, started_ms: None }

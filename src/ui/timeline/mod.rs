@@ -35,7 +35,7 @@ const COMMENT_PICK_DISTANCE: f32 = 8.0;
 const PLOT_GAP: f32 = 8.0;
 /// Height of the jitter strip.
 const JITTER_HEIGHT: f32 = 44.0;
-/// Width of the y axis, equal for both plots so their time axes line up.
+/// Width of the y-axis, equal for both plots so their time axes line up.
 const Y_AXIS_WIDTH: f32 = 40.0;
 
 /// Chart data on screen and what it was built from.
@@ -128,7 +128,7 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    /// A small chart for the All targets page: latency only, no jitter strip, no slider.
+    /// A small chart for the overview page: latency only, no jitter strip, no slider.
     pub fn compact() -> Self {
         Self { compact: true, ..Self::default() }
     }

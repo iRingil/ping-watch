@@ -34,7 +34,7 @@ pub fn claim() -> Claim {
 
 /// [`claim`] with the event called `name` (the tests use their own, so a running Ping Watch doesn't disturb them).
 fn claim_named(name: PCWSTR) -> Claim {
-    // SAFETY: no security attributes, an auto-reset event, not signalled, a NUL-terminated name.
+    // SAFETY: no security attributes, an auto-reset event, not signaled, a NUL-terminated name.
     let created = unsafe { CreateEventW(None, false, false, name) };
     // SAFETY: no preconditions; reads the error of the call just made on this thread.
     let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;

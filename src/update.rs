@@ -54,7 +54,7 @@ impl Check {
         let spawned = thread::Builder::new().name("update-check".to_owned()).spawn({
             let sender = sender.clone();
             move || {
-                // Nobody may be waiting any more (the window was closed); then the answer is dropped.
+                // Nobody may be waiting anymore (the window was closed); then the answer is dropped.
                 sender.send(check(&repository, &current)).ok();
             }
         });

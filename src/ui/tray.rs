@@ -34,7 +34,7 @@ pub enum TrayError {
 pub struct Tray {
     /// Keeps the icon in the tray.
     _icon: TrayIcon,
-    /// The menu's "Show" item, relabelled when the language changes.
+    /// The menu's "Show" item, relabeled when the language changes.
     show: MenuItem,
     /// The menu's "Exit" item.
     exit: MenuItem,

@@ -1,4 +1,4 @@
-//! The window: the app with its tabs, the All targets page, target tabs and their panes, theme and tray icon.
+//! The window: the app with its tabs, the overview page, target tabs and their panes, theme and tray icon.
 
 pub mod alerts_window;
 pub mod all_targets;

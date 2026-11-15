@@ -1,6 +1,6 @@
 //! The window's state kept between runs: position and size (of the normal, not maximized window), whether it was
 //! maximized or minimized, the split between the hop table and the timeline, and the open tabs (their targets, which
-//! one was shown, whether each was tracing or charted on the All targets page), and the All targets page's own
+//! one was shown, whether each was tracing or charted on the overview page), and the overview page's own
 //! settings. Stored in the history database.
 
 use std::path::Path;
@@ -13,7 +13,7 @@ use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
 use crate::ui::timeline::Period;
 
-/// Schema: window geometry as key/value rows, the open tabs in order, and the All targets settings (one row).
+/// Schema: window geometry as key/value rows, the open tabs in order, and the overview page's settings (one row).
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS window_state (
         key   TEXT PRIMARY KEY,
@@ -23,7 +23,7 @@ const SCHEMA: &str = "
         position INTEGER PRIMARY KEY,
         host     TEXT NOT NULL,
         tracing  INTEGER NOT NULL, -- 1 tracing, 0 paused or not started
-        charted  INTEGER NOT NULL, -- 1 if charted on the All targets page
+        charted  INTEGER NOT NULL, -- 1 if charted on the overview page
         shown    INTEGER NOT NULL  -- 1 for the tab that was shown
     );
     CREATE TABLE IF NOT EXISTS all_targets (
@@ -90,13 +90,13 @@ pub struct SavedTab {
     pub host: String,
     /// Whether it was tracing (not paused).
     pub tracing: bool,
-    /// Whether it was charted on the All targets page.
+    /// Whether it was charted on the overview page.
     pub charted: bool,
     /// Whether it was the shown tab.
     pub shown: bool,
 }
 
-/// Settings of the All targets page, kept apart from those of the target tabs.
+/// Settings of the overview page, kept apart from those of the target tabs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AllTargetsSettings {
     /// Interval (set on every trace when changed), focus of the table and period of the charts.
@@ -202,7 +202,7 @@ impl WindowStore {
         Ok(())
     }
 
-    /// The All targets settings, `None` before the first save or if a stored value is unknown.
+    /// The overview page's settings, `None` before the first save or if a stored value is unknown.
     ///
     /// # Errors
     ///
@@ -228,7 +228,7 @@ impl WindowStore {
         }))
     }
 
-    /// Stores the All targets settings.
+    /// Stores the overview page's settings.
     ///
     /// # Errors
     ///

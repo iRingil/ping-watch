@@ -166,8 +166,8 @@ pub struct Store {
     connection: Connection,
 }
 
-/// Opens the database file at `path` (creating its folder if needed) with a busy timeout, so a write that meets
-/// another connection's write (the recorders write every second) waits instead of failing at once.
+/// Opens the database file at `path` (creating its folder if needed) with a busy timeout: a statement that meets
+/// another connection's write (the recorders write every second) waits for it instead of failing at once.
 ///
 /// # Errors
 ///

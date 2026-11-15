@@ -1,4 +1,4 @@
-//! Main window: a tab bar ("All targets", one tab per target, "+"), the All targets page or the active target tab,
+//! Main window: a tab bar ("All targets", one tab per target, "+"), the overview page or the active target tab,
 //! and the status bar. Keyboard shortcuts act on the active tab.
 
 use std::collections::HashMap;
@@ -144,7 +144,7 @@ pub struct PingWatchApp {
     start_minimized: bool,
     /// The open tabs as last stored.
     tabs_saved: Vec<SavedTab>,
-    /// The All targets page.
+    /// The overview page.
     all_targets: AllTargets,
     /// The app's settings as changed in the Settings window.
     settings: AppSettings,
@@ -191,9 +191,9 @@ pub struct PingWatchApp {
 }
 
 impl PingWatchApp {
-    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab, the `tray`
-    /// icon, and the window state as stored in `window_store` (`saved_window`, already applied to the window's
-    /// geometry by the caller). `quit` is set by whoever wants the app to quit for good (Ctrl+C).
+    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab. It gets the
+    /// `tray` icon and the window state as stored in `window_store`. The caller has already applied `saved_window`
+    /// to the window's geometry. `quit` is set by whoever wants the app to quit for good (Ctrl+C).
     pub fn new(
         hosts: Vec<String>,
         tray: Option<Tray>,
@@ -497,7 +497,7 @@ impl PingWatchApp {
             if let Some(desktop) = dirs::desktop_dir() {
                 dialog = dialog.set_directory(desktop);
             }
-            // Cancelled: nothing to report.
+            // Canceled: nothing to report.
             let Some(path) = dialog.save_file() else {
                 return;
             };
@@ -563,8 +563,8 @@ impl PingWatchApp {
         self.settings_saved = self.settings;
     }
 
-    /// With "hide to the tray" set, the close button hides the window instead of quitting, unless the app was told
-    /// to quit for good (tray Exit, Ctrl+C) or there is no tray icon to bring the window back with.
+    /// With "hide to the tray" set, the close button hides the window instead of quitting. It quits all the same
+    /// when the app was told to quit for good (tray Exit, Ctrl+C) or there is no tray icon to bring the window back.
     fn hide_instead_of_closing(&self, ctx: &egui::Context) {
         let closing = ctx.input(|input| input.viewport().close_requested());
         if closing && self.settings.close_to_tray && self.tray.is_some() && !self.quit.load(Ordering::Relaxed) {
@@ -608,7 +608,7 @@ impl PingWatchApp {
         }
         self.tabs.remove(index);
         self.page = match self.page {
-            // Closing the shown tab leads to the overview, not to some neighbouring trace.
+            // Closing the shown tab leads to the overview, not to some neighboring trace.
             Page::Target(shown) if shown == index => Page::AllTargets,
             Page::Target(shown) if shown > index => Page::Target(shown.saturating_sub(1)),
             page => page,
@@ -627,7 +627,7 @@ impl PingWatchApp {
         if let Some((earlier, later)) = duplicate {
             log::info!("{} is already traced in another tab", self.tabs.get(later).map(Tab::title).unwrap_or_default());
             self.tabs.remove(later);
-            // A target added on the All targets page leaves that page shown.
+            // A target added on the overview page leaves that page shown.
             self.page = match self.page {
                 Page::Target(shown) if shown == later => Page::Target(earlier),
                 Page::Target(shown) if shown > later => Page::Target(shown.saturating_sub(1)),
@@ -656,7 +656,7 @@ impl PingWatchApp {
             if tab_widget(ui, self.page == Page::AllTargets, tr!(ui, "All targets"), false, false).0.clicked() {
                 self.page = Page::AllTargets;
             }
-            // A tracing tab is labelled like its headings ("address / description"), others by the host entered.
+            // A tracing tab is labeled like its headings ("address / description"), others by the host entered.
             let titles: Vec<String> = self.tabs.iter().map(|tab| tab.label().unwrap_or_else(|| tab.title())).collect();
             let alerting: Vec<bool> = self
                 .tabs

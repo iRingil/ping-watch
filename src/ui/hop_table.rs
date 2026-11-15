@@ -139,7 +139,7 @@ pub fn show(
     clicked
 }
 
-/// Fills the row of one hop; returns the position of its average latency marker, if drawn.
+/// Fills in the row of one hop; returns the position of its average latency marker, if drawn.
 fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f64) -> Option<Pos2> {
     row.col(|ui| badge(ui, hop));
     row.col(|ui| cell(ui, true, hop.stats.sent().to_string()));
