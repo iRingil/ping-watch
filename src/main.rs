@@ -83,6 +83,15 @@ fn main() -> anyhow::Result<()> {
             let tray = tray::Tray::new(&creation.egui_ctx, ICON_PNG, APP_NAME)
                 .inspect_err(|error| log::warn!("{error}"))
                 .ok();
+            // Ctrl+C, Ctrl+Break, a closed console, logoff and shutdown (an IDE's Stop button sends Ctrl+C) close
+            // the window like its close button: tabs and history are saved and the process exits normally.
+            let context = creation.egui_ctx.clone();
+            if let Err(error) = ctrlc::set_handler(move || {
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+                context.request_repaint();
+            }) {
+                log::warn!("cannot handle Ctrl+C: {error}");
+            }
             Ok(Box::new(PingWatchApp::new(hosts, tray, window_store, saved_window)))
         }),
     )
