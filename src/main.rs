@@ -19,6 +19,7 @@ mod route;
 mod stats;
 mod sync;
 mod tab;
+mod tab_strip;
 mod target_entry;
 mod targets;
 mod theme;

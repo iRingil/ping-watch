@@ -12,6 +12,7 @@ use crate::history::{self, Store};
 use crate::hop_table::format_ms;
 use crate::names::NameCache;
 use crate::tab::{self, Action, Tab};
+use crate::tab_strip;
 use crate::targets::TargetList;
 use crate::theme;
 use crate::tray::{Tray, TrayCommand};
@@ -27,6 +28,12 @@ const TAB_HEIGHT: f32 = 30.0;
 const TAB_PADDING: f32 = 12.0;
 /// Width of a tab's close mark.
 const TAB_CLOSE_WIDTH: f32 = 16.0;
+/// Space between tabs.
+const TAB_GAP: f32 = 4.0;
+/// Width of a tab bar scroll arrow.
+const ARROW_WIDTH: f32 = 22.0;
+/// Width of the "+" (new target) button.
+const PLUS_WIDTH: f32 = 24.0;
 
 /// Which page the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +51,10 @@ pub struct PingWatchApp {
     tabs: Vec<Tab>,
     /// Page shown.
     page: Page,
+    /// First target tab shown in the tab bar when they don't all fit.
+    tab_first: usize,
+    /// Page shown when the tab bar was last drawn; a change scrolls the newly shown tab into view.
+    tab_bar_page: Page,
     /// Reverse-DNS cache for hop names, shared by all tabs.
     names: NameCache,
     /// History database file, `None` if there is no place for it.
@@ -128,6 +139,8 @@ impl PingWatchApp {
             tabs,
             page,
             tabs_saved: saved_tabs,
+            tab_first: 0,
+            tab_bar_page: Page::AllTargets,
             names: NameCache::default(),
             history_path,
             reader,
@@ -204,35 +217,122 @@ impl PingWatchApp {
         }
     }
 
-    /// Tab bar: All targets, the target tabs with close buttons, and "+". The open tab is underlined in the
-    /// signal color.
+    /// Tab bar: All targets (always in place), the target tabs with close buttons, and "+". When the target tabs
+    /// don't fit, they scroll: an arrow after All targets shows earlier tabs, an arrow pinned to the right (before
+    /// "+") shows later ones; each appears only while there is something to scroll to, and the mouse wheel over the
+    /// bar scrolls too. A newly shown tab is scrolled into view.
     fn tab_bar(&mut self, ui: &mut Ui) {
         let mut close = None;
+        let mut new_target = false;
         // The baseline the tabs stand on; the open tab covers it, so it reads as joined to the toolbar below.
         let bar = ui.max_rect();
         ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, theme::RULE));
+        let reveal = match self.page {
+            Page::Target(index) if self.page != self.tab_bar_page => Some(index),
+            Page::Target(_) | Page::AllTargets => None,
+        };
+        self.tab_bar_page = self.page;
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = TAB_GAP;
             if tab_widget(ui, self.page == Page::AllTargets, "All targets", false).0.clicked() {
                 self.page = Page::AllTargets;
             }
-            for (index, tab) in self.tabs.iter().enumerate() {
-                let (response, close_clicked) = tab_widget(ui, self.page == Page::Target(index), &tab.title(), true);
+            let titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
+            let widths: Vec<f32> = titles.iter().map(|title| tab_width(ui, title, true)).collect();
+            let all_width: f32 = widths.iter().map(|width| width + TAB_GAP).sum();
+            let available = ui.available_width();
+            let (first, count, strip) = if all_width + PLUS_WIDTH <= available {
+                (0, titles.len(), None)
+            } else {
+                let strip = available - 2.0 * (ARROW_WIDTH + TAB_GAP) - PLUS_WIDTH - TAB_GAP;
+                let mut first = self.tab_first;
+                let wheel = ui.input(|input| {
+                    input
+                        .raw
+                        .events
+                        .iter()
+                        .filter_map(|event| match event {
+                            egui::Event::MouseWheel { delta, .. } => Some(*delta),
+                            _ => None,
+                        })
+                        .fold(Vec2::ZERO, |sum, delta| Vec2::new(sum.x + delta.x, sum.y + delta.y))
+                });
+                if ui.rect_contains_pointer(bar) {
+                    let delta = if wheel.y == 0.0 { wheel.x } else { wheel.y };
+                    if delta > 0.0 {
+                        first = first.saturating_sub(1);
+                    } else if delta < 0.0 {
+                        first = first.saturating_add(1);
+                    }
+                }
+                let first = tab_strip::first_visible(&widths, TAB_GAP, strip, first, reveal);
+                (first, tab_strip::fitting(&widths, TAB_GAP, strip, first), Some(strip))
+            };
+            self.tab_first = first;
+            let last = first.saturating_add(count);
+            if strip.is_some() && scroll_arrow(ui, true, first > 0) {
+                self.tab_first = first.saturating_sub(1);
+            }
+            let mut used = 0.0;
+            for (index, title) in titles.iter().enumerate().skip(first).take(count) {
+                let (response, close_clicked) = tab_widget(ui, self.page == Page::Target(index), title, true);
+                used += response.rect.width() + TAB_GAP;
                 if close_clicked {
                     close = Some(index);
                 } else if response.clicked() {
                     self.page = Page::Target(index);
                 }
             }
-            let plus = ui.add(Button::new(RichText::new("+").font(theme::heading_font(16.0))).frame(false));
-            if plus.on_hover_text("New target (Ctrl+N)").clicked() {
-                self.apply(Action::NewTarget);
+            if let Some(strip) = strip {
+                // The right arrow and "+" stay pinned to the right edge however wide the shown tabs are.
+                ui.add_space((strip + TAB_GAP - used).max(0.0));
+                if scroll_arrow(ui, false, last < titles.len()) {
+                    self.tab_first = first.saturating_add(1);
+                }
+            }
+            let plus = Button::new(RichText::new("+").font(theme::heading_font(16.0))).frame(false);
+            if ui.add_sized([PLUS_WIDTH, TAB_HEIGHT], plus).on_hover_text("New target (Ctrl+N)").clicked() {
+                new_target = true;
             }
         });
+        if new_target {
+            self.apply(Action::NewTarget);
+        }
         if let Some(index) = close {
             self.close(index);
         }
     }
+}
+
+/// Width of a tab titled `title`, with a close mark if `closable`.
+fn tab_width(ui: &Ui, title: &str, closable: bool) -> f32 {
+    let galley = ui.painter().layout_no_wrap(title.to_owned(), theme::heading_font(14.5), theme::INK);
+    galley.size().x + TAB_PADDING * 2.0 + if closable { TAB_CLOSE_WIDTH } else { 0.0 }
+}
+
+/// A scroll arrow of the tab bar pointing `left` or right. Its place is always kept; it is drawn and clickable only
+/// while `active` (there are tabs to scroll to). Returns whether it was clicked.
+fn scroll_arrow(ui: &mut Ui, left: bool, active: bool) -> bool {
+    let sense = if active { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ARROW_WIDTH, TAB_HEIGHT), sense);
+    if !active {
+        return false;
+    }
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), theme::PANE_HEADER);
+    }
+    let color = if response.hovered() { theme::INK } else { theme::INK_MUTED };
+    let center = rect.center();
+    let (tip, back) = if left { (-4.0, 3.0) } else { (4.0, -3.0) };
+    let points = vec![
+        egui::pos2(center.x + tip, center.y),
+        egui::pos2(center.x + back, center.y - 6.0),
+        egui::pos2(center.x + back, center.y + 6.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    let tooltip = if left { "Earlier tabs" } else { "Later tabs" };
+    response.on_hover_text(tooltip).clicked()
 }
 
 /// A tab of the tab bar: a box with rounded top corners. Every tab keeps its outline; the open one is filled with
