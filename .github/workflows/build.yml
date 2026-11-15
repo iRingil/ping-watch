@@ -9,11 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # The Inno Setup release used locally too; its hash is the one GitHub lists for the release asset.
-  INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe
-  INNO_SHA256: 8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0
-
 jobs:
   build:
     runs-on: windows-latest
@@ -36,22 +31,18 @@ jobs:
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-about@0.9.3
-      - name: Install Inno Setup
+      # Inno Setup 7 is not on Chocolatey and not on the runner image: the official release, pinned and checked.
+      - name: Install Inno Setup 7
         shell: pwsh
+        env:
+          URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe
+          SHA256: 8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0
         run: |
-          $installer = Join-Path $env:RUNNER_TEMP "innosetup.exe"
-          Invoke-WebRequest -Uri $env:INNO_URL -OutFile $installer
-          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
-          if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup installer hash $hash, expected $env:INNO_SHA256" }
-          # Into the folder build.cmd looks in first; the setup log is shown if anything goes wrong.
-          $dir = Join-Path $env:ProgramFiles "Inno Setup"
-          $log = Join-Path $env:RUNNER_TEMP "innosetup-install.log"
-          $arguments = "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/ALLUSERS", "/DIR=`"$dir`"", "/LOG=`"$log`""
-          $setup = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList $arguments
-          if ($setup.ExitCode -ne 0 -or -not (Test-Path (Join-Path $dir "ISCC.exe"))) {
-            if (Test-Path $log) { Get-Content $log }
-            throw "Inno Setup was not installed (setup exit code $($setup.ExitCode))"
-          }
+          $installer = "$env:RUNNER_TEMP\innosetup.exe"
+          Invoke-WebRequest $env:URL -OutFile $installer
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:SHA256) { throw "Inno Setup installer hash mismatch" }
+          $process = Start-Process $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
       # cargo build --release, the installer and the portable zip.
       - name: Build the installer and the portable zip
         shell: cmd

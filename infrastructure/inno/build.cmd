@@ -22,14 +22,17 @@ if %errorlevel% neq 0 (
     exit /b %errorlevel%
 )
 
-:: Inno Setup 7 (Program Files\Inno Setup), or 6 for all users (CI runners) or the current user (winget --scope user).
-set "ISCC_EXE=%ProgramFiles%\Inno Setup\ISCC.exe"
-if not exist "%ISCC_EXE%" set "ISCC_EXE=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-if not exist "%ISCC_EXE%" set "ISCC_EXE=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
-if not exist "%ISCC_EXE%" (
-    echo ERROR: Inno Setup not found, install it: winget install JRSoftware.InnoSetup
+:: Inno Setup 7: from PATH, installed for all users or for the current user (CI runners).
+set "ISCC_EXE="
+for /f "delims=" %%i in ('where ISCC.exe 2^>nul') do if not defined ISCC_EXE set "ISCC_EXE=%%i"
+for %%d in ("%ProgramFiles%\Inno Setup" "%LOCALAPPDATA%\Programs\Inno Setup") do (
+    if not defined ISCC_EXE if exist "%%~d\ISCC.exe" set "ISCC_EXE=%%~d\ISCC.exe"
+)
+if not defined ISCC_EXE (
+    echo ERROR: Inno Setup 7 not found, get it from https://jrsoftware.org/isdl.php
     exit /b 1
 )
+echo Inno Setup: %ISCC_EXE%
 
 :: The version is read back from the executable's properties, the way the installer script does.
 set "APP_VERSION="
