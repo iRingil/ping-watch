@@ -19,7 +19,7 @@ use crate::probe::tracer::{TraceConfig, Tracer};
 use crate::snapshot::{AlertRow, Chart, HopRow, TargetReport};
 use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, HopKey, Recorder, Store};
-use crate::store::settings::AppSettings;
+use crate::store::settings::{AppSettings, INTERVALS};
 use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::SavedTab;
 use crate::ui::focus::Focus;
@@ -30,15 +30,15 @@ use crate::ui::target_entry::TargetEntry;
 use crate::ui::theme;
 use crate::ui::timeline::{Period, Series, Timeline, Window};
 
-/// Probe intervals offered in the toolbar.
-const INTERVALS: [(Duration, &str); 7] = [
-    (Duration::from_millis(500), n!("0.5 seconds")),
-    (Duration::from_secs(1), n!("1 second")),
-    (Duration::from_millis(2_500), n!("2.5 seconds")),
-    (Duration::from_secs(5), n!("5 seconds")),
-    (Duration::from_secs(10), n!("10 seconds")),
-    (Duration::from_secs(30), n!("30 seconds")),
-    (Duration::from_secs(60), n!("60 seconds")),
+/// Names of the probe intervals offered ([`INTERVALS`], in the same order).
+const INTERVAL_LABELS: [&str; 7] = [
+    n!("0.5 seconds"),
+    n!("1 second"),
+    n!("2.5 seconds"),
+    n!("5 seconds"),
+    n!("10 seconds"),
+    n!("30 seconds"),
+    n!("60 seconds"),
 ];
 /// Width of the running trace's menu.
 const TRACE_MENU_WIDTH: f32 = 230.0;
@@ -379,7 +379,7 @@ impl Tab {
             .and_then(|reader| reader.target_id(&key).inspect_err(|error| log::warn!("{error}")).ok());
         let recorder = match context.history_path {
             None => Err(tr!(self.language, "History is off: no data folder").to_owned()),
-            Some(path) => Recorder::start(path, &key, context.settings.retention)
+            Some(path) => Recorder::start(path, &key)
                 .map_err(|error| trf!(self.language, "History is off: {error}", error = error)),
         };
         if let Err(warning) = &recorder {
@@ -701,6 +701,12 @@ impl Tab {
 /// Splits the pane area into the hop table (top, `table_share` of the height, kept by the app for all tabs), the splitter and the timeline
 /// (the rest). Computed from the window size every frame, so the panes are in place from the first frame.
 pub fn split(area: Rect, table_share: f32) -> (Rect, Rect, Rect) {
+    // The share comes from the database too: kept within the splitter's range, whatever is stored.
+    let table_share = if table_share.is_finite() {
+        table_share.clamp(*TABLE_SHARE_RANGE.start(), *TABLE_SHARE_RANGE.end())
+    } else {
+        TABLE_SHARE
+    };
     let usable = area.height() - SPLITTER_HEIGHT;
     let splitter_top = area.top() + usable * table_share;
     let timeline_top = splitter_top + SPLITTER_HEIGHT;
@@ -753,7 +759,7 @@ pub fn interval_choice(ui: &mut Ui, interval: &mut Duration) -> bool {
     egui::ComboBox::from_id_salt("interval")
         .selected_text(interval_label(*interval, language))
         .show_ui(ui, |ui| {
-            for (choice, label) in INTERVALS {
+            for (choice, label) in INTERVALS.into_iter().zip(INTERVAL_LABELS) {
                 ui.selectable_value(interval, choice, language.translate(label));
             }
         });
@@ -772,7 +778,7 @@ pub fn focus_choice(ui: &mut Ui, focus: &mut Focus) {
 
 /// Menu label of a probe interval.
 fn interval_label(interval: Duration, language: Language) -> String {
-    INTERVALS.iter().find(|(known, _)| *known == interval).map_or_else(
+    INTERVALS.iter().zip(INTERVAL_LABELS).find(|(known, _)| **known == interval).map_or_else(
         || trf!(language, "{seconds} seconds", seconds = format!("{:.1}", interval.as_secs_f64())),
         |(_, label)| language.translate(label).to_owned(),
     )
@@ -840,17 +846,10 @@ fn hop_row(hop: &Hop, names: &NameCache) -> HopRow {
 fn alert_row(entry: &JournalEntry, language: Language) -> AlertRow {
     let lasted = match entry.ended_ms {
         None => tr!(language, "on now").to_owned(),
-        Some(ended) if ended == entry.started_ms => String::new(),
-        Some(ended) => {
-            let seconds = u64::try_from(ended.saturating_sub(entry.started_ms) / 1_000).unwrap_or(0);
-            crate::alerts::span(Duration::from_secs(seconds.max(1)), language)
-        }
+        Some(_) => entry.lasted(language).unwrap_or_default(),
     };
-    let worst = match (entry.worst, entry.unit.as_deref()) {
-        (Some(worst), Some(unit)) => format!("{worst:.0} {}", crate::alerts::unit_label(unit, language)),
-        _ => String::new(),
-    };
-    AlertRow { started: date_time(entry.started_ms), what: entry.what.clone(), lasted, worst }
+    let worst = entry.worst(language).unwrap_or_default();
+    AlertRow { started: date_time(entry.started_ms), what: entry.what(language), lasted, worst }
 }
 
 /// Local "15.11 13:05:12" of Unix ms.

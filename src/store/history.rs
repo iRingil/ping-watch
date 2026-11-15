@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, params};
 
 use crate::probe::route::{ProbeOutcome, Sample};
+use crate::store::alerts::JournalEntry;
 
 /// Rows before the current one in the rolling jitter window (the window holds this + 1 answers). A macro so it can
 /// go into the SQL text with `concat!`.
@@ -22,8 +23,6 @@ macro_rules! jitter_window_preceding {
 
 /// How often the recorder writes collected samples.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-/// How often the recorder deletes expired samples.
-const PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How long a query waits for another connection's write lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -113,6 +112,8 @@ pub struct Bucket {
 /// A note pinned to a moment of a target's timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
+    /// Row id.
+    pub id: i64,
     /// The moment, Unix time in milliseconds.
     pub ts_ms: i64,
     /// The note.
@@ -165,6 +166,23 @@ pub struct Store {
     connection: Connection,
 }
 
+/// Opens the database file at `path` (creating its folder if needed) with a busy timeout, so a write that meets
+/// another connection's write (the recorders write every second) waits instead of failing at once.
+///
+/// # Errors
+///
+/// [`HistoryError`] if the folder can't be created or the database can't be opened.
+pub(crate) fn connect(path: &Path) -> Result<Connection, HistoryError> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    // Takes effect only while the file is still empty: a new database gives pages back after pruning.
+    connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")?;
+    Ok(connection)
+}
+
 impl Store {
     /// Opens (creating if needed) the database at `path`.
     ///
@@ -172,10 +190,7 @@ impl Store {
     ///
     /// [`HistoryError`] if the folder can't be created or the database can't be opened.
     pub fn open(path: &Path) -> Result<Self, HistoryError> {
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        Self::init(Connection::open(path)?)
+        Self::init(connect(path)?)
     }
 
     /// Opens a private database in memory.
@@ -231,13 +246,19 @@ impl Store {
         Ok(())
     }
 
-    /// Deletes samples taken before `before_ms`; returns how many were deleted.
+    /// Deletes everything older than `before_ms`: samples, comments and the alert journal (with the timeline marks
+    /// made from it), then gives the freed pages back to the file system. Returns how many samples were deleted.
     ///
     /// # Errors
     ///
     /// [`HistoryError::Db`] if SQLite fails.
     pub fn prune(&self, before_ms: i64) -> Result<usize, HistoryError> {
-        Ok(self.connection.execute("DELETE FROM samples WHERE ts_ms < ?1", [before_ms])?)
+        let samples = self.connection.execute("DELETE FROM samples WHERE ts_ms < ?1", [before_ms])?;
+        self.connection.execute("DELETE FROM comments WHERE ts_ms < ?1", [before_ms])?;
+        crate::store::alerts::prune_journal(&self.connection, before_ms)?;
+        // Only shrinks a database made with auto_vacuum = INCREMENTAL (see `connect`); a no-op otherwise.
+        self.connection.execute_batch("PRAGMA incremental_vacuum;")?;
+        Ok(samples)
     }
 
     /// Statistics of hop `hop` of target `target_id` in `[from_ms, to_ms)`, grouped into buckets of
@@ -321,6 +342,26 @@ impl Store {
         Ok(())
     }
 
+    /// Changes the text of comment `id`.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn edit_comment(&self, id: i64, text: &str) -> Result<(), HistoryError> {
+        self.connection.execute("UPDATE comments SET text = ?2 WHERE id = ?1", params![id, text])?;
+        Ok(())
+    }
+
+    /// Deletes comment `id`.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn delete_comment(&self, id: i64) -> Result<(), HistoryError> {
+        self.connection.execute("DELETE FROM comments WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Comments of target `target_id` in `[from_ms, to_ms)`, oldest first.
     ///
     /// # Errors
@@ -328,12 +369,21 @@ impl Store {
     /// [`HistoryError::Db`] if SQLite fails.
     pub fn comments(&self, target_id: i64, from_ms: i64, to_ms: i64) -> Result<Vec<Comment>, HistoryError> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT ts_ms, text FROM comments WHERE target_id = ?1 AND ts_ms >= ?2 AND ts_ms < ?3 ORDER BY ts_ms",
+            "SELECT id, ts_ms, text FROM comments WHERE target_id = ?1 AND ts_ms >= ?2 AND ts_ms < ?3 ORDER BY ts_ms",
         )?;
         let rows = statement.query_map(params![target_id, from_ms, to_ms], |row| {
-            Ok(Comment { ts_ms: row.get(0)?, text: row.get(1)? })
+            Ok(Comment { id: row.get(0)?, ts_ms: row.get(1)?, text: row.get(2)? })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The alert journal rows of target `target_id` touching `[from_ms, to_ms]`, for the timeline marks.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn alerts(&self, target_id: i64, from_ms: i64, to_ms: i64) -> Result<Vec<JournalEntry>, HistoryError> {
+        crate::store::alerts::entries_of_target(&self.connection, target_id, from_ms, to_ms)
     }
 }
 
@@ -347,19 +397,18 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Opens the database at `path` and starts recording samples of the target called `target`; samples older than
-    /// `retention` are deleted.
+    /// Opens the database at `path` and starts recording samples of the target called `target`.
     ///
     /// # Errors
     ///
     /// [`HistoryError`] if the database can't be opened or the thread can't be started.
-    pub fn start(path: &Path, target: &str, retention: Duration) -> Result<Self, HistoryError> {
+    pub fn start(path: &Path, target: &str) -> Result<Self, HistoryError> {
         let store = Store::open(path)?;
         let target_id = store.target_id(target)?;
         let (sender, receiver) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("history".to_owned())
-            .spawn(move || record_loop(store, target_id, retention, &receiver))?;
+            .spawn(move || record_loop(store, target_id, &receiver))?;
         Ok(Self { sender: Some(sender), worker: Some(worker) })
     }
 
@@ -381,10 +430,9 @@ impl Drop for Recorder {
     }
 }
 
-/// Writer body: collects samples, writes them every [`FLUSH_INTERVAL`], prunes every [`PRUNE_INTERVAL`].
-fn record_loop(mut store: Store, target_id: i64, retention: Duration, receiver: &Receiver<Sample>) {
+/// Writer body: collects samples and writes them every [`FLUSH_INTERVAL`].
+fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Sample>) {
     let mut batch = Vec::new();
-    let mut last_prune: Option<Instant> = None;
     let mut connected = true;
     while connected {
         let flush_at = Instant::now().checked_add(FLUSH_INTERVAL);
@@ -405,14 +453,23 @@ fn record_loop(mut store: Store, target_id: i64, retention: Duration, receiver: 
             }
             batch.clear();
         }
-        if last_prune.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL) {
-            let retention_ms = i64::try_from(retention.as_millis()).unwrap_or(i64::MAX);
-            match store.prune(unix_ms(SystemTime::now()).saturating_sub(retention_ms)) {
-                Ok(deleted) => log::debug!("pruned {deleted} expired samples"),
-                Err(error) => log::error!("cannot prune history: {error}"),
-            }
-            last_prune = Some(Instant::now());
+    }
+}
+
+/// Deletes what is older than `retention` from the database at `path` on a thread of its own (a large delete
+/// takes a while); the app runs it hourly and when the retention setting changes.
+pub fn prune_in_background(path: &Path, retention: Duration) {
+    let path = path.to_path_buf();
+    let spawned = thread::Builder::new().name("prune".to_owned()).spawn(move || {
+        let retention_ms = i64::try_from(retention.as_millis()).unwrap_or(i64::MAX);
+        let before_ms = unix_ms(SystemTime::now()).saturating_sub(retention_ms);
+        match Store::open(&path).and_then(|store| store.prune(before_ms)) {
+            Ok(deleted) => log::debug!("pruned {deleted} expired samples"),
+            Err(error) => log::error!("cannot prune the history: {error}"),
         }
+    });
+    if let Err(error) = spawned {
+        log::error!("cannot start pruning the history: {error}");
     }
 }
 
@@ -563,16 +620,35 @@ mod tests {
     fn prune_deletes_only_old_samples() {
         let (mut store, target) = store_with_target();
         store.insert(target, &[reply(1, 100, 1), reply(1, 200, 1), reply(1, 300, 1)]).expect("insert works");
+        store.add_comment(target, 100, "old").expect("comment saved");
+        store.add_comment(target, 300, "new").expect("comment saved");
         assert_eq!(store.prune(250).ok(), Some(2));
         let buckets = store.buckets(target, HopKey::Ttl(1), 0, 1_000, 1_000).expect("query works");
         assert_eq!(buckets.first().map(|bucket| bucket.sent), Some(1));
+        let comments = store.comments(target, 0, 1_000).expect("query works");
+        assert_eq!(comments.iter().map(|comment| comment.text.as_str()).collect::<Vec<_>>(), ["new"]);
+    }
+
+    #[test]
+    fn comments_are_edited_and_deleted() {
+        let (store, target) = store_with_target();
+        store.add_comment(target, 1_000, "typo").expect("comment saved");
+        let texts = |store: &Store| -> Vec<(i64, String)> {
+            let comments = store.comments(target, 0, 2_000).unwrap_or_default();
+            comments.into_iter().map(|comment| (comment.id, comment.text)).collect()
+        };
+        let id = texts(&store).first().map(|(id, _)| *id).expect("listed");
+        store.edit_comment(id, "fixed").expect("edited");
+        assert_eq!(texts(&store), [(id, "fixed".to_owned())]);
+        store.delete_comment(id).expect("deleted");
+        assert!(texts(&store).is_empty());
     }
 
     #[test]
     fn recorder_flushes_on_drop() {
         let folder = std::env::temp_dir().join(format!("ping-watch-test-{}", std::process::id()));
         let path = folder.join("history.sqlite");
-        let recorder = Recorder::start(&path, "example", Duration::from_secs(3_600)).expect("recorder starts");
+        let recorder = Recorder::start(&path, "example").expect("recorder starts");
         let sender = recorder.sender().expect("sender available");
         // A current timestamp, or the recorder's first prune would delete the sample as expired.
         let now = unix_ms(SystemTime::now());

@@ -1,15 +1,17 @@
 //! Main window: a tab bar ("All targets", one tab per target, "+"), the All targets page or the active target tab,
 //! and the status bar. Keyboard shortcuts act on the active tab.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
-use crate::alerts::{Condition, Engine, Event, Observe, Rule, WindowStats};
+use crate::alerts::{Engine, Event, Observe, Rule, WindowStats};
 use crate::i18n::{self, Language, tr, trf, trn};
 use crate::probe::names::NameCache;
 use crate::snapshot::{self, Snapshot};
@@ -63,6 +65,12 @@ const UPDATE_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
 const UPDATE_RETRY: Duration = Duration::from_secs(60 * 60);
 /// How often the alert rules are checked.
 const ALERT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Least time between two notifications of the same rule and target (the journal still gets every event).
+const NOTIFY_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// How often expired history is deleted.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// How long a notice stays in the status bar.
+const NOTICE_SHOWN: Duration = Duration::from_secs(8);
 /// Width of the "+" (new target) button.
 const PLUS_WIDTH: f32 = 24.0;
 /// Width of the gear (app menu) button at the right end of the tab bar.
@@ -76,6 +84,32 @@ enum Page {
     /// The target tab at this index.
     Target(usize),
 }
+
+/// A message in the status bar for a while: how something the user did turned out (saved, or failed and why).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Notice {
+    /// The message.
+    text: String,
+    /// Whether it reports a failure (shown in red).
+    problem: bool,
+    /// When it appeared.
+    at: Instant,
+}
+
+impl Notice {
+    /// A failure.
+    fn problem(text: String) -> Self {
+        Self { text, problem: true, at: Instant::now() }
+    }
+
+    /// A success.
+    fn done(text: String) -> Self {
+        Self { text, problem: false, at: Instant::now() }
+    }
+}
+
+/// The file a snapshot was saved to, or why it wasn't.
+type SnapshotResult = Result<PathBuf, String>;
 
 /// Application state.
 #[derive(Debug)]
@@ -146,6 +180,14 @@ pub struct PingWatchApp {
     update_retry_at: Option<Instant>,
     /// A newer version found by the daily check: marks the gear.
     update_available: bool,
+    /// The status bar's notice, if one is shown.
+    notice: Option<Notice>,
+    /// When the last notification of each rule and target was shown.
+    notified: HashMap<(i64, String), Instant>,
+    /// The retention the history was last pruned with, and when.
+    pruned: Option<(Duration, Instant)>,
+    /// Where the snapshot thread reports the file it saved (or why it couldn't).
+    snapshot_results: (Sender<SnapshotResult>, Receiver<SnapshotResult>),
 }
 
 impl PingWatchApp {
@@ -252,6 +294,10 @@ impl PingWatchApp {
             update_check: None,
             update_retry_at: None,
             update_available: false,
+            notice: None,
+            notified: HashMap::new(),
+            pruned: None,
+            snapshot_results: mpsc::channel(),
         }
     }
 
@@ -268,78 +314,89 @@ impl PingWatchApp {
         }
     }
 
-    /// Acts on one alert event: the journal, a mark on the target's timeline, a notification if the rule asks.
-    fn on_alert(&self, event: Event, now_ms: i64) {
+    /// Acts on one alert event: the journal (which the timelines draw their alert marks from) and a notification
+    /// if the rule asks — at most one per rule and target every [`NOTIFY_INTERVAL`].
+    fn on_alert(&mut self, event: Event, now_ms: i64) {
         let language = self.settings.language;
-        let rule_of = |rule_id: i64| self.alert_rules.iter().find(|rule| rule.id == rule_id);
-        let mark = |host: &str, text: &str| {
-            let target_id =
-                self.tabs.iter().find(|tab| tab.host().eq_ignore_ascii_case(host)).and_then(Tab::history_id);
-            if let (Some(reader), Some(target_id)) = (&self.reader, target_id)
-                && let Err(error) = reader.add_comment(target_id, now_ms, text)
-            {
-                log::warn!("cannot mark the alert on the timeline: {error}");
-            }
-        };
         let journal = self.alert_store.as_ref();
-        match event {
+        let rule_of = |rule_id: i64| self.alert_rules.iter().find(|rule| rule.id == rule_id);
+        let mut toast = None;
+        let mut failure = None;
+        match &event {
             Event::Started { rule_id, host, value } => {
-                let Some(rule) = rule_of(rule_id) else {
+                let Some(rule) = rule_of(*rule_id) else {
                     return;
                 };
-                let (measured, unit) = measured(&rule.condition, value, language);
-                let what = rule.condition.describe(language);
                 if let Some(journal) = journal
-                    && let Err(error) = journal.start(rule_id, &host, &what, now_ms, value, unit)
+                    && let Err(error) = journal.start(*rule_id, host, &rule.condition, now_ms, *value)
                 {
-                    log::warn!("cannot write the alert journal: {error}");
+                    failure = Some(error);
                 }
-                mark(&host, &trf!(language, "Alert: {measured} (rule: {rule})", measured = measured, rule = what));
                 if rule.notify {
-                    self.notifier.show(&format!("{host}: {measured}"), &what);
+                    let measured = rule.condition.measured(*value, language);
+                    toast = Some((format!("{host}: {measured}"), rule.condition.describe(language)));
                 }
             }
             Event::Ended { rule_id, host, started_ms, worst, recovered } => {
                 if let Some(journal) = journal
-                    && let Err(error) = journal.end(rule_id, &host, now_ms, worst)
+                    && let Err(error) = journal.end(*rule_id, host, now_ms, *worst, *recovered)
                 {
-                    log::warn!("cannot write the alert journal: {error}");
+                    failure = Some(error);
                 }
-                let Some(rule) = rule_of(rule_id).filter(|_| recovered) else {
-                    return;
-                };
-                let seconds = u64::try_from(now_ms.saturating_sub(started_ms) / 1_000).unwrap_or(0);
-                let lasted = crate::alerts::span(Duration::from_secs(seconds.max(1)), language);
-                let (worst_text, _) = measured(&rule.condition, worst, language);
-                mark(
-                    &host,
-                    &trf!(
-                        language,
-                        "Back to normal after {lasted} (worst: {worst})",
-                        lasted = lasted,
-                        worst = worst_text
-                    ),
-                );
-                if rule.notify_recovery {
-                    self.notifier.show(
-                        &trf!(language, "{host} is back to normal", host = host),
-                        &trf!(language, "Lasted {lasted}, worst: {worst}", lasted = lasted, worst = worst_text),
-                    );
+                if let Some(rule) = rule_of(*rule_id).filter(|rule| *recovered && rule.notify_recovery) {
+                    let seconds = u64::try_from(now_ms.saturating_sub(*started_ms) / 1_000).unwrap_or(0);
+                    let lasted = crate::alerts::span(Duration::from_secs(seconds.max(1)), language);
+                    let worst = rule.condition.measured(*worst, language);
+                    toast = Some((
+                        trf!(language, "{host} is back to normal", host = host),
+                        trf!(language, "Lasted {lasted}, worst: {worst}", lasted = lasted, worst = worst),
+                    ));
                 }
             }
-            Event::RouteChanged { rule_id, host, change } => {
-                let what = change.describe(language);
-                let note = trf!(language, "Route changed: {what}", what = what);
+            Event::RouteChanged { rule_id, host, note } => {
                 if let Some(journal) = journal
-                    && let Err(error) = journal.note(rule_id, &host, &note, now_ms)
+                    && let Err(error) = journal.note(*rule_id, host, *note, now_ms)
                 {
-                    log::warn!("cannot write the alert journal: {error}");
+                    failure = Some(error);
                 }
-                mark(&host, &note);
-                if rule_of(rule_id).is_some_and(|rule| rule.notify) {
-                    self.notifier.show(&trf!(language, "{host}: route changed", host = host), &what);
+                if rule_of(*rule_id).is_some_and(|rule| rule.notify) {
+                    toast = Some((trf!(language, "{host}: route changed", host = host), note.describe(language)));
                 }
             }
+        }
+        if let Some(error) = failure {
+            log::warn!("cannot write the alert journal: {error}");
+            self.notice =
+                Some(Notice::problem(trf!(language, "The alert journal couldn't be written: {error}", error = error)));
+        }
+        let (rule_id, host) = match &event {
+            Event::Started { rule_id, host, .. }
+            | Event::Ended { rule_id, host, .. }
+            | Event::RouteChanged { rule_id, host, .. } => (*rule_id, host.clone()),
+        };
+        if let Some((title, text)) = toast {
+            let key = (rule_id, host);
+            if self.notified.get(&key).is_none_or(|at| at.elapsed() >= NOTIFY_INTERVAL) {
+                self.notifier.show(&title, &text);
+                self.notified.insert(key, Instant::now());
+            } else {
+                log::info!("notification held back, one came lately: {title}");
+            }
+        }
+    }
+
+    /// Deletes what is older than the retention period: an hour after the last time, and at once when the
+    /// setting changes (also on the first frame).
+    fn prune_history(&mut self) {
+        let Some(path) = &self.history_path else {
+            return;
+        };
+        let due = self
+            .pruned
+            .is_none_or(|(retention, at)| retention != self.settings.retention || at.elapsed() >= PRUNE_INTERVAL);
+        if due {
+            history::prune_in_background(path, self.settings.retention);
+            self.pruned = Some((self.settings.retention, Instant::now()));
         }
     }
 
@@ -394,9 +451,18 @@ impl PingWatchApp {
         self.update_check = Some(Check::start(REPOSITORY, env!("CARGO_PKG_VERSION")));
     }
 
+    /// Whether the shown page has something to snapshot: All targets always, a target tab once it traces.
+    fn can_snapshot(&self) -> bool {
+        match self.page {
+            Page::Target(index) => self.tabs.get(index).is_some_and(|tab| tab.target().is_some()),
+            Page::AllTargets => true,
+        }
+    }
+
     /// Saves the shown page as an HTML snapshot: the page is written here, then a "Save as" dialog (on the desktop
-    /// at first) runs on its own thread, so the window keeps drawing while it is open.
-    fn save_snapshot(&self) {
+    /// at first) runs on its own thread, so the window keeps drawing while it is open; the file saved (or the
+    /// failure) comes back to the status bar.
+    fn save_snapshot(&mut self) {
         let journal = self.alert_store.as_ref().and_then(|store| store.journal().ok()).unwrap_or_default();
         let language = self.settings.language;
         let snapshot = match self.page {
@@ -404,7 +470,9 @@ impl PingWatchApp {
                 let Some(report) =
                     self.tabs.get(index).and_then(|tab| tab.snapshot(&self.names, self.reader.as_ref(), &journal))
                 else {
-                    log::info!("nothing to snapshot: the tab doesn't trace");
+                    self.notice = Some(Notice::problem(
+                        tr!(language, "Nothing to save yet: the snapshot needs a running trace").to_owned(),
+                    ));
                     return;
                 };
                 Snapshot::Target(Box::new(report))
@@ -422,20 +490,37 @@ impl PingWatchApp {
         );
         let file_name = snapshot.file_name(&now.format("%Y-%m-%d %H-%M").to_string(), language);
         let (title, filter) = (tr!(language, "Save snapshot"), tr!(language, "Web page"));
+        let results = self.snapshot_results.0.clone();
         let spawned = std::thread::Builder::new().name("snapshot".to_owned()).spawn(move || {
             let mut dialog =
                 rfd::FileDialog::new().set_title(title).set_file_name(&file_name).add_filter(filter, &["html"]);
             if let Some(desktop) = dirs::desktop_dir() {
                 dialog = dialog.set_directory(desktop);
             }
-            if let Some(path) = dialog.save_file()
-                && let Err(error) = std::fs::write(&path, html)
-            {
+            // Cancelled: nothing to report.
+            let Some(path) = dialog.save_file() else {
+                return;
+            };
+            let result = std::fs::write(&path, html).map(|()| path.clone()).map_err(|error| {
                 log::error!("cannot save the snapshot to {}: {error}", path.display());
-            }
+                format!("{}: {error}", path.display())
+            });
+            results.send(result).ok();
         });
         if let Err(error) = spawned {
             log::error!("cannot open the save dialog: {error}");
+            self.notice = Some(Notice::problem(trf!(language, "Cannot open the save dialog: {error}", error = error)));
+        }
+    }
+
+    /// Takes the outcome of a snapshot saved in the background into the status bar.
+    fn take_snapshot_results(&mut self) {
+        let language = self.settings.language;
+        while let Ok(result) = self.snapshot_results.1.try_recv() {
+            self.notice = Some(match result {
+                Ok(path) => Notice::done(trf!(language, "Snapshot saved: {path}", path = path.display())),
+                Err(error) => Notice::problem(trf!(language, "The snapshot wasn't saved: {error}", error = error)),
+            });
         }
     }
 
@@ -468,6 +553,11 @@ impl PingWatchApp {
             && let Err(error) = store.save(&self.settings)
         {
             log::warn!("cannot save the settings: {error}");
+            self.notice = Some(Notice::problem(trf!(
+                self.settings.language,
+                "The settings weren't saved: {error}",
+                error = error
+            )));
         }
         // One attempt per change, not one per frame.
         self.settings_saved = self.settings;
@@ -655,9 +745,12 @@ impl PingWatchApp {
                 new_target = true;
             }
             ui.add_space((ui.available_width() - SNAPSHOT_WIDTH - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 3.0).max(0.0));
-            if bar_button(ui, icons::Icon::Camera, SNAPSHOT_WIDTH, tr!(ui, "Save a snapshot of this page (HTML)"))
-                .clicked()
-            {
+            let snapshot_tooltip = if self.can_snapshot() {
+                tr!(ui, "Save a snapshot of this page (HTML)")
+            } else {
+                tr!(ui, "A snapshot needs a running trace")
+            };
+            if bar_button(ui, icons::Icon::Camera, SNAPSHOT_WIDTH, snapshot_tooltip, self.can_snapshot()).clicked() {
                 self.save_snapshot();
             }
             if bell_button(ui, self.alert_engine.active_count()).clicked() {
@@ -721,15 +814,26 @@ fn tab_width(ui: &Ui, title: &str, closable: bool, alert: bool) -> f32 {
         + if alert { ALERT_DOT_WIDTH } else { 0.0 }
 }
 
-/// A plain icon button of the tab bar (`width` wide), lit under the pointer.
-fn bar_button(ui: &mut Ui, icon: icons::Icon, width: f32, tooltip: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TAB_HEIGHT), Sense::click());
+/// A plain icon button of the tab bar (`width` wide), lit under the pointer; dimmed and not clickable unless
+/// `enabled` (the tooltip then says why).
+fn bar_button(ui: &mut Ui, icon: icons::Icon, width: f32, tooltip: &str, enabled: bool) -> egui::Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TAB_HEIGHT), sense);
     let palette = theme::palette(ui);
-    if response.hovered() {
+    let lit = enabled && (response.hovered() || response.has_focus());
+    if lit {
         ui.painter()
             .rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), palette.pane_header);
     }
-    icons::paint(ui, rect.center(), icon, if response.hovered() { palette.ink } else { palette.ink_muted });
+    let color = if !enabled {
+        palette.rule
+    } else if lit {
+        palette.ink
+    } else {
+        palette.ink_muted
+    };
+    icons::paint(ui, rect.center(), icon, color);
+    icons::focus_ring(ui, &response, rect.shrink2(Vec2::new(0.0, 3.0)));
     response.on_hover_text(tooltip)
 }
 
@@ -904,6 +1008,15 @@ impl PingWatchApp {
     /// problems — the message if there is one, the count if there are more.
     fn status_bar(&self, ui: &mut Ui) {
         ui.horizontal(|ui| {
+            // The outcome of what the user just did comes first, for a few seconds.
+            if let Some(notice) = self.notice.as_ref().filter(|notice| notice.at.elapsed() < NOTICE_SHOWN) {
+                if notice.problem {
+                    status_problem(ui, &notice.text);
+                } else {
+                    ui.colored_label(theme::palette(ui).ink, &notice.text);
+                }
+                return;
+            }
             let tab = match self.page {
                 Page::Target(index) => self.tabs.get(index),
                 Page::AllTargets => self
@@ -1046,6 +1159,8 @@ impl eframe::App for PingWatchApp {
         self.save_settings();
         self.check_alerts();
         self.check_updates_daily();
+        self.prune_history();
+        self.take_snapshot_results();
         let Some(tray) = &self.tray else {
             return;
         };
@@ -1153,17 +1268,5 @@ impl Observe for Watched<'_> {
 
     fn path(&self, host: &str) -> Vec<(u8, IpAddr)> {
         self.0.iter().find(|tab| tab.host() == host).map(Tab::answering_path).unwrap_or_default()
-    }
-}
-
-/// A measured value of `condition` for people, with its unit: "loss 23 %", "average latency 180 ms",
-/// "no answer for 30 seconds".
-fn measured(condition: &Condition, value: f64, language: Language) -> (String, &'static str) {
-    let value = format!("{value:.0}");
-    match condition {
-        Condition::Loss { .. } => (trf!(language, "Loss {value} %", value = value), "%"),
-        Condition::Latency { .. } => (trf!(language, "Average latency {value} ms", value = value), "ms"),
-        Condition::Unreachable { .. } => (trf!(language, "No answer for {value} s", value = value), "s"),
-        Condition::RouteChanged => (String::new(), ""),
     }
 }

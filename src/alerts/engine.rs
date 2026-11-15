@@ -1,16 +1,22 @@
 //! Checking the rules: once a second the app asks the engine to look at every traced target; the engine keeps which
-//! alerts are on (since when, worst value) and returns what changed.
+//! alerts are on (since when, worst value) and returns what changed. A value hovering around the threshold doesn't
+//! make the alert flicker: it starts above the threshold, but ends only once the value has stayed below
+//! [`RECOVERY_SHARE`] of it for [`CALM_CHECKS`] checks in a row.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::route_watch::{Path, RouteChange, RouteWatch};
+use super::route_watch::{Path, RouteNote, RouteWatch};
 use super::rules::{Condition, Rule};
 
 /// Fewest probes in the window before loss or latency is judged (a couple of probes say nothing).
 const MIN_PROBES: u64 = 3;
 /// Share of a condition's window the trace must already cover before the condition is judged.
 const MIN_COVERAGE: f64 = 0.95;
+/// Share of the threshold a loss or latency must fall below for the alert to count as calm.
+const RECOVERY_SHARE: f64 = 0.8;
+/// Calm checks in a row (one a second) before an alert ends.
+const CALM_CHECKS: u32 = 10;
 
 /// What a target's own probes (the last hop) showed over a period.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,8 +84,8 @@ pub enum Event {
         rule_id: i64,
         /// The target.
         host: String,
-        /// Before and after.
-        change: RouteChange,
+        /// What changed.
+        note: RouteNote,
     },
 }
 
@@ -90,6 +96,8 @@ struct Active {
     started_ms: i64,
     /// The worst value so far.
     worst: f64,
+    /// Calm checks in a row lately.
+    calm: u32,
 }
 
 /// The rule checker and its state.
@@ -160,34 +168,46 @@ impl Engine {
         if stats.covered.as_secs_f64() < window.as_secs_f64() * MIN_COVERAGE {
             return;
         }
-        // The value if the condition holds, `None` if it doesn't; too few probes or answers to judge leave the
-        // alert as it is (a latency alert can't end while nothing answers: there is no average to look at).
-        let bad = match rule.condition {
+        // How the value stands; too few probes or answers to judge leave the alert as it is (a latency alert can't
+        // end while nothing answers: there is no average to look at).
+        let level = match rule.condition {
             Condition::Loss { percent, .. } => {
                 if stats.sent < MIN_PROBES {
                     return;
                 }
-                let loss = stats.loss_percent();
-                (loss > percent).then_some(loss)
+                Level::of(stats.loss_percent(), percent)
             }
             Condition::Latency { ms, .. } => {
                 let Some(average) = stats.average_ms.filter(|_| stats.received >= MIN_PROBES) else {
                     return;
                 };
-                (average > ms).then_some(average)
+                Level::of(average, ms)
             }
-            Condition::Unreachable { after } => (stats.received == 0).then_some(after.as_secs_f64()),
+            Condition::Unreachable { after } => {
+                if stats.received == 0 {
+                    Level::Bad(after.as_secs_f64())
+                } else {
+                    Level::Calm
+                }
+            }
             Condition::RouteChanged => return,
         };
         let key = (rule.id, host.to_owned());
-        match (bad, self.active.get_mut(&key)) {
-            (Some(value), Some(active)) => active.worst = active.worst.max(value),
-            (Some(value), None) => {
-                self.active.insert(key, Active { started_ms: now_ms, worst: value });
+        match (level, self.active.get_mut(&key)) {
+            (Level::Bad(value), Some(active)) => {
+                active.worst = active.worst.max(value);
+                active.calm = 0;
+            }
+            (Level::Bad(value), None) => {
+                self.active.insert(key, Active { started_ms: now_ms, worst: value, calm: 0 });
                 events.push(Event::Started { rule_id: rule.id, host: host.to_owned(), value });
             }
-            (None, Some(_)) => {
-                if let Some(active) = self.active.remove(&key) {
+            (Level::Between, Some(active)) => active.calm = 0,
+            (Level::Calm, Some(active)) => {
+                active.calm = active.calm.saturating_add(1);
+                if active.calm >= CALM_CHECKS
+                    && let Some(active) = self.active.remove(&key)
+                {
                     events.push(Event::Ended {
                         rule_id: rule.id,
                         host: host.to_owned(),
@@ -197,7 +217,7 @@ impl Engine {
                     });
                 }
             }
-            (None, None) => {}
+            (Level::Between | Level::Calm, None) => {}
         }
     }
 
@@ -206,15 +226,39 @@ impl Engine {
         self.routes.retain(|host, _| hosts.contains(host));
         for host in hosts {
             let change = self.routes.entry(host.clone()).or_default().check(observe.path(host));
-            let Some(change) = change else {
+            let Some(note) = change.map(|change| change.note()) else {
                 continue;
             };
             let watching = rules.iter().filter(|rule| {
                 rule.enabled && rule.condition == Condition::RouteChanged && rule.targets.contains(host)
             });
             for rule in watching {
-                events.push(Event::RouteChanged { rule_id: rule.id, host: host.clone(), change: change.clone() });
+                events.push(Event::RouteChanged { rule_id: rule.id, host: host.clone(), note });
             }
+        }
+    }
+}
+
+/// Where a measured value stands against a rule's threshold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Level {
+    /// Above the threshold: the value.
+    Bad(f64),
+    /// Not above it, but not clearly below it either: an alert that is on stays on.
+    Between,
+    /// Clearly below the threshold.
+    Calm,
+}
+
+impl Level {
+    /// Where `value` stands against `threshold`.
+    fn of(value: f64, threshold: f64) -> Self {
+        if value > threshold {
+            Self::Bad(value)
+        } else if value < threshold * RECOVERY_SHARE {
+            Self::Calm
+        } else {
+            Self::Between
         }
     }
 }
@@ -291,12 +335,36 @@ mod tests {
         fake.set("a", stats(100, 70, 20.0), path(1));
         assert!(engine.check(&rules, &fake, 2_000).is_empty(), "announced once, not every second");
         assert!(engine.is_alerting("A"));
+        fake.set("a", stats(100, 91, 20.0), path(1));
+        for second in 3..30 {
+            assert!(engine.check(&rules, &fake, second * 1_000).is_empty(), "9 % is below 10 % but not below 8 %");
+        }
         fake.set("a", stats(100, 100, 20.0), path(1));
+        let mut events = Vec::new();
+        for second in 30..(30 + i64::from(CALM_CHECKS)) {
+            events.extend(engine.check(&rules, &fake, second * 1_000));
+        }
         assert_eq!(
-            engine.check(&rules, &fake, 3_000),
-            [Event::Ended { rule_id: 1, host: "a".to_owned(), started_ms: 1_000, worst: 30.0, recovered: true }]
+            events,
+            [Event::Ended { rule_id: 1, host: "a".to_owned(), started_ms: 1_000, worst: 30.0, recovered: true }],
+            "ends after the calm checks, once"
         );
         assert_eq!(engine.active_count(), 0);
+    }
+
+    #[test]
+    fn a_value_hovering_at_the_threshold_does_not_flicker() {
+        let fake = Fake::default();
+        let rules = [rule(1, Condition::Loss { percent: 10.0, window: Duration::from_secs(120) })];
+        let mut engine = Engine::default();
+        let mut events = Vec::new();
+        for second in 0..120 {
+            // 4 or 5 lost of 48: 8.3 % and 10.4 % in turn.
+            let received = if second % 2 == 0 { 44 } else { 43 };
+            fake.set("a", stats(48, received, 20.0), path(1));
+            events.extend(engine.check(&rules, &fake, second * 1_000));
+        }
+        assert_eq!(events.len(), 1, "one start, no end: {events:?}");
     }
 
     #[test]

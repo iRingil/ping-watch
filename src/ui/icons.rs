@@ -274,6 +274,19 @@ pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str)
     Split { main, menu }
 }
 
+/// Outlines `rect` in the signal color while `response` has the keyboard focus, so painted buttons show where Tab
+/// has got to (egui's own widgets do that themselves).
+pub fn focus_ring(ui: &Ui, response: &Response, rect: Rect) {
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(3),
+            Stroke::new(2.0, theme::palette(ui).signal),
+            StrokeKind::Inside,
+        );
+    }
+}
+
 /// Font of the menu rows.
 fn menu_font() -> egui::FontId {
     egui::FontId::proportional(15.0)

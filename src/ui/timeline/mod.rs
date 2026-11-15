@@ -14,16 +14,23 @@ use egui_plot::{
     Points, Polygon, Text, VLine,
 };
 
-use self::fetch::{Fetched, Fetcher, Request};
+use self::fetch::{CommentChange, Fetched, Fetcher, Request};
 use self::series::millis_of;
 pub use self::series::{Period, Series, Trace, Window, clock, seconds, time_marks, value_marks};
 use crate::i18n::{self, Lang, Language, tr, trf};
+use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, Comment, HopKey};
 use crate::ui::latency_bars::{GOOD_MS, WARN_MS};
 use crate::ui::theme;
 
 /// Longest time between history queries of a live timeline, however coarse the buckets are.
 const MAX_REFRESH: Duration = Duration::from_secs(60);
+/// Wait before a failed history query is tried again.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+/// How long a failed comment change is shown above the chart.
+const FAILURE_SHOWN: Duration = Duration::from_secs(10);
+/// How near (points) to a comment's line a right-click must be to offer editing it.
+const COMMENT_PICK_DISTANCE: f32 = 8.0;
 /// Vertical space between the jitter strip and the latency chart.
 const PLOT_GAP: f32 = 8.0;
 /// Height of the jitter strip.
@@ -40,6 +47,8 @@ struct Shown {
     series: Series,
     /// Comments in the window.
     comments: Vec<Comment>,
+    /// Alerts touching the window, drawn as marks.
+    alerts: Vec<JournalEntry>,
     /// Oldest stored sample of the hop.
     oldest_ms: Option<i64>,
     /// When the answer arrived.
@@ -54,15 +63,18 @@ impl Shown {
             request: fetched.request,
             series,
             comments: fetched.comments,
+            alerts: fetched.alerts,
             oldest_ms: fetched.oldest_ms,
             received: Instant::now(),
         }
     }
 }
 
-/// A comment being written.
+/// A comment being written or edited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Draft {
+    /// The comment edited, `None` for a new one.
+    id: Option<i64>,
     /// Target id in the history.
     target_id: i64,
     /// The moment commented, Unix ms.
@@ -72,7 +84,7 @@ struct Draft {
 }
 
 /// A choice from the chart's right-click menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MenuChoice {
     /// Show another period.
     Period(Period),
@@ -80,6 +92,8 @@ enum MenuChoice {
     ResetFocus,
     /// Comment the moment right-clicked.
     Comment(i64),
+    /// Edit (or delete) the comment right-clicked.
+    Edit(Comment),
 }
 
 /// State of the timeline pane.
@@ -101,8 +115,14 @@ pub struct Timeline {
     refresh_now: bool,
     /// Time under the pointer when the menu was opened, Unix ms.
     menu_at_ms: Option<i64>,
+    /// The comment under the pointer when the menu was opened.
+    menu_comment: Option<Comment>,
     /// Comment being written.
     draft: Option<Draft>,
+    /// The last failed history query and when it failed.
+    fetch_error: Option<(String, Instant)>,
+    /// The last failed comment change and when it failed.
+    comment_failure: Option<(String, Instant)>,
     /// A small chart (All targets page): latency only, no jitter strip, no slider.
     compact: bool,
 }
@@ -141,7 +161,8 @@ impl Timeline {
         interval: Duration,
     ) {
         let now_ms = history::unix_ms(SystemTime::now());
-        self.header(ui, title, now_ms);
+        let commentable = (!self.compact).then_some(target_id).flatten().filter(|_| history_path.is_some());
+        self.header(ui, title, now_ms, commentable);
         let (Some(path), Some(target_id)) = (history_path, target_id) else {
             ui.label(tr!(ui, "History is off, so there is nothing to chart."));
             return;
@@ -151,11 +172,31 @@ impl Timeline {
             ui.colored_label(theme::palette(ui).bad, error);
             return;
         }
+        if let Some((failure, at)) = &self.comment_failure {
+            if at.elapsed() < FAILURE_SHOWN {
+                ui.colored_label(
+                    theme::palette(ui).bad,
+                    trf!(ui, "The comment wasn't saved: {error}", error = failure),
+                );
+            } else {
+                self.comment_failure = None;
+            }
+        }
         let Some(shown) = &self.shown else {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(tr!(ui, "Loading history…"));
-            });
+            match &self.fetch_error {
+                Some((error, _)) => {
+                    ui.colored_label(
+                        theme::palette(ui).bad,
+                        trf!(ui, "Cannot read the history: {error}", error = error),
+                    );
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(tr!(ui, "Loading history…"));
+                    });
+                }
+            }
             return;
         };
         let (response, pointer) = draw_charts(ui, shown, self.period, self.compact);
@@ -163,6 +204,24 @@ impl Timeline {
         let bucket_ms = shown.request.window.bucket_ms;
         if response.secondary_clicked() {
             self.menu_at_ms = pointer.map(|point| millis_of(point.x));
+            // The comment whose line is nearest the click, if it is near enough to have been meant.
+            let window = shown.request.window;
+            let span_ms = window.to_ms.saturating_sub(window.from_ms).max(1);
+            #[expect(clippy::cast_precision_loss, reason = "a chart spans far less than 2^52 ms")]
+            let points_per_ms = response.rect.width() / span_ms as f32;
+            self.menu_comment = self.menu_at_ms.and_then(|at_ms| {
+                shown
+                    .comments
+                    .iter()
+                    .map(|comment| (comment.ts_ms.abs_diff(at_ms), comment))
+                    .min_by_key(|(distance, _)| *distance)
+                    .filter(|(distance, _)| {
+                        #[expect(clippy::cast_precision_loss, reason = "distances on a chart are small")]
+                        let points = *distance as f32 * points_per_ms;
+                        points <= COMMENT_PICK_DISTANCE
+                    })
+                    .map(|(_, comment)| comment.clone())
+            });
         }
         if let Some(choice) = self.menu(&response) {
             self.choose(choice, target_id);
@@ -173,11 +232,21 @@ impl Timeline {
         self.comment_dialog(ui.ctx());
     }
 
-    /// Title, period and the shown range.
-    fn header(&mut self, ui: &mut Ui, title: &str, now_ms: i64) {
+    /// Title, period and the shown range; with `commentable` (the target id), a button to comment the moment at the
+    /// right end of the chart (the right-click menu does it for any moment, but only with the mouse).
+    fn header(&mut self, ui: &mut Ui, title: &str, now_ms: i64, commentable: Option<i64>) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).font(theme::heading_font(15.0)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if let Some(target_id) = commentable
+                    && ui
+                        .small_button(tr!(ui, "Add comment"))
+                        .on_hover_text(tr!(ui, "Comments the moment at the right end of the chart"))
+                        .clicked()
+                {
+                    let ts_ms = self.end_ms.unwrap_or(now_ms);
+                    self.draft = Some(Draft { id: None, target_id, ts_ms, text: String::new() });
+                }
                 egui::ComboBox::from_id_salt("timeline-period")
                     .selected_text(self.period.label(ui.language()))
                     .show_ui(ui, |ui| {
@@ -219,13 +288,27 @@ impl Timeline {
         while let Some(result) = fetcher.try_result() {
             self.in_flight = false;
             match result {
-                Ok(fetched) => self.shown = Some(Shown::new(fetched)),
-                Err(error) => log::error!("cannot read history: {error}"),
+                Ok(fetched) => {
+                    self.shown = Some(Shown::new(fetched));
+                    self.fetch_error = None;
+                }
+                Err(error) => {
+                    log::error!("cannot read history: {error}");
+                    self.fetch_error = Some((error, Instant::now()));
+                }
             }
+        }
+        if let Some(failure) = fetcher.try_failure() {
+            self.comment_failure = Some((failure, Instant::now()));
+        }
+        // A failed query is tried again after a while, not every frame.
+        if self.fetch_error.as_ref().is_some_and(|(_, at)| at.elapsed() < RETRY_AFTER) {
+            return None;
         }
         let window = Window::ending_at(self.end_ms.unwrap_or(now_ms), self.period, interval_ms);
         let request = Request { target_id, hop, period: self.period, window };
         let stale = self.refresh_now
+            || self.fetch_error.is_some()
             || self.shown.as_ref().is_none_or(|shown| {
                 let old = shown.request;
                 let moved = old.target_id != target_id
@@ -269,6 +352,11 @@ impl Timeline {
             {
                 choice = Some(MenuChoice::Comment(at_ms));
             }
+            if let Some(comment) = &self.menu_comment
+                && ui.button(tr!(ui, "Edit or delete this comment")).clicked()
+            {
+                choice = Some(MenuChoice::Edit(comment.clone()));
+            }
             if choice.is_some() {
                 ui.close();
             }
@@ -281,7 +369,10 @@ impl Timeline {
         match choice {
             MenuChoice::Period(period) => self.period = period,
             MenuChoice::ResetFocus => self.end_ms = None,
-            MenuChoice::Comment(ts_ms) => self.draft = Some(Draft { target_id, ts_ms, text: String::new() }),
+            MenuChoice::Comment(ts_ms) => self.draft = Some(Draft { id: None, target_id, ts_ms, text: String::new() }),
+            MenuChoice::Edit(comment) => {
+                self.draft = Some(Draft { id: Some(comment.id), target_id, ts_ms: comment.ts_ms, text: comment.text });
+            }
         }
     }
 
@@ -305,32 +396,48 @@ impl Timeline {
         }
     }
 
-    /// Window for writing a comment; saves it in the background.
+    /// Window for writing a comment, or editing one (then with a Delete button); saves it in the background.
     fn comment_dialog(&mut self, ctx: &egui::Context) {
         let Some(draft) = &mut self.draft else {
             return;
         };
+        let mut change = None;
         let mut done = false;
-        let mut save = false;
-        egui::Window::new(tr!(ctx, "Create comment"))
+        let title = if draft.id.is_some() { tr!(ctx, "Edit comment") } else { tr!(ctx, "Create comment") };
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.label(trf!(ui, "Comment at {time}", time = clock(draft.ts_ms, "%d.%m %H:%M:%S")));
-                ui.add(TextEdit::multiline(&mut draft.text).desired_rows(3).hint_text(tr!(ui, "What happened?")));
+                let field =
+                    ui.add(TextEdit::multiline(&mut draft.text).desired_rows(3).hint_text(tr!(ui, "What happened?")));
+                if !field.has_focus() && draft.text.is_empty() {
+                    field.request_focus();
+                }
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!draft.text.trim().is_empty(), Button::new(tr!(ui, "Save"))).clicked() {
-                        save = true;
+                    let text = draft.text.trim().to_owned();
+                    if ui.add_enabled(!text.is_empty(), Button::new(tr!(ui, "Save"))).clicked() {
+                        change = Some(match draft.id {
+                            Some(id) => CommentChange::Edit { id, text },
+                            None => CommentChange::Add { target_id: draft.target_id, ts_ms: draft.ts_ms, text },
+                        });
                         done = true;
                     }
-                    if ui.button(tr!(ui, "Cancel")).clicked() {
+                    if ui.button(tr!(ui, "Cancel")).clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape))
+                    {
+                        done = true;
+                    }
+                    if let Some(id) = draft.id
+                        && ui.button(RichText::new(tr!(ui, "Delete")).color(theme::palette(ui).bad)).clicked()
+                    {
+                        change = Some(CommentChange::Delete(id));
                         done = true;
                     }
                 });
             });
-        if save && let (Some(fetcher), Some(draft)) = (&self.fetcher, &self.draft) {
-            fetcher.add_comment(draft.target_id, draft.ts_ms, draft.text.trim().to_owned());
+        if let (Some(fetcher), Some(change)) = (&self.fetcher, change) {
+            fetcher.change_comment(change);
             self.refresh_now = true;
         }
         if done {
@@ -395,10 +502,11 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
             |plot| {
                 plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
                 grid(plot, jitter.scale_ms, JITTER_HEIGHT);
+                // The title in ink (the jitter color is too light for small text); the line keeps its color.
                 plot.add(
                     Text::new("", PlotPoint::new(from_s, jitter.scale_ms), tr!(language, "Jitter (ms)"))
                         .anchor(Align2::LEFT_TOP)
-                        .color(palette.jitter),
+                        .color(palette.ink),
                 );
                 add_trace(plot, tr!(language, "Jitter"), jitter, palette.jitter);
             },
@@ -437,7 +545,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
             plot.add(
                 Text::new("", PlotPoint::new(from_s, scale), tr!(language, "Latency (ms)"))
                     .anchor(Align2::LEFT_TOP)
-                    .color(palette.ink_muted),
+                    .color(palette.ink),
             );
             add_trace(plot, tr!(language, "Latency"), latency, palette.ink);
             // Loss hangs from the top of the chart: a fully lost bucket is a red bar of full height.
@@ -450,13 +558,14 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
                 })
                 .collect();
             plot.bar_chart(BarChart::new(tr!(language, "Packet loss"), bars).color(palette.loss));
-            for comment in &shown.comments {
-                let x = seconds(comment.ts_ms);
-                plot.vline(VLine::new(&comment.text, x).color(palette.comment).style(LineStyle::dashed_dense()));
+            // The user's comments, then the alerts' marks (worded in the language shown, from the journal).
+            let alert_marks = shown.alerts.iter().flat_map(|entry| entry.marks(language));
+            let marks = shown.comments.iter().map(|comment| (comment.ts_ms, comment.text.clone())).chain(alert_marks);
+            for (ts_ms, text) in marks.filter(|(ts_ms, _)| (window.from_ms..=window.to_ms).contains(ts_ms)) {
+                let x = seconds(ts_ms);
+                plot.vline(VLine::new(&text, x).color(palette.comment).style(LineStyle::dashed_dense()));
                 plot.add(
-                    Text::new("", PlotPoint::new(x, scale), &comment.text)
-                        .anchor(Align2::LEFT_TOP)
-                        .color(palette.comment),
+                    Text::new("", PlotPoint::new(x, scale), &text).anchor(Align2::LEFT_TOP).color(palette.comment),
                 );
             }
             plot.pointer_coordinate()

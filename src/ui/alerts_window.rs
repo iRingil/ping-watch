@@ -7,7 +7,7 @@ use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Ui};
 use egui_extras::{Column, TableBuilder};
 
 use crate::alerts::{Condition, ConditionKind, Rule, Targets};
-use crate::i18n::{Lang, n, tr};
+use crate::i18n::{Lang, n, tr, trf};
 use crate::store::alerts::AlertStore;
 use crate::ui::icons::{self, Icon, Style};
 use crate::ui::settings::{close_mark, label_first_row, page_tabs, settings_grid};
@@ -25,6 +25,8 @@ const TARGET_ROWS: usize = 5;
 const TARGET_COLUMN_WIDTH: f32 = 170.0;
 /// Height of a journal row.
 const JOURNAL_ROW: f32 = 24.0;
+/// Most characters of "What" that fit its column on one line; a longer text gets a two-line row.
+const JOURNAL_ONE_LINE: usize = 42;
 /// Periods a loss or latency rule can look back over.
 const WINDOWS: [Duration; 7] = [
     Duration::from_secs(30),
@@ -153,6 +155,12 @@ pub struct AlertsWindow {
     page: Page,
     /// Rule being added or edited.
     draft: Option<Draft>,
+    /// Rule whose delete button was pressed: it asks again before deleting.
+    confirm_delete: Option<i64>,
+    /// The Clear button was pressed: the journal page asks again before clearing.
+    confirm_clear: bool,
+    /// What went wrong with the last change, shown at the top of the page until the next change.
+    problem: Option<String>,
 }
 
 impl AlertsWindow {
@@ -187,9 +195,13 @@ impl AlertsWindow {
                     ui.weak(tr!(ui, "Alerts need the history database, which couldn't be opened."));
                     return;
                 };
+                if let Some(problem) = &self.problem {
+                    ui.colored_label(theme::palette(ui).bad, problem);
+                    ui.add_space(4.0);
+                }
                 match self.page {
                     Page::Rules => changed = self.rules_page(ui, store, rules, hosts),
-                    Page::Journal => journal_page(ui, store),
+                    Page::Journal => self.journal_page(ui, store),
                 }
             });
             close
@@ -197,6 +209,9 @@ impl AlertsWindow {
         if modal.inner || modal.should_close() {
             self.open = false;
             self.draft = None;
+            self.confirm_delete = None;
+            self.confirm_clear = false;
+            self.problem = None;
         }
         changed
     }
@@ -207,20 +222,29 @@ impl AlertsWindow {
             return match rule_form(ui, draft, hosts) {
                 FormAnswer::Save => {
                     let rule = draft.rule();
-                    if let Err(error) = store.save_rule(&rule) {
-                        log::error!("cannot save the alert rule: {error}");
+                    match store.save_rule(&rule) {
+                        Ok(_) => {
+                            self.draft = None;
+                            self.problem = None;
+                        }
+                        // The form stays open with what was entered, so nothing is lost.
+                        Err(error) => {
+                            log::error!("cannot save the alert rule: {error}");
+                            self.problem = Some(trf!(ui, "The rule wasn't saved: {error}", error = error));
+                        }
                     }
-                    self.draft = None;
                     true
                 }
                 FormAnswer::Cancel => {
                     self.draft = None;
+                    self.problem = None;
                     false
                 }
                 FormAnswer::None => false,
             };
         }
         let mut changed = false;
+        let mut problem = None;
         ScrollArea::vertical().max_height(PAGE_HEIGHT - 44.0).show(ui, |ui| {
             for rule in rules {
                 ui.horizontal(|ui| {
@@ -229,18 +253,32 @@ impl AlertsWindow {
                         let toggled = Rule { enabled, ..rule.clone() };
                         if let Err(error) = store.save_rule(&toggled) {
                             log::error!("cannot save the alert rule: {error}");
+                            problem = Some(trf!(ui, "The rule wasn't saved: {error}", error = error));
                         }
                         changed = true;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Cross, Style::Normal, tr!(ui, "Delete")).clicked() {
-                            if let Err(error) = store.delete_rule(rule.id) {
-                                log::error!("cannot delete the alert rule: {error}");
+                        if self.confirm_delete == Some(rule.id) {
+                            // Asked again: deleting a rule can't be undone.
+                            if ui.button(tr!(ui, "Keep")).clicked() {
+                                self.confirm_delete = None;
                             }
-                            changed = true;
-                        }
-                        if icons::button(ui, Icon::Pencil, Style::Normal, tr!(ui, "Edit")).clicked() {
-                            self.draft = Some(Draft::of(rule));
+                            let delete = RichText::new(tr!(ui, "Delete")).color(theme::palette(ui).bad);
+                            if ui.button(delete).clicked() {
+                                if let Err(error) = store.delete_rule(rule.id) {
+                                    log::error!("cannot delete the alert rule: {error}");
+                                    problem = Some(trf!(ui, "The rule wasn't deleted: {error}", error = error));
+                                }
+                                self.confirm_delete = None;
+                                changed = true;
+                            }
+                        } else {
+                            if icons::button(ui, Icon::Cross, Style::Normal, tr!(ui, "Delete")).clicked() {
+                                self.confirm_delete = Some(rule.id);
+                            }
+                            if icons::button(ui, Icon::Pencil, Style::Normal, tr!(ui, "Edit")).clicked() {
+                                self.draft = Some(Draft::of(rule));
+                            }
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                             let palette = theme::palette(ui);
@@ -257,6 +295,9 @@ impl AlertsWindow {
                 ui.weak(tr!(ui, "No rules. Add one to be told when a target slows down or drops packets."));
             }
         });
+        if problem.is_some() {
+            self.problem = problem;
+        }
         ui.add_space(8.0);
         if ui.button(tr!(ui, "Add a rule")).clicked() {
             self.draft = Some(Draft::new());
@@ -405,72 +446,100 @@ fn period_choice(ui: &mut Ui, id: &str, value: &mut Duration, options: &[Duratio
         });
 }
 
-/// The journal page: newest first, with a button to clear it. Fixed columns that fit the window; a long "What" is
-/// cut short, with the whole text on hover.
-fn journal_page(ui: &mut Ui, store: &AlertStore) {
-    let journal = store
-        .journal()
-        .inspect_err(|error| log::error!("cannot read the alert journal: {error}"))
-        .unwrap_or_default();
-    if journal.is_empty() {
-        ui.weak(tr!(ui, "Nothing has fired yet."));
-        return;
-    }
-    let palette = theme::palette(ui);
-    ui.push_id("alert-journal", |ui| {
-        TableBuilder::new(ui)
-            .striped(true)
-            .max_scroll_height(PAGE_HEIGHT - 76.0)
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::exact(118.0))
-            .column(Column::exact(140.0).clip(true))
-            .column(Column::remainder().clip(true))
-            .column(Column::exact(74.0))
-            .column(Column::exact(58.0))
-            .header(JOURNAL_ROW, |mut header| {
-                for title in [n!("Started"), n!("Target"), n!("What"), n!("Lasted"), n!("Worst")] {
-                    header.col(|ui| {
-                        ui.weak(ui.language().translate(title));
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(JOURNAL_ROW, journal.len(), |mut row| {
-                    let Some(entry) = journal.get(row.index()) else {
-                        return;
-                    };
-                    row.col(|ui| {
-                        ui.label(time_of(entry.started_ms));
-                    });
-                    row.col(|ui| {
-                        ui.add(egui::Label::new(&entry.host).truncate());
-                    });
-                    row.col(|ui| {
-                        ui.add(egui::Label::new(&entry.what).truncate());
-                    });
-                    row.col(|ui| match entry.ended_ms {
-                        None => {
-                            ui.colored_label(palette.bad, tr!(ui, "on now"));
-                        }
-                        Some(ended) if ended == entry.started_ms => {}
-                        Some(ended) => {
-                            let seconds = u64::try_from(ended.saturating_sub(entry.started_ms) / 1_000).unwrap_or(0);
-                            ui.label(crate::alerts::span(Duration::from_secs(seconds.max(1)), ui.language()));
-                        }
-                    });
-                    row.col(|ui| {
-                        if let (Some(worst), Some(unit)) = (entry.worst, entry.unit.as_deref()) {
-                            ui.label(format!("{worst:.0} {}", crate::alerts::unit_label(unit, ui.language())));
-                        }
+impl AlertsWindow {
+    /// The journal page: newest first, with a button to clear it (asked again before it clears). Fixed columns
+    /// that fit the window; "What" wraps onto a second line when it is long (route changes name two addresses).
+    fn journal_page(&mut self, ui: &mut Ui, store: &AlertStore) {
+        let journal = match store.journal() {
+            Ok(journal) => journal,
+            Err(error) => {
+                log::error!("cannot read the alert journal: {error}");
+                ui.colored_label(
+                    theme::palette(ui).bad,
+                    trf!(ui, "The journal couldn't be read: {error}", error = error),
+                );
+                return;
+            }
+        };
+        if journal.is_empty() {
+            ui.weak(tr!(ui, "Nothing has fired yet."));
+            return;
+        }
+        let palette = theme::palette(ui);
+        let language = ui.language();
+        let whats: Vec<String> = journal.iter().map(|entry| entry.what(language)).collect();
+        // Two lines for a text that won't fit the column on one.
+        let heights: Vec<f32> = whats
+            .iter()
+            .map(|what| if what.chars().count() > JOURNAL_ONE_LINE { JOURNAL_ROW * 1.8 } else { JOURNAL_ROW })
+            .collect();
+        ui.push_id("alert-journal", |ui| {
+            TableBuilder::new(ui)
+                .striped(true)
+                .max_scroll_height(PAGE_HEIGHT - 76.0)
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .column(Column::exact(118.0))
+                .column(Column::exact(140.0).clip(true))
+                .column(Column::remainder().clip(true))
+                .column(Column::exact(74.0))
+                .column(Column::exact(58.0))
+                .header(JOURNAL_ROW, |mut header| {
+                    for title in [n!("Started"), n!("Target"), n!("What"), n!("Lasted"), n!("Worst")] {
+                        header.col(|ui| {
+                            ui.label(RichText::new(ui.language().translate(title)).color(theme::palette(ui).ink));
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.heterogeneous_rows(heights.into_iter(), |mut row| {
+                        let index = row.index();
+                        let (Some(entry), Some(what)) = (journal.get(index), whats.get(index)) else {
+                            return;
+                        };
+                        row.col(|ui| {
+                            ui.label(time_of(entry.started_ms));
+                        });
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(&entry.host).truncate());
+                        });
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(what).wrap()).on_hover_text(what);
+                        });
+                        row.col(|ui| match (entry.ended_ms, entry.lasted(language)) {
+                            (None, _) => {
+                                ui.colored_label(palette.bad, tr!(ui, "on now"));
+                            }
+                            (Some(_), Some(lasted)) => {
+                                ui.label(lasted);
+                            }
+                            (Some(_), None) => {}
+                        });
+                        row.col(|ui| {
+                            if let Some(worst) = entry.worst(language) {
+                                ui.label(worst);
+                            }
+                        });
                     });
                 });
+        });
+        ui.add_space(8.0);
+        if self.confirm_clear {
+            ui.horizontal(|ui| {
+                ui.label(tr!(ui, "Clear the whole journal and the alert marks on the charts?"));
+                if ui.button(RichText::new(tr!(ui, "Clear")).color(palette.bad)).clicked() {
+                    if let Err(error) = store.clear_journal() {
+                        log::error!("cannot clear the alert journal: {error}");
+                        self.problem = Some(trf!(ui, "The journal wasn't cleared: {error}", error = error));
+                    }
+                    self.confirm_clear = false;
+                }
+                if ui.button(tr!(ui, "Cancel")).clicked() {
+                    self.confirm_clear = false;
+                }
             });
-    });
-    ui.add_space(8.0);
-    if ui.button(tr!(ui, "Clear the journal")).clicked()
-        && let Err(error) = store.clear_journal()
-    {
-        log::error!("cannot clear the alert journal: {error}");
+        } else if ui.button(tr!(ui, "Clear the journal")).clicked() {
+            self.confirm_clear = true;
+        }
     }
 }
 

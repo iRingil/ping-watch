@@ -4,11 +4,11 @@
 //! settings. Stored in the history database.
 
 use std::path::Path;
-use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::store::history::HistoryError;
+use crate::store::history::{self, HistoryError};
+use crate::store::settings::offered_interval;
 use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
 use crate::ui::timeline::Period;
@@ -119,10 +119,7 @@ impl WindowStore {
     ///
     /// [`HistoryError`] if the database can't be opened or prepared.
     pub fn open(path: &Path) -> Result<Self, HistoryError> {
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        Self::init(Connection::open(path)?)
+        Self::init(history::connect(path)?)
     }
 
     /// Opens a private store in memory.
@@ -220,7 +217,7 @@ impl WindowStore {
         let Some((interval_ms, focus, period_s, table_share)) = row else {
             return Ok(None);
         };
-        let interval = u64::try_from(interval_ms).ok().map(Duration::from_millis);
+        let interval = u64::try_from(interval_ms).ok().and_then(offered_interval);
         let focus = Focus::from_key(&focus);
         let period = u64::try_from(period_s).ok().and_then(Period::from_seconds);
         #[expect(clippy::cast_possible_truncation, reason = "stored from an f32")]
@@ -269,6 +266,8 @@ impl WindowStore {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     /// A plausible state.

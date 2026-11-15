@@ -1,13 +1,16 @@
 //! Alert rules and the alert journal in the history database. Three rules come with a new database: "route
 //! changed" (on, journal and timeline only), "loss above 10 % over 2 minutes" and "no answer for 30 seconds" (off).
+//! The journal keeps what happened as kinds and numbers, not as text, so it is worded in the language shown; the
+//! timeline marks of alerts are made from it too, so clearing or pruning the journal takes them away.
 
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::alerts::{Condition, ConditionKind, Rule, Targets};
-use crate::store::history::HistoryError;
+use crate::alerts::{Condition, ConditionKind, RouteNote, Rule, Targets, span};
+use crate::i18n::{Language, trf};
+use crate::store::history::{self, HistoryError};
 
 /// Schema: the rules, and one journal row per alert (a route change is a row whose end is its start).
 const SCHEMA: &str = "
@@ -25,16 +28,38 @@ const SCHEMA: &str = "
         id         INTEGER PRIMARY KEY,
         rule_id    INTEGER NOT NULL,
         host       TEXT    NOT NULL,
-        what       TEXT    NOT NULL, -- the rule or the change, as shown in the journal
+        kind       TEXT    NOT NULL, -- the rule's condition as stored in alert_rules, at the time
+        threshold  REAL    NOT NULL,
+        window_s   INTEGER NOT NULL,
+        value      REAL,             -- measured when it started; NULL for a route change
+        worst      REAL,             -- worst value while it lasted; NULL for a route change
+        route      TEXT,             -- a route change (RouteNote::to_text); NULL otherwise
         started_ms INTEGER NOT NULL,
         ended_ms   INTEGER,          -- NULL while it lasts
-        worst      REAL,              -- worst value, NULL for a route change
-        unit       TEXT               -- unit of the worst value: %, ms or s
+        recovered  INTEGER NOT NULL DEFAULT 0 -- 1 if it ended because things got better
     );
     CREATE INDEX alert_events_by_time ON alert_events (started_ms);
 ";
 /// Most journal rows shown.
 const JOURNAL_LIMIT: i64 = 500;
+/// Columns of a journal row, in the order [`entry_of`] reads them.
+const ENTRY_COLUMNS: &str = "id, host, kind, threshold, window_s, value, worst, route, started_ms, ended_ms, recovered";
+
+/// What a journal row is about.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Happening {
+    /// A rule's condition held.
+    Alert {
+        /// The rule's condition at the time.
+        condition: Condition,
+        /// The value measured when it started.
+        value: f64,
+        /// The worst value while it lasted.
+        worst: f64,
+    },
+    /// The route changed.
+    Route(RouteNote),
+}
 
 /// One journal row.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,16 +68,68 @@ pub struct JournalEntry {
     pub id: i64,
     /// The target.
     pub host: String,
-    /// What happened: the rule's condition or the route change.
-    pub what: String,
+    /// What happened.
+    pub happening: Happening,
     /// Start, Unix ms.
     pub started_ms: i64,
-    /// End, Unix ms; `None` while it lasts (or if the app was closed meanwhile).
+    /// End, Unix ms; `None` while it lasts.
     pub ended_ms: Option<i64>,
-    /// Worst value, if the rule measures one.
-    pub worst: Option<f64>,
-    /// Unit of the worst value.
-    pub unit: Option<String>,
+    /// It ended because things got better (not because the rule was turned off or the app closed).
+    pub recovered: bool,
+}
+
+impl JournalEntry {
+    /// What happened as a phrase: the rule's condition, or the route change.
+    pub fn what(&self, language: Language) -> String {
+        match &self.happening {
+            Happening::Alert { condition, .. } => condition.describe(language),
+            Happening::Route(note) => trf!(language, "Route changed: {what}", what = note.describe(language)),
+        }
+    }
+
+    /// The worst value with its unit ("35 %"), `None` for a route change.
+    pub fn worst(&self, language: Language) -> Option<String> {
+        match &self.happening {
+            Happening::Alert { condition, worst, .. } => Some(format!("{worst:.0} {}", condition.unit(language))),
+            Happening::Route(_) => None,
+        }
+    }
+
+    /// How long it lasted ("2 minutes"), `None` while it lasts or for a moment's event (a route change).
+    pub fn lasted(&self, language: Language) -> Option<String> {
+        let ended = self.ended_ms.filter(|ended| *ended != self.started_ms)?;
+        let seconds = u64::try_from(ended.saturating_sub(self.started_ms) / 1_000).unwrap_or(0);
+        Some(span(Duration::from_secs(seconds.max(1)), language))
+    }
+
+    /// Its marks on the target's timeline: the start, and the recovery if it got better.
+    pub fn marks(&self, language: Language) -> Vec<(i64, String)> {
+        let mut marks = Vec::new();
+        match &self.happening {
+            Happening::Alert { condition, value, worst } => {
+                let measured = condition.measured(*value, language);
+                let rule = condition.describe(language);
+                marks.push((
+                    self.started_ms,
+                    trf!(language, "Alert: {measured} (rule: {rule})", measured = measured, rule = rule),
+                ));
+                if let (true, Some(ended), Some(lasted)) = (self.recovered, self.ended_ms, self.lasted(language)) {
+                    let worst = condition.measured(*worst, language);
+                    marks.push((
+                        ended,
+                        trf!(
+                            language,
+                            "Back to normal after {lasted} (worst: {worst})",
+                            lasted = lasted,
+                            worst = worst
+                        ),
+                    ));
+                }
+            }
+            Happening::Route(_) => marks.push((self.started_ms, self.what(language))),
+        }
+        marks
+    }
 }
 
 /// Connection to the stored rules and journal.
@@ -70,10 +147,7 @@ impl AlertStore {
     ///
     /// [`HistoryError`] if the database can't be opened or prepared.
     pub fn open(path: &Path) -> Result<Self, HistoryError> {
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        Self::init(Connection::open(path)?)
+        Self::init(history::connect(path)?)
     }
 
     /// Opens a private store in memory.
@@ -84,12 +158,7 @@ impl AlertStore {
 
     /// Creates and seeds the tables if they don't exist; closes open journal rows.
     fn init(mut connection: Connection) -> Result<Self, HistoryError> {
-        let exists: Option<i64> = connection
-            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alert_rules'", [], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        if exists.is_none() {
+        if !has_tables(&connection)? {
             let transaction = connection.transaction()?;
             transaction.execute_batch(SCHEMA)?;
             for rule in default_rules() {
@@ -172,7 +241,7 @@ impl AlertStore {
         Ok(())
     }
 
-    /// Opens a journal row for an alert that started; returns its id.
+    /// Opens a journal row for an alert of `condition` that started at `started_ms` with `value`; returns its id.
     ///
     /// # Errors
     ///
@@ -181,40 +250,52 @@ impl AlertStore {
         &self,
         rule_id: i64,
         host: &str,
-        what: &str,
+        condition: &Condition,
         started_ms: i64,
-        worst: f64,
-        unit: &str,
+        value: f64,
     ) -> Result<i64, HistoryError> {
+        let (kind, threshold, window_s) = columns_of(condition);
         self.connection.execute(
-            "INSERT INTO alert_events (rule_id, host, what, started_ms, worst, unit) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![rule_id, host, what, started_ms, worst, unit],
+            "INSERT INTO alert_events (rule_id, host, kind, threshold, window_s, value, worst, started_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+            params![rule_id, host, kind, threshold, window_s, value, started_ms],
         )?;
         Ok(self.connection.last_insert_rowid())
     }
 
-    /// Closes the open journal row of `rule_id` and `host` at `ended_ms` with its `worst` value.
+    /// Closes the open journal row of `rule_id` and `host` at `ended_ms` with its `worst` value; `recovered` tells
+    /// whether things got better.
     ///
     /// # Errors
     ///
     /// [`HistoryError::Db`] if SQLite fails.
-    pub fn end(&self, rule_id: i64, host: &str, ended_ms: i64, worst: f64) -> Result<(), HistoryError> {
+    pub fn end(
+        &self,
+        rule_id: i64,
+        host: &str,
+        ended_ms: i64,
+        worst: f64,
+        recovered: bool,
+    ) -> Result<(), HistoryError> {
         self.connection.execute(
-            "UPDATE alert_events SET ended_ms = ?3, worst = ?4 WHERE rule_id = ?1 AND host = ?2 AND ended_ms IS NULL",
-            params![rule_id, host, ended_ms, worst],
+            "UPDATE alert_events SET ended_ms = ?3, worst = ?4, recovered = ?5
+             WHERE rule_id = ?1 AND host = ?2 AND ended_ms IS NULL",
+            params![rule_id, host, ended_ms, worst, recovered],
         )?;
         Ok(())
     }
 
-    /// Records a one-moment event (a route change): a row that ends where it starts.
+    /// Records a route change at `at_ms`: a row that ends where it starts.
     ///
     /// # Errors
     ///
     /// [`HistoryError::Db`] if SQLite fails.
-    pub fn note(&self, rule_id: i64, host: &str, what: &str, at_ms: i64) -> Result<(), HistoryError> {
+    pub fn note(&self, rule_id: i64, host: &str, note: RouteNote, at_ms: i64) -> Result<(), HistoryError> {
+        let (kind, threshold, window_s) = columns_of(&Condition::RouteChanged);
         self.connection.execute(
-            "INSERT INTO alert_events (rule_id, host, what, started_ms, ended_ms) VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![rule_id, host, what, at_ms],
+            "INSERT INTO alert_events (rule_id, host, kind, threshold, window_s, route, started_ms, ended_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![rule_id, host, kind, threshold, window_s, note.to_text(), at_ms],
         )?;
         Ok(())
     }
@@ -225,25 +306,14 @@ impl AlertStore {
     ///
     /// [`HistoryError::Db`] if SQLite fails.
     pub fn journal(&self) -> Result<Vec<JournalEntry>, HistoryError> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, host, what, started_ms, ended_ms, worst, unit FROM alert_events
-             ORDER BY started_ms DESC, id DESC LIMIT ?1",
-        )?;
-        let rows = statement.query_map([JOURNAL_LIMIT], |row| {
-            Ok(JournalEntry {
-                id: row.get(0)?,
-                host: row.get(1)?,
-                what: row.get(2)?,
-                started_ms: row.get(3)?,
-                ended_ms: row.get(4)?,
-                worst: row.get(5)?,
-                unit: row.get(6)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let mut statement = self
+            .connection
+            .prepare(&format!("SELECT {ENTRY_COLUMNS} FROM alert_events ORDER BY started_ms DESC, id DESC LIMIT ?1"))?;
+        let rows = statement.query_map([JOURNAL_LIMIT], entry_of)?;
+        Ok(rows.filter_map(Result::transpose).collect::<Result<_, _>>()?)
     }
 
-    /// Empties the journal (except alerts that are on now).
+    /// Empties the journal (except alerts that are on now), and with it the alert marks on the timelines.
     ///
     /// # Errors
     ///
@@ -252,6 +322,78 @@ impl AlertStore {
         self.connection.execute("DELETE FROM alert_events WHERE ended_ms IS NOT NULL", [])?;
         Ok(())
     }
+}
+
+/// Whether the alert tables exist in the database of `connection`.
+fn has_tables(connection: &Connection) -> Result<bool, HistoryError> {
+    let exists: Option<i64> = connection
+        .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alert_rules'", [], |row| row.get(0))
+        .optional()?;
+    Ok(exists.is_some())
+}
+
+/// The journal rows of the target stored as `target_id` (in the history's `targets` table) that touch
+/// `from_ms..=to_ms`, oldest first, for the timeline marks; none if the alert tables don't exist yet.
+///
+/// # Errors
+///
+/// [`HistoryError::Db`] if SQLite fails.
+pub(crate) fn entries_of_target(
+    connection: &Connection,
+    target_id: i64,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<JournalEntry>, HistoryError> {
+    if !has_tables(connection)? {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(&format!(
+        "SELECT {ENTRY_COLUMNS} FROM alert_events
+         WHERE lower(host) = (SELECT name FROM targets WHERE id = ?1)
+           AND started_ms <= ?3 AND (ended_ms IS NULL OR ended_ms >= ?2)
+         ORDER BY started_ms, id"
+    ))?;
+    let rows = statement.query_map(params![target_id, from_ms, to_ms], entry_of)?;
+    Ok(rows.filter_map(Result::transpose).collect::<Result<_, _>>()?)
+}
+
+/// Deletes the journal rows that ended before `before_ms` (with their timeline marks); none if the alert tables
+/// don't exist yet. Returns how many.
+///
+/// # Errors
+///
+/// [`HistoryError::Db`] if SQLite fails.
+pub(crate) fn prune_journal(connection: &Connection, before_ms: i64) -> Result<usize, HistoryError> {
+    if !has_tables(connection)? {
+        return Ok(0);
+    }
+    Ok(connection.execute("DELETE FROM alert_events WHERE ended_ms < ?1", [before_ms])?)
+}
+
+/// A journal row read with [`ENTRY_COLUMNS`]; `None` for a kind this version doesn't know.
+fn entry_of(row: &Row<'_>) -> rusqlite::Result<Option<JournalEntry>> {
+    let kind: String = row.get(2)?;
+    let Some(condition) = condition_of(&kind, row.get(3)?, row.get(4)?) else {
+        return Ok(None);
+    };
+    let happening = match condition {
+        Condition::RouteChanged => {
+            Happening::Route(RouteNote::from_text(&row.get::<_, Option<String>>(7)?.unwrap_or_default()))
+        }
+        condition => Happening::Alert {
+            condition,
+            value: row.get::<_, Option<f64>>(5)?.unwrap_or_default(),
+            worst: row.get::<_, Option<f64>>(6)?.unwrap_or_default(),
+        },
+    };
+    Ok(Some(JournalEntry {
+        id: row.get(0)?,
+        host: row.get(1)?,
+        happening,
+        started_ms: row.get(8)?,
+        ended_ms: row.get(9)?,
+        recovered: row.get::<_, i64>(10)? != 0,
+    }))
 }
 
 /// The rules a new database starts with.
@@ -341,6 +483,8 @@ fn targets_of(text: &str) -> Targets {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
 
     #[test]
@@ -381,15 +525,37 @@ mod tests {
     }
 
     #[test]
-    fn the_journal_keeps_alerts_and_route_changes() {
+    fn the_journal_keeps_alerts_and_route_changes_and_words_them_when_read() {
         let store = AlertStore::open_in_memory().expect("store opens");
-        store.start(2, "1.1.1.1", "loss above 10 % over 2 minutes", 1_000, 20.0, "%").expect("started");
-        store.note(1, "1.1.1.1", "hop 2 10.0.0.2 → 10.0.0.5", 1_500).expect("noted");
-        store.end(2, "1.1.1.1", 5_000, 35.0).expect("ended");
+        let loss = Condition::Loss { percent: 10.0, window: Duration::from_secs(120) };
+        store.start(2, "1.1.1.1", &loss, 1_000, 20.0).expect("started");
+        let (old, new): (IpAddr, IpAddr) = ("10.0.0.2".parse().expect("valid"), "10.0.0.5".parse().expect("valid"));
+        store.note(1, "1.1.1.1", RouteNote { hop: Some((2, old, new)), hops: None }, 1_500).expect("noted");
+        store.end(2, "1.1.1.1", 121_000, 35.0, true).expect("ended");
         let journal = store.journal().expect("read");
-        let rows: Vec<(i64, Option<i64>, Option<f64>)> =
-            journal.iter().map(|entry| (entry.started_ms, entry.ended_ms, entry.worst)).collect();
-        assert_eq!(rows, [(1_500, Some(1_500), None), (1_000, Some(5_000), Some(35.0))]);
+        let english: Vec<(String, Option<String>, Option<String>)> = journal
+            .iter()
+            .map(|entry| {
+                (entry.what(Language::English), entry.lasted(Language::English), entry.worst(Language::English))
+            })
+            .collect();
+        assert_eq!(
+            english,
+            [
+                ("Route changed: hop 2 10.0.0.2 \u{2192} 10.0.0.5".to_owned(), None, None),
+                ("Loss above 10 % over 2 minutes".to_owned(), Some("2 minutes".to_owned()), Some("35 %".to_owned())),
+            ]
+        );
+        let alert = journal.get(1).expect("the alert");
+        assert_eq!(
+            alert.marks(Language::English),
+            [
+                (1_000, "Alert: Loss 20 % (rule: Loss above 10 % over 2 minutes)".to_owned()),
+                (121_000, "Back to normal after 2 minutes (worst: Loss 35 %)".to_owned())
+            ]
+        );
+        assert_ne!(alert.what(Language::Russian), alert.what(Language::English), "worded in the language shown");
+        assert_eq!(prune_journal(&store.connection, 2_000).ok(), Some(1), "the route change ended before 2 s");
         store.clear_journal().expect("cleared");
         assert_eq!(store.journal().map(|journal| journal.len()).ok(), Some(0));
     }

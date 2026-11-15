@@ -124,21 +124,35 @@ impl Condition {
     }
 }
 
+impl Condition {
+    /// A measured `value` of this condition for people: "Loss 23 %", "Average latency 180 ms", "No answer for 30 s".
+    pub fn measured(&self, value: f64, language: Language) -> String {
+        let value = format!("{value:.0}");
+        match self {
+            Self::Loss { .. } => trf!(language, "Loss {value} %", value = value),
+            Self::Latency { .. } => trf!(language, "Average latency {value} ms", value = value),
+            Self::Unreachable { .. } => trf!(language, "No answer for {value} s", value = value),
+            Self::RouteChanged => String::new(),
+        }
+    }
+
+    /// Unit of the measured values as shown in `language` ("%", "ms", "s"); empty for a route change.
+    pub fn unit(&self, language: Language) -> &'static str {
+        match self {
+            Self::Loss { .. } => "%",
+            Self::Latency { .. } => tr!(language, "ms"),
+            Self::Unreachable { .. } => tr!(language, "s"),
+            Self::RouteChanged => "",
+        }
+    }
+}
+
 /// "30 seconds", "1 minute", "2 minutes", "1 hour".
 pub fn span(duration: Duration, language: Language) -> String {
     match duration.as_secs() {
         s if s >= 3_600 && s % 3_600 == 0 => trn!(language, s / 3_600, "{n} hour|{n} hours"),
         s if s >= 60 && s % 60 == 0 => trn!(language, s / 60, "{n} minute|{n} minutes"),
         s => trn!(language, s, "{n} second|{n} seconds"),
-    }
-}
-
-/// A unit stored in the journal ("%", "ms", "s") as shown in `language`.
-pub fn unit_label(unit: &str, language: Language) -> &str {
-    match unit {
-        "ms" => tr!(language, "ms"),
-        "s" => tr!(language, "s"),
-        other => other,
     }
 }
 

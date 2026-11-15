@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::store::history::HistoryError;
+use crate::store::history::{self, HistoryError};
 use crate::store::presets;
+use crate::store::settings::offered_interval;
 use crate::ui::focus::Focus;
 use crate::ui::timeline::Period;
 
@@ -117,10 +118,7 @@ impl TargetList {
     ///
     /// [`HistoryError`] if the database can't be opened or prepared.
     pub fn open(path: &Path) -> Result<Self, HistoryError> {
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        Self::init(Connection::open(path)?)
+        Self::init(history::connect(path)?)
     }
 
     /// Opens a private list in memory.
@@ -235,7 +233,7 @@ impl TargetList {
         let Some((Some(interval_ms), Some(focus), Some(period_s))) = row else {
             return Ok(None);
         };
-        let interval = u64::try_from(interval_ms).ok().map(Duration::from_millis);
+        let interval = u64::try_from(interval_ms).ok().and_then(offered_interval);
         let focus = Focus::from_key(&focus);
         let period = u64::try_from(period_s).ok().and_then(Period::from_seconds);
         Ok(interval

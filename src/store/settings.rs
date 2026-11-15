@@ -8,7 +8,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::i18n::Language;
-use crate::store::history::HistoryError;
+use crate::store::history::{self, HistoryError};
 use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
 use crate::ui::theme::ThemeChoice;
@@ -22,6 +22,17 @@ const SCHEMA: &str = "
     ) WITHOUT ROWID;
 ";
 
+/// Probe intervals offered (the toolbars name them); a stored interval that isn't one of them is not used: an
+/// interval of 0 would send probes without pause.
+pub const INTERVALS: [Duration; 7] = [
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_millis(2_500),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+];
 /// Probe timeouts offered.
 pub const TIMEOUTS: [Duration; 4] =
     [Duration::from_millis(500), Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(3)];
@@ -52,6 +63,12 @@ pub struct AppSettings {
     pub check_updates: bool,
     /// Interface language.
     pub language: Language,
+}
+
+/// The interval of `millis` if it is one of the [`INTERVALS`] offered.
+pub fn offered_interval(millis: u64) -> Option<Duration> {
+    let interval = Duration::from_millis(millis);
+    INTERVALS.contains(&interval).then_some(interval)
 }
 
 impl Default for AppSettings {
@@ -88,10 +105,7 @@ impl SettingsStore {
     ///
     /// [`HistoryError`] if the database can't be opened or prepared.
     pub fn open(path: &Path) -> Result<Self, HistoryError> {
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        Self::init(Connection::open(path)?)
+        Self::init(history::connect(path)?)
     }
 
     /// Opens a private store in memory.
@@ -127,7 +141,7 @@ impl SettingsStore {
         Ok(AppSettings {
             close_to_tray: self.get("close_to_tray")?.map_or(fallback.close_to_tray, |value| value == "1"),
             defaults: TraceSettings {
-                interval: number("interval_ms")?.map_or(fallback.defaults.interval, Duration::from_millis),
+                interval: number("interval_ms")?.and_then(offered_interval).unwrap_or(fallback.defaults.interval),
                 focus: self.get("focus")?.and_then(|key| Focus::from_key(&key)).unwrap_or(fallback.defaults.focus),
                 period: number("period_s")?.and_then(Period::from_seconds).unwrap_or(fallback.defaults.period),
             },
