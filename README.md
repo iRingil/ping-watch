@@ -21,7 +21,7 @@ The executable is `target/release/ping-watch.exe`. History is kept in `%LOCALAPP
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) (see `LICENSE`): you may
+[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) (see `LICENSE.md`): you may
 use, change and share Ping Watch for any noncommercial purpose; commercial use is not allowed.
 
 The Barlow font is embedded under the SIL Open Font License (`assets/fonts/OFL.txt`).
