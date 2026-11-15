@@ -7,4 +7,4 @@ mod route_watch;
 mod rules;
 
 pub use self::engine::{Engine, Event, Observe, WindowStats};
-pub use self::rules::{Condition, ConditionKind, Rule, Targets, span};
+pub use self::rules::{Condition, ConditionKind, Rule, Targets, span, unit_label};

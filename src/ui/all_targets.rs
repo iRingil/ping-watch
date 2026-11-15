@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
 
+use crate::i18n::{Lang, Language, n, tr, trf, trn};
 use crate::snapshot::{HopRow, Snapshot, SummaryRow};
 use crate::store::history;
 use crate::store::history::Store;
@@ -83,12 +84,12 @@ impl AllTargets {
     }
 
     /// The page as a snapshot: the table over the page's focus and the ticked charts over its period.
-    pub fn snapshot(&self, tabs: &[Tab], reader: Option<&Store>, alerting: &[String]) -> Snapshot {
+    pub fn snapshot(&self, tabs: &[Tab], reader: Option<&Store>, alerting: &[String], language: Language) -> Snapshot {
         let now_ms = history::unix_ms(SystemTime::now());
         let visible = (now_ms.saturating_sub(self.settings.trace.period.millis()), now_ms);
         let focus = match self.settings.trace.focus.range(visible, now_ms) {
             Some((from, to)) => format!("{} – {}", tab::clock(from), tab::clock(to)),
-            None => "since the traces started".to_owned(),
+            None => tr!(language, "since the traces started").to_owned(),
         };
         let rows = tabs
             .iter()
@@ -110,7 +111,8 @@ impl AllTargets {
                 SummaryRow {
                     title: overview.title.clone(),
                     address: overview.target.map(|ip| ip.to_string()).unwrap_or_default(),
-                    status: if alert { "alert".to_owned() } else { overview.status.clone() },
+                    status: if alert { tr!(language, "alert").to_owned() } else { overview.status.clone() },
+                    alert,
                     hops: overview.hops,
                     numbers,
                 }
@@ -183,20 +185,20 @@ impl AllTargets {
         let mut request = None;
         ui.horizontal(|ui| {
             let mut start = self.entry.show(ui, targets, true);
-            start |= icons::button(ui, Icon::Play, Style::Primary, "Trace in a new tab (Enter)").clicked();
+            start |= icons::button(ui, Icon::Play, Style::Primary, tr!(ui, "Trace in a new tab (Enter)")).clicked();
             let host = self.entry.text().trim().to_owned();
             if start && !host.is_empty() {
                 self.entry.clear();
                 request = Some(Request::Add(host));
             }
             ui.add_space(12.0);
-            ui.weak("Interval");
+            ui.weak(tr!(ui, "Interval"));
             if tab::interval_choice(ui, &mut self.settings.trace.interval) {
                 for tab in tabs.iter_mut() {
                     tab.set_interval(self.settings.trace.interval);
                 }
             }
-            ui.weak("Focus");
+            ui.weak(tr!(ui, "Focus"));
             tab::focus_choice(ui, &mut self.settings.trace.focus);
             ui.with_layout(Layout::right_to_left(Align::Center), latency_bars::legend);
         });
@@ -240,18 +242,21 @@ impl AllTargets {
             .header(ROW_HEIGHT, |mut header| {
                 // Title and whether the column is numeric (right-aligned).
                 let columns = [
-                    ("Status", false),
-                    ("Target", false),
-                    ("IP", false),
-                    ("Hops", true),
-                    ("Avg", true),
-                    ("Min", true),
-                    ("Max", true),
-                    ("Cur", true),
-                    ("PL%", true),
+                    (n!("Status"), false),
+                    (n!("Target"), false),
+                    (n!("IP"), false),
+                    (n!("Hops"), true),
+                    (n!("Avg"), true),
+                    (n!("Min"), true),
+                    (n!("Max"), true),
+                    (n!("Cur"), true),
+                    (n!("PL%"), true),
                 ];
                 for (index, (title, numeric)) in columns.into_iter().enumerate() {
-                    header.col(|ui| hop_table::header_cell(ui, index == 0, numeric, title, row_width));
+                    header.col(|ui| {
+                        let title = ui.language().translate(title);
+                        hop_table::header_cell(ui, index == 0, numeric, title, row_width);
+                    });
                 }
                 header.col(|ui| latency_bars::header(ui, scale_ms));
             })
@@ -263,11 +268,11 @@ impl AllTargets {
                         row.col(|ui| {
                             ui.add_space(4.0);
                             let mut ticked = charted;
-                            if ui.checkbox(&mut ticked, "").on_hover_text("Show the chart below").changed() {
+                            if ui.checkbox(&mut ticked, "").on_hover_text(tr!(ui, "Show the chart below")).changed() {
                                 toggle = Some(index);
                             }
                             if alerting.iter().any(|host| host.eq_ignore_ascii_case(&overview.title)) {
-                                ui.label(RichText::new("alert").color(theme::palette(ui).bad));
+                                ui.label(RichText::new(tr!(ui, "alert")).color(theme::palette(ui).bad));
                             } else {
                                 ui.label(RichText::new(&overview.status).color(theme::palette(ui).ink_muted));
                             }
@@ -279,7 +284,7 @@ impl AllTargets {
                                     .font(theme::heading_font(15.0))
                                     .color(theme::palette(ui).signal),
                             );
-                            if ui.add(link).on_hover_text("Open its tab").clicked() {
+                            if ui.add(link).on_hover_text(tr!(ui, "Open its tab")).clicked() {
                                 request = Some(Request::Open(index));
                             }
                         });
@@ -322,16 +327,19 @@ impl AllTargets {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             if tabs.is_empty() {
-                ui.weak("No targets yet. Enter one above.");
+                ui.weak(tr!(ui, "No targets yet. Enter one above."));
             } else {
                 let count = tabs.len();
-                ui.weak(if count == 1 { "1 target".to_owned() } else { format!("{count} targets") });
+                ui.weak(trn!(ui, u64::try_from(count).unwrap_or(u64::MAX), "{n} target|{n} targets"));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
                 let text = match focus.range(visible, now_ms) {
-                    Some((from, to)) => format!("Focus {} – {}", tab::clock(from), tab::clock(to)),
-                    None => "Focus: all".to_owned(),
+                    Some((from, to)) => {
+                        let range = format!("{} – {}", tab::clock(from), tab::clock(to));
+                        trf!(ui, "Focus {range}", range = range)
+                    }
+                    None => tr!(ui, "Focus: all").to_owned(),
                 };
                 ui.weak(text);
             });

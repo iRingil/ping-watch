@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
+use crate::i18n::{tr, trf};
 use crate::probe::stats::HopStats;
 use crate::ui::theme;
 
@@ -65,10 +66,10 @@ pub fn header(ui: &mut Ui, scale_ms: f64) {
         painter.rect_filled(tab, CornerRadius::same(2), zone);
         painter.text(tab.center(), Align2::CENTER_CENTER, text, font.clone(), theme::palette(ui).ink);
     };
-    tab(Align2::LEFT_CENTER, "0 ms".to_owned(), palette.good_zone);
+    tab(Align2::LEFT_CENTER, trf!(ui, "{ms} ms", ms = 0), palette.good_zone);
     let end_zone = if scale_ms > WARN_MS { palette.bad_zone } else { palette.warn_zone };
-    tab(Align2::RIGHT_CENTER, format!("{scale_ms:.0} ms"), end_zone);
-    painter.text(rect.center(), Align2::CENTER_CENTER, "Latency", font, palette.ink_muted);
+    tab(Align2::RIGHT_CENTER, trf!(ui, "{ms} ms", ms = format!("{scale_ms:.0}")), end_zone);
+    painter.text(rect.center(), Align2::CENTER_CENTER, tr!(ui, "Latency"), font, palette.ink_muted);
 }
 
 /// Legend of the latency zones for the toolbar: a bar in the three zone colors with the 100 / 200 ms boundaries.
@@ -83,7 +84,8 @@ pub fn legend(ui: &mut Ui) {
         painter.rect_filled(Rect::from_x_y_ranges(left..=left + third, bar.y_range()), 0.0, color);
     }
     let font = eframe::egui::FontId::proportional(12.0);
-    for (index, label) in [(1.0, "100 ms"), (2.0, "200 ms")] {
+    for (index, ms) in [(1.0, 100), (2.0, 200)] {
+        let label = trf!(ui, "{ms} ms", ms = ms);
         let x = bar.left() + third * index;
         painter.text(pos2(x, bar.top() - 2.0), Align2::CENTER_BOTTOM, label, font.clone(), palette.ink_muted);
     }

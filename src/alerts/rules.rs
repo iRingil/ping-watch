@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::i18n::{Language, n, tr, trf, trn};
+
 /// Kind of condition, without its numbers (for menus and storage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionKind {
@@ -37,10 +39,10 @@ impl ConditionKind {
     /// Menu label.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Loss => "Packet loss",
-            Self::Latency => "Average latency",
-            Self::Unreachable => "No answer",
-            Self::RouteChanged => "Route changed",
+            Self::Loss => n!("Packet loss"),
+            Self::Latency => n!("Average latency"),
+            Self::Unreachable => n!("No answer"),
+            Self::RouteChanged => n!("Route changed"),
         }
     }
 }
@@ -102,25 +104,42 @@ impl Condition {
     }
 
     /// The condition as a short phrase: "loss above 10 % over 2 minutes".
-    pub fn describe(&self) -> String {
+    pub fn describe(&self, language: Language) -> String {
         match self {
-            Self::Loss { percent, window } => format!("loss above {percent:.0} % over {}", span(*window)),
-            Self::Latency { ms, window } => format!("average latency above {ms:.0} ms over {}", span(*window)),
-            Self::Unreachable { after } => format!("no answer for {}", span(*after)),
-            Self::RouteChanged => "route changed".to_owned(),
+            Self::Loss { percent, window } => trf!(
+                language,
+                "Loss above {percent} % over {span}",
+                percent = format!("{percent:.0}"),
+                span = span(*window, language)
+            ),
+            Self::Latency { ms, window } => trf!(
+                language,
+                "Average latency above {ms} ms over {span}",
+                ms = format!("{ms:.0}"),
+                span = span(*window, language)
+            ),
+            Self::Unreachable { after } => trf!(language, "No answer for {span}", span = span(*after, language)),
+            Self::RouteChanged => tr!(language, "Route changed").to_owned(),
         }
     }
 }
 
 /// "30 seconds", "1 minute", "2 minutes", "1 hour".
-pub fn span(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    let (count, unit) = match seconds {
-        s if s >= 3_600 && s % 3_600 == 0 => (s / 3_600, "hour"),
-        s if s >= 60 && s % 60 == 0 => (s / 60, "minute"),
-        s => (s, "second"),
-    };
-    if count == 1 { format!("1 {unit}") } else { format!("{count} {unit}s") }
+pub fn span(duration: Duration, language: Language) -> String {
+    match duration.as_secs() {
+        s if s >= 3_600 && s % 3_600 == 0 => trn!(language, s / 3_600, "{n} hour|{n} hours"),
+        s if s >= 60 && s % 60 == 0 => trn!(language, s / 60, "{n} minute|{n} minutes"),
+        s => trn!(language, s, "{n} second|{n} seconds"),
+    }
+}
+
+/// A unit stored in the journal ("%", "ms", "s") as shown in `language`.
+pub fn unit_label(unit: &str, language: Language) -> &str {
+    match unit {
+        "ms" => tr!(language, "ms"),
+        "s" => tr!(language, "s"),
+        other => other,
+    }
 }
 
 /// Which targets a rule watches.
@@ -161,13 +180,10 @@ pub struct Rule {
 
 impl Rule {
     /// The rule as a phrase for lists: "Loss above 10 % over 2 minutes, all targets".
-    pub fn describe(&self) -> String {
-        let mut text = self.condition.describe();
-        if let Some(first) = text.get(..1) {
-            text = first.to_uppercase() + text.get(1..).unwrap_or_default();
-        }
+    pub fn describe(&self, language: Language) -> String {
+        let text = self.condition.describe(language);
         let targets = match &self.targets {
-            Targets::All => "all targets".to_owned(),
+            Targets::All => tr!(language, "all targets").to_owned(),
             Targets::Only(hosts) => hosts.join(", "),
         };
         format!("{text}, {targets}")
@@ -180,11 +196,11 @@ mod tests {
 
     #[test]
     fn spans_read_naturally() {
-        assert_eq!(span(Duration::from_secs(30)), "30 seconds");
-        assert_eq!(span(Duration::from_secs(60)), "1 minute");
-        assert_eq!(span(Duration::from_secs(120)), "2 minutes");
-        assert_eq!(span(Duration::from_secs(90)), "90 seconds");
-        assert_eq!(span(Duration::from_secs(3_600)), "1 hour");
+        assert_eq!(span(Duration::from_secs(30), Language::English), "30 seconds");
+        assert_eq!(span(Duration::from_secs(60), Language::English), "1 minute");
+        assert_eq!(span(Duration::from_secs(120), Language::English), "2 minutes");
+        assert_eq!(span(Duration::from_secs(90), Language::English), "90 seconds");
+        assert_eq!(span(Duration::from_secs(3_600), Language::English), "1 hour");
     }
 
     #[test]
@@ -197,7 +213,7 @@ mod tests {
             notify_recovery: true,
             enabled: true,
         };
-        assert_eq!(rule.describe(), "Loss above 10 % over 2 minutes, 1.1.1.1, github.com");
+        assert_eq!(rule.describe(Language::English), "Loss above 10 % over 2 minutes, 1.1.1.1, github.com");
         assert!(rule.targets.contains("GitHub.com"));
         assert!(!rule.targets.contains("8.8.8.8"));
         assert!(Targets::All.contains("8.8.8.8"));

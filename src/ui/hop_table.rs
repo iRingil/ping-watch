@@ -8,6 +8,7 @@ use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Stroke
 use crate::ui::theme::{self, Palette};
 use egui_extras::{Column, TableBuilder, TableRow};
 
+use crate::i18n::{Lang, n, tr};
 use crate::probe::names::NameCache;
 use crate::probe::route::{Hop, Route};
 use crate::probe::stats::HopStats;
@@ -31,16 +32,16 @@ const NUMBER_WIDTH: f32 = 58.0;
 const BADGE_SIZE: f32 = 17.0;
 /// Column titles and whether the column is numeric (right-aligned).
 const HEADERS: [(&str, bool); 10] = [
-    ("Hop", false),
-    ("Count", true),
-    ("IP", false),
-    ("Name", false),
-    ("Avg", true),
-    ("Min", true),
-    ("Max", true),
-    ("Cur", true),
-    ("Jitter", true),
-    ("PL%", true),
+    (n!("Hop"), false),
+    (n!("Count"), true),
+    (n!("IP"), false),
+    (n!("Name"), false),
+    (n!("Avg"), true),
+    (n!("Min"), true),
+    (n!("Max"), true),
+    (n!("Cur"), true),
+    (n!("Jitter"), true),
+    (n!("PL%"), true),
 ];
 
 /// How bad a hop's packet loss is; picks the badge and PL% color.
@@ -113,7 +114,10 @@ pub fn show(
         .column(Column::exact(latency_width).clip(true))
         .header(HEADER_HEIGHT, |mut header| {
             for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
-                header.col(|ui| header_cell(ui, index == 0, numeric, title, available));
+                header.col(|ui| {
+                    let title = ui.language().translate(title);
+                    header_cell(ui, index == 0, numeric, title, available);
+                });
             }
             header.col(|ui| latency_bars::header(ui, scale_ms));
         })
@@ -147,7 +151,7 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
         }
         None => {
             row.col(|ui| cell(ui, false, "*"));
-            row.col(|ui| cell(ui, false, "No response"));
+            row.col(|ui| cell(ui, false, tr!(ui, "No response")));
         }
     }
     stat_cols(row, &hop.stats, false);
@@ -168,7 +172,7 @@ fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&s
     row.col(summary_band);
     row.col(|ui| {
         summary_band(ui);
-        cell(ui, true, emphasis("Round trip (ms)".to_owned()));
+        cell(ui, true, emphasis(tr!(ui, "Round trip (ms)").to_owned()));
     });
     stat_cols(row, stats, true);
     row.col(|ui| {

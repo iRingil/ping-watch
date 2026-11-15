@@ -30,6 +30,14 @@ pub enum Icon {
     Auto,
     /// Flag of the United Kingdom: English.
     FlagGb,
+    /// Flag of Russia: Russian.
+    FlagRu,
+    /// Flag of Germany: German.
+    FlagDe,
+    /// Flag of France: French.
+    FlagFr,
+    /// Flag of Spain: Spanish.
+    FlagEs,
     /// Bell: alerts.
     Bell,
     /// Camera: snapshot.
@@ -139,6 +147,45 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
             ]);
             painter.add(egui::Shape::convex_polygon(outline, color, Stroke::NONE));
             painter.circle_filled(pos2(c.x, c.y + 6.6), 1.7, color);
+        }
+        Icon::FlagRu | Icon::FlagDe | Icon::FlagFr | Icon::FlagEs => {
+            // Bands in the flag's own colors, dimmed for an unselected choice; Spain's middle band is twice as wide.
+            let flag = Rect::from_center_size(c, vec2(20.0, 12.0));
+            let dim = |rgb: Color32| if color == theme::palette(ui).ink { rgb } else { rgb.gamma_multiply(0.6) };
+            let rgb = |r, g, b| dim(Color32::from_rgb(r, g, b));
+            let (bands, vertical, weights): (Vec<Color32>, bool, [f32; 3]) = match icon {
+                Icon::FlagRu => {
+                    (vec![rgb(0xff, 0xff, 0xff), rgb(0x00, 0x39, 0xa6), rgb(0xd5, 0x2b, 0x1e)], false, [1.0, 1.0, 1.0])
+                }
+                Icon::FlagDe => {
+                    (vec![rgb(0x00, 0x00, 0x00), rgb(0xdd, 0x00, 0x00), rgb(0xff, 0xce, 0x00)], false, [1.0, 1.0, 1.0])
+                }
+                Icon::FlagFr => {
+                    (vec![rgb(0x00, 0x23, 0x95), rgb(0xff, 0xff, 0xff), rgb(0xed, 0x29, 0x39)], true, [1.0, 1.0, 1.0])
+                }
+                _ => {
+                    (vec![rgb(0xaa, 0x15, 0x1b), rgb(0xf1, 0xbf, 0x00), rgb(0xaa, 0x15, 0x1b)], false, [1.0, 2.0, 1.0])
+                }
+            };
+            let total: f32 = weights.iter().sum();
+            let mut start = 0.0;
+            for (band, weight) in bands.into_iter().zip(weights) {
+                let (from, to) = (start / total, (start + weight) / total);
+                let rect = if vertical {
+                    Rect::from_min_max(
+                        pos2(flag.left() + flag.width() * from, flag.top()),
+                        pos2(flag.left() + flag.width() * to, flag.bottom()),
+                    )
+                } else {
+                    Rect::from_min_max(
+                        pos2(flag.left(), flag.top() + flag.height() * from),
+                        pos2(flag.right(), flag.top() + flag.height() * to),
+                    )
+                };
+                painter.rect_filled(rect, 0.0, band);
+                start += weight;
+            }
+            painter.rect_stroke(flag, 0.0, Stroke::new(0.5, theme::palette(ui).rule), egui::StrokeKind::Outside);
         }
         Icon::FlagGb => {
             // The Union Jack, simplified to read at 20 x 12 points: blue field, white and red saltires, white and

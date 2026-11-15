@@ -7,6 +7,7 @@ use std::time::Duration;
 use eframe::egui::{self, Align, Grid, Layout, RichText, Ui};
 
 use crate::APP_NAME;
+use crate::i18n::{Lang, Language, n, tr, trf, trn};
 use crate::store::autostart;
 use crate::store::settings::{AppSettings, MAX_HOPS, RETENTIONS, TIMEOUTS};
 use crate::ui::icons::{self, Icon};
@@ -65,11 +66,11 @@ impl Page {
     /// Tab title.
     fn title(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Tracing => "Tracing",
-            Self::Appearance => "Appearance",
-            Self::Language => "Language",
-            Self::About => "About",
+            Self::General => n!("General"),
+            Self::Tracing => n!("Tracing"),
+            Self::Appearance => n!("Appearance"),
+            Self::Language => n!("Language"),
+            Self::About => n!("About"),
         }
     }
 }
@@ -144,7 +145,7 @@ impl SettingsWindow {
             // Title with the close mark at the right end, where windows have it.
             let close = ui
                 .horizontal(|ui| {
-                    ui.label(RichText::new("Settings").font(theme::heading_font(18.0)));
+                    ui.label(RichText::new(tr!(ui, "Settings")).font(theme::heading_font(18.0)));
                     ui.with_layout(Layout::right_to_left(Align::Center), close_mark).inner
                 })
                 .inner;
@@ -159,7 +160,7 @@ impl SettingsWindow {
                     Page::General => self.general(ui, settings),
                     Page::Tracing => tracing(ui, settings),
                     Page::Appearance => appearance(ui, settings),
-                    Page::Language => language(ui),
+                    Page::Language => language(ui, settings),
                     Page::About => self.about(ui, data_folder),
                 }
             });
@@ -173,19 +174,20 @@ impl SettingsWindow {
     /// General: what the close button does, starting with Windows.
     fn general(&mut self, ui: &mut Ui, settings: &mut AppSettings) {
         settings_grid(ui, "settings-general", |ui| {
-            label_first_row(ui, "Close button", 2, ui.spacing().interact_size.y);
+            let label = tr!(ui, "Close button");
+            label_first_row(ui, label, 2, ui.spacing().interact_size.y);
             ui.vertical(|ui| {
-                ui.radio_value(&mut settings.close_to_tray, false, "Quit Ping Watch");
-                ui.radio_value(&mut settings.close_to_tray, true, "Hide to the tray and keep tracing");
+                ui.radio_value(&mut settings.close_to_tray, false, tr!(ui, "Quit Ping Watch"));
+                ui.radio_value(&mut settings.close_to_tray, true, tr!(ui, "Hide to the tray and keep tracing"));
             });
             ui.end_row();
-            ui.weak("Updates");
-            ui.checkbox(&mut settings.check_updates, "Check for a new version")
-                .on_hover_text("Once a day, in the background; Ping Watch tells you when one is out");
+            ui.weak(tr!(ui, "Updates"));
+            let hint = tr!(ui, "Once a day, in the background; Ping Watch tells you when one is out");
+            ui.checkbox(&mut settings.check_updates, tr!(ui, "Check for a new version")).on_hover_text(hint);
             ui.end_row();
-            ui.weak("Windows sign-in");
+            ui.weak(tr!(ui, "Windows sign-in"));
             ui.vertical(|ui| {
-                if ui.checkbox(&mut self.autostart, "Start Ping Watch").changed() {
+                if ui.checkbox(&mut self.autostart, tr!(ui, "Start Ping Watch")).changed() {
                     self.autostart_error = autostart::set_enabled(self.autostart).err().map(|error| error.to_string());
                 }
                 if let Some(error) = &self.autostart_error {
@@ -199,45 +201,54 @@ impl SettingsWindow {
 
 /// Tracing: what new targets start with, probe timeout and hop limit, history retention.
 fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
+    let language = ui.language();
     settings_grid(ui, "settings-tracing", |ui| {
-        ui.weak("New targets: interval");
+        ui.weak(tr!(ui, "New targets: interval"));
         tab::interval_choice(ui, &mut settings.defaults.interval);
         ui.end_row();
-        ui.weak("New targets: focus");
+        ui.weak(tr!(ui, "New targets: focus"));
         tab::focus_choice(ui, &mut settings.defaults.focus);
         ui.end_row();
-        ui.weak("New targets: chart period");
+        ui.weak(tr!(ui, "New targets: chart period"));
         egui::ComboBox::from_id_salt("default-period")
-            .selected_text(settings.defaults.period.label())
+            .selected_text(settings.defaults.period.label(language))
             .show_ui(ui, |ui| {
                 for period in Period::ALL {
-                    ui.selectable_value(&mut settings.defaults.period, period, period.label());
+                    ui.selectable_value(&mut settings.defaults.period, period, period.label(language));
                 }
             });
         ui.end_row();
-        ui.weak("Wait for an answer");
-        choice(ui, "timeout", &mut settings.timeout, &TIMEOUTS, |timeout| format!("{} ms", timeout.as_millis()));
+        ui.weak(tr!(ui, "Wait for an answer"));
+        choice(ui, "timeout", &mut settings.timeout, &TIMEOUTS, |timeout| {
+            trf!(language, "{ms} ms", ms = timeout.as_millis())
+        });
         ui.end_row();
-        ui.weak("Hop limit");
-        choice(ui, "max-hops", &mut settings.max_hops, &MAX_HOPS, |hops| format!("{hops} hops"));
+        ui.weak(tr!(ui, "Hop limit"));
+        choice(ui, "max-hops", &mut settings.max_hops, &MAX_HOPS, |hops| {
+            trn!(language, u64::from(*hops), "{n} hop|{n} hops")
+        });
         ui.end_row();
-        ui.weak("Keep history for");
-        choice(ui, "retention", &mut settings.retention, &RETENTIONS, |retention| days(*retention));
+        ui.weak(tr!(ui, "Keep history for"));
+        choice(ui, "retention", &mut settings.retention, &RETENTIONS, |retention| days(*retention, language));
         ui.end_row();
     });
     ui.add_space(10.0);
-    ui.weak("Targets you traced before keep their own interval, focus and period. Timeout and hop limit apply to traces started from now on.");
+    ui.weak(tr!(
+        ui,
+        "Targets you traced before keep their own interval, focus and period. Timeout and hop limit apply to traces started from now on."
+    ));
 }
 
 /// Appearance: the theme — follow Windows, dark or light (only dark so far).
 fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
     // One choice under another, the label level with the first.
-    label_on_top(ui, "Theme", |ui| {
+    let label = tr!(ui, "Theme");
+    label_on_top(ui, label, |ui| {
         ui.vertical(|ui| {
             let themes = [
-                (ThemeChoice::Auto, Icon::Auto, "Auto", "Follows the Windows app theme"),
-                (ThemeChoice::Dark, Icon::Moon, "Dark", "Graphite panel, light text"),
-                (ThemeChoice::Light, Icon::Sun, "Light", "Pale panel, dark text"),
+                (ThemeChoice::Auto, Icon::Auto, tr!(ui, "Auto"), tr!(ui, "Follows the Windows app theme")),
+                (ThemeChoice::Dark, Icon::Moon, tr!(ui, "Dark"), tr!(ui, "Graphite panel, light text")),
+                (ThemeChoice::Light, Icon::Sun, tr!(ui, "Light"), tr!(ui, "Pale panel, dark text")),
             ];
             for (choice, icon, label, hint) in themes {
                 let response = icon_option(ui, icon, label, settings.theme == choice, true).on_hover_text(hint);
@@ -251,22 +262,42 @@ fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
 
 /// Language: the interface language (only English so far). The choices run top to bottom, then left to right, in
 /// up to [`LANGUAGE_COLUMNS`] columns.
-fn language(ui: &mut Ui) {
-    let languages = [(Icon::FlagGb, "English")];
+fn language(ui: &mut Ui, settings: &mut AppSettings) {
+    let languages = Language::ALL;
     let rows = languages.len().div_ceil(LANGUAGE_COLUMNS).max(1);
-    label_on_top(ui, "Interface", |ui| {
+    let label = tr!(ui, "Interface");
+    label_on_top(ui, label, |ui| {
         ui.horizontal_top(|ui| {
             for column in languages.chunks(rows) {
                 ui.vertical(|ui| {
                     ui.set_width(LANGUAGE_COLUMN_WIDTH);
-                    for (icon, label) in column {
-                        icon_option(ui, *icon, label, true, false)
-                            .on_disabled_hover_text("Other languages aren't ready yet");
+                    for language in column {
+                        let response = icon_option(
+                            ui,
+                            flag_of(*language),
+                            language.native_name(),
+                            settings.language == *language,
+                            true,
+                        );
+                        if response.clicked() {
+                            settings.language = *language;
+                        }
                     }
                 });
             }
         });
     });
+}
+
+/// The flag shown for `language`.
+fn flag_of(language: Language) -> Icon {
+    match language {
+        Language::English => Icon::FlagGb,
+        Language::Russian => Icon::FlagRu,
+        Language::German => Icon::FlagDe,
+        Language::French => Icon::FlagFr,
+        Language::Spanish => Icon::FlagEs,
+    }
 }
 
 /// A muted grid label for a cell holding `lines` rows of `line_height` each, drawn level with the first row (grid
@@ -327,7 +358,8 @@ pub fn close_mark(ui: &mut Ui) -> bool {
         Icon::Cross,
         if response.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
     );
-    response.on_hover_text("Close (Esc)").clicked()
+    let hint = tr!(ui, "Close (Esc)");
+    response.on_hover_text(hint).clicked()
 }
 
 /// The app logo as a texture, `None` if the embedded PNG can't be decoded.
@@ -352,22 +384,25 @@ impl SettingsWindow {
             ui.vertical(|ui| {
                 ui.label(RichText::new(APP_NAME).font(theme::heading_font(20.0)));
                 ui.horizontal(|ui| {
-                    ui.weak(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.weak(trf!(ui, "Version {version}", version = env!("CARGO_PKG_VERSION")));
                     let checking = matches!(self.update, UpdateState::Checking(_));
-                    if ui.add_enabled(!checking, egui::Button::new("Check for updates")).clicked() {
+                    if ui.add_enabled(!checking, egui::Button::new(tr!(ui, "Check for updates"))).clicked() {
                         self.update = UpdateState::Checking(Check::start(REPOSITORY, env!("CARGO_PKG_VERSION")));
                     }
                 });
                 self.update_result(ui);
                 ui.add_space(6.0);
-                ui.label("Traces the route to your targets, shows each hop's latency and loss, and keeps the history.");
+                ui.label(tr!(
+                    ui,
+                    "Traces the route to your targets, shows each hop's latency and loss, and keeps the history."
+                ));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.hyperlink_to("Website", SITE_URL);
+                    ui.hyperlink_to(tr!(ui, "Website"), SITE_URL);
                     // A painted dot: a bigger glyph would move the baseline of the links beside it.
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(6.0, 12.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot.center(), 2.0, theme::palette(ui).ink_muted);
-                    ui.hyperlink_to("Source code", REPO_URL);
+                    ui.hyperlink_to(tr!(ui, "Source code"), REPO_URL);
                 });
             });
         });
@@ -394,23 +429,29 @@ impl SettingsWindow {
             UpdateState::Checking(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.weak("Asking GitHub…");
+                    ui.weak(tr!(ui, "Asking GitHub…"));
                 });
             }
             UpdateState::Done(Ok(Outcome::UpToDate)) => {
-                ui.colored_label(theme::palette(ui).good, "You have the latest version.");
+                ui.colored_label(theme::palette(ui).good, tr!(ui, "You have the latest version."));
             }
             UpdateState::Done(Ok(Outcome::NoReleases)) => {
-                ui.weak("No releases are published yet.");
+                ui.weak(tr!(ui, "No releases are published yet."));
             }
             UpdateState::Done(Ok(Outcome::Newer { version, url })) => {
                 ui.horizontal(|ui| {
-                    ui.colored_label(theme::palette(ui).warn, format!("Version {version} is available."));
-                    ui.hyperlink_to("Download", url);
+                    ui.colored_label(
+                        theme::palette(ui).warn,
+                        trf!(ui, "Version {version} is available.", version = version),
+                    );
+                    ui.hyperlink_to(tr!(ui, "Download"), url);
                 });
             }
             UpdateState::Done(Err(error)) => {
-                ui.colored_label(theme::palette(ui).bad, format!("Couldn't check: {error}"));
+                ui.colored_label(
+                    theme::palette(ui).bad,
+                    trf!(ui, "Couldn't check: {error}", error = update_error(error, ui.language())),
+                );
             }
         }
     }
@@ -419,32 +460,33 @@ impl SettingsWindow {
 /// Data folder and font license rows of the About page.
 fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
     settings_grid(ui, "settings-about", |ui| {
-        ui.weak("Data folder");
+        ui.weak(tr!(ui, "Data folder"));
         ui.horizontal(|ui| match data_folder {
             Some(folder) => {
                 ui.label(folder.display().to_string());
-                if ui.button("Open").clicked()
+                if ui.button(tr!(ui, "Open")).clicked()
                     && let Err(error) = std::process::Command::new("explorer").arg(folder).spawn()
                 {
                     log::warn!("cannot open {}: {error}", folder.display());
                 }
             }
             None => {
-                ui.weak("none, history is off");
+                ui.weak(tr!(ui, "none, history is off"));
             }
         });
         ui.end_row();
         // Feedback goes in its own row, apart from the project links next to the name.
-        label_first_row(ui, "Feedback", 2, ui.text_style_height(&egui::TextStyle::Body));
+        let label = tr!(ui, "Feedback");
+        label_first_row(ui, label, 2, ui.text_style_height(&egui::TextStyle::Body));
         ui.vertical(|ui| {
-            ui.hyperlink_to("Report a problem or idea", ISSUES_URL);
-            ui.hyperlink_to("Report a vulnerability", VULNERABILITY_URL);
+            ui.hyperlink_to(tr!(ui, "Report a problem or idea"), ISSUES_URL);
+            ui.hyperlink_to(tr!(ui, "Report a vulnerability"), VULNERABILITY_URL);
         });
         ui.end_row();
-        ui.weak("License");
+        ui.weak(tr!(ui, "License"));
         ui.hyperlink_to("PolyForm Noncommercial 1.0.0", LICENSE_URL);
         ui.end_row();
-        ui.weak("Font");
+        ui.weak(tr!(ui, "Font"));
         ui.label("Roboto Condensed, © The Roboto Project Authors, SIL Open Font License 1.1");
         ui.end_row();
     });
@@ -452,7 +494,7 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
 
 /// Page tabs of a dialog: titles on a rule, the shown one (`current`) underlined in the signal color; a click
 /// shows another.
-pub fn page_tabs<T: Copy + PartialEq>(ui: &mut Ui, pages: &[(T, &str)], current: &mut T) {
+pub fn page_tabs<T: Copy + PartialEq>(ui: &mut Ui, pages: &[(T, &'static str)], current: &mut T) {
     let row = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 18.0;
@@ -460,7 +502,7 @@ pub fn page_tabs<T: Copy + PartialEq>(ui: &mut Ui, pages: &[(T, &str)], current:
                 let shown = *current == *page;
                 let palette = theme::palette(ui);
                 let color = if shown { palette.ink } else { palette.ink_muted };
-                let text = RichText::new(*title).font(theme::heading_font(15.0)).color(color);
+                let text = RichText::new(ui.language().translate(title)).font(theme::heading_font(15.0)).color(color);
                 let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
                 if shown {
                     let rect = response.rect;
@@ -493,10 +535,15 @@ pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, id: &str, value: &mut T, options
     });
 }
 
-/// "1 day", "7 days".
-fn days(duration: Duration) -> String {
-    match duration.as_secs() / (24 * 60 * 60) {
-        1 => "1 day".to_owned(),
-        count => format!("{count} days"),
+/// Why the update check failed, in `language`.
+fn update_error(error: &UpdateError, language: Language) -> String {
+    match error {
+        UpdateError::Network(detail) => trf!(language, "GitHub couldn't be reached: {error}", error = detail),
+        UpdateError::Answer(detail) => trf!(language, "GitHub's answer couldn't be read: {error}", error = detail),
     }
+}
+
+/// "1 day", "7 days".
+fn days(duration: Duration, language: Language) -> String {
+    trn!(language, duration.as_secs() / (24 * 60 * 60), "1 day|{n} days")
 }

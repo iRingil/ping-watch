@@ -12,7 +12,8 @@ use eframe::egui::{
 };
 
 use crate::alerts::WindowStats;
-use crate::probe::names::{NameCache, resolve};
+use crate::i18n::{Lang, Language, n, tr, trf};
+use crate::probe::names::{NameCache, ResolveError, resolve};
 use crate::probe::route::{Hop, Route};
 use crate::probe::tracer::{TraceConfig, Tracer};
 use crate::snapshot::{AlertRow, Chart, HopRow, TargetReport};
@@ -31,13 +32,13 @@ use crate::ui::timeline::{Period, Series, Timeline, Window};
 
 /// Probe intervals offered in the toolbar.
 const INTERVALS: [(Duration, &str); 7] = [
-    (Duration::from_millis(500), "0.5 seconds"),
-    (Duration::from_secs(1), "1 second"),
-    (Duration::from_millis(2_500), "2.5 seconds"),
-    (Duration::from_secs(5), "5 seconds"),
-    (Duration::from_secs(10), "10 seconds"),
-    (Duration::from_secs(30), "30 seconds"),
-    (Duration::from_secs(60), "60 seconds"),
+    (Duration::from_millis(500), n!("0.5 seconds")),
+    (Duration::from_secs(1), n!("1 second")),
+    (Duration::from_millis(2_500), n!("2.5 seconds")),
+    (Duration::from_secs(5), n!("5 seconds")),
+    (Duration::from_secs(10), n!("10 seconds")),
+    (Duration::from_secs(30), n!("30 seconds")),
+    (Duration::from_secs(60), n!("60 seconds")),
 ];
 /// Width of the running trace's menu.
 const TRACE_MENU_WIDTH: f32 = 230.0;
@@ -101,7 +102,7 @@ enum State {
     /// Waiting for the user to enter a host (or after a failed start, with the error).
     Editing(Option<String>),
     /// The host is being resolved in the background.
-    Resolving(Receiver<Result<IpAddr, String>>),
+    Resolving(Receiver<Result<IpAddr, ResolveError>>),
     /// The trace runs.
     Running(Session),
 }
@@ -135,6 +136,8 @@ pub struct Tab {
     state: State,
     /// Non-fatal problem shown in the toolbar (history is off).
     warning: Option<String>,
+    /// Interface language, taken from the settings every frame (for texts made outside drawing).
+    language: Language,
     /// Hop chosen for the timeline by clicking its row; `None` means the target hop.
     selected_ttl: Option<u8>,
     /// Timeline pane state.
@@ -174,6 +177,7 @@ impl Tab {
             start_paused: false,
             name: None,
             reverse: None,
+            language: Language::English,
         }
     }
 
@@ -243,7 +247,7 @@ impl Tab {
             }
             _ => {
                 ui.label(RichText::new(title).font(theme::heading_font(15.0)));
-                ui.weak("The chart appears once the trace runs.");
+                ui.weak(tr!(ui, "The chart appears once the trace runs."));
             }
         }
         *period = chart.period();
@@ -294,7 +298,7 @@ impl Tab {
 
     /// Tab title: the host, or a placeholder while none is entered.
     pub fn title(&self) -> String {
-        if self.host.is_empty() { "New target".to_owned() } else { self.host.clone() }
+        if self.host.is_empty() { tr!(self.language, "New target").to_owned() } else { self.host.clone() }
     }
 
     /// Starts resolving `host` in the background (stopping any running trace); tracing begins once it resolves.
@@ -310,11 +314,16 @@ impl Tab {
         let name = self.host.clone();
         let spawned = thread::Builder::new().name(format!("resolve-{name}")).spawn(move || {
             // The tab may be gone by now; then nobody needs the answer.
-            sender.send(resolve(&name).map_err(|error| error.to_string())).ok();
+            sender.send(resolve(&name)).ok();
         });
         self.state = match spawned {
             Ok(_) => State::Resolving(receiver),
-            Err(error) => State::Editing(Some(format!("cannot resolve {}: {error}", self.host))),
+            Err(error) => State::Editing(Some(trf!(
+                self.language,
+                "Cannot resolve {host}: {error}",
+                host = self.host,
+                error = error
+            ))),
         };
     }
 
@@ -327,15 +336,23 @@ impl Tab {
     /// Moves a resolving tab on once the address is known: starts the history recorder and the tracer.
     /// Called every frame for every tab, shown or not.
     pub fn poll(&mut self, context: Context<'_>) {
+        self.language = context.settings.language;
         self.refresh_names(context);
         let State::Resolving(receiver) = &self.state else {
             return;
         };
         let target = match receiver.try_recv() {
             Ok(Ok(target)) => target,
-            Ok(Err(error)) => return self.fail(error),
+            Ok(Err(ResolveError::Lookup { host, source })) => {
+                return self.fail(trf!(self.language, "Cannot resolve {host}: {error}", host = host, error = source));
+            }
+            Ok(Err(ResolveError::NoAddress(host))) => {
+                return self.fail(trf!(self.language, "{host} has no address", host = host));
+            }
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => return self.fail(format!("cannot resolve {}", self.host)),
+            Err(TryRecvError::Disconnected) => {
+                return self.fail(trf!(self.language, "Cannot resolve {host}", host = self.host));
+            }
         };
         if let Some(targets) = context.targets
             && let Err(error) = targets.remember(&self.host, target)
@@ -357,9 +374,9 @@ impl Tab {
             .reader
             .and_then(|reader| reader.target_id(&key).inspect_err(|error| log::warn!("{error}")).ok());
         let recorder = match context.history_path {
-            None => Err("history is off: no data folder".to_owned()),
+            None => Err(tr!(self.language, "History is off: no data folder").to_owned()),
             Some(path) => Recorder::start(path, &key, context.settings.retention)
-                .map_err(|error| format!("history is off: {error}")),
+                .map_err(|error| trf!(self.language, "History is off: {error}", error = error)),
         };
         if let Err(warning) = &recorder {
             log::warn!("{warning}");
@@ -469,16 +486,14 @@ impl Tab {
         let route = self.route()?;
         let label = self.label()?;
         let hops = route.hops().iter().map(|hop| hop_row(hop, names)).collect();
-        let focus = focus_label(&route)
-            .map(|text| text.trim_start_matches("Focus ").to_owned())
-            .unwrap_or_else(|| "since the trace started".to_owned());
+        let focus = focus_range(&route).unwrap_or_else(|| tr!(self.language, "since the trace started").to_owned());
         let now_ms = history::unix_ms(SystemTime::now());
         let (from_ms, to_ms) = self.timeline.visible_range(now_ms);
         let alerts = journal
             .iter()
             .filter(|entry| entry.host.eq_ignore_ascii_case(&self.host))
             .filter(|entry| entry.started_ms <= to_ms && entry.ended_ms.is_none_or(|ended| ended >= from_ms))
-            .map(alert_row)
+            .map(|entry| alert_row(entry, self.language))
             .collect();
         let chart = self.chart_over(reader, self.timeline.period(), to_ms);
         Some(TargetReport { label, focus, hops, chart, alerts })
@@ -533,10 +548,10 @@ impl Tab {
             .is_some_and(|route| target_hop.is_some_and(|hop| hop.address == Some(route.target())));
         let status = match &self.state {
             State::Editing(Some(error)) => error.clone(),
-            State::Editing(None) => "no target".to_owned(),
-            State::Resolving(_) => "resolving…".to_owned(),
-            State::Running(session) if session.tracer.is_paused() => "paused".to_owned(),
-            State::Running(_) => "running".to_owned(),
+            State::Editing(None) => tr!(self.language, "no target").to_owned(),
+            State::Resolving(_) => tr!(self.language, "resolving…").to_owned(),
+            State::Running(session) if session.tracer.is_paused() => tr!(self.language, "paused").to_owned(),
+            State::Running(_) => tr!(self.language, "running").to_owned(),
         };
         Overview {
             title: self.title(),
@@ -571,14 +586,14 @@ impl Tab {
         splitter(ui, splitter_rect, area, table_share);
 
         pane(ui, table_rect, Margin::same(1), |ui| {
-            let focus = route.as_ref().and_then(focus_label);
+            let focus = route.as_ref().and_then(focus_range).map(|range| trf!(ui, "Focus {range}", range = range));
             if let Some(clicked) = hop_table::show(ui, route.as_ref(), context.names, ttl, focus.as_deref()) {
                 self.selected_ttl = Some(clicked);
             }
         });
         pane(ui, timeline_rect, Margin::same(8), |ui| match (&self.state, &route, ttl) {
             (State::Running(session), Some(route), Some(ttl)) => {
-                let title = hop_title(route, ttl, context.names);
+                let title = hop_title(route, ttl, context.names, self.language);
                 // The target's line is read by target, not hop number, so it keeps its history when the route
                 // length changes.
                 let is_target =
@@ -587,7 +602,7 @@ impl Tab {
                 self.timeline.show(ui, context.history_path, session.target_id, hop, &title, self.interval);
             }
             _ => {
-                ui.weak("The history of the selected hop appears here once a trace runs.");
+                ui.weak(tr!(ui, "The history of the selected hop appears here once a trace runs."));
             }
         });
         action
@@ -604,12 +619,12 @@ impl Tab {
                 self.target_entry(ui, targets);
             }
             ui.add_space(12.0);
-            ui.weak("Interval");
+            ui.weak(tr!(ui, "Interval"));
             let mut interval = self.interval;
             if interval_choice(ui, &mut interval) {
                 self.set_interval(interval);
             }
-            ui.weak("Focus");
+            ui.weak(tr!(ui, "Focus"));
             focus_choice(ui, &mut self.focus);
             ui.with_layout(Layout::right_to_left(Align::Center), latency_bars::legend);
         });
@@ -622,8 +637,8 @@ impl Tab {
         let mut start = self.entry.show(ui, targets, !resolving);
         if resolving {
             ui.spinner();
-            ui.weak(format!("Resolving {}…", self.host));
-        } else if icons::button(ui, Icon::Play, Style::Primary, "Trace (Enter)").clicked() {
+            ui.weak(trf!(ui, "Resolving {host}…", host = self.host));
+        } else if icons::button(ui, Icon::Play, Style::Primary, tr!(ui, "Trace (Enter)")).clicked() {
             start = true;
         }
         if start {
@@ -644,9 +659,14 @@ impl Tab {
         let paused = session.tracer.is_paused();
         // One split button, as in PingPlotter: the face pauses or resumes, the arrow lists the other actions.
         let split = if paused {
-            icons::split_button(ui, Icon::Play, theme::palette(ui).good, "Resume probing")
+            icons::split_button(ui, Icon::Play, theme::palette(ui).good, tr!(ui, "Resume probing"))
         } else {
-            icons::split_button(ui, Icon::Pause, theme::palette(ui).signal, "Pause probing (the numbers are kept)")
+            icons::split_button(
+                ui,
+                Icon::Pause,
+                theme::palette(ui).signal,
+                tr!(ui, "Pause probing (the numbers are kept)"),
+            )
         };
         if split.main.clicked() {
             session.tracer.set_paused(!paused);
@@ -655,8 +675,8 @@ impl Tab {
         Popup::from_toggle_button_response(&split.menu).width(TRACE_MENU_WIDTH).show(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let items = [
-                ("Reset and restart", RESTART_SHORTCUT, Action::Restart),
-                ("Close and stop", CLOSE_SHORTCUT, Action::Close),
+                (tr!(ui, "Reset and restart"), RESTART_SHORTCUT, Action::Restart),
+                (tr!(ui, "Close and stop"), CLOSE_SHORTCUT, Action::Close),
             ];
             for (label, shortcut, item) in items {
                 if icons::menu_row(ui, label, &ui.ctx().format_shortcut(&shortcut)).clicked() {
@@ -710,39 +730,43 @@ pub fn pane(ui: &mut Ui, rect: Rect, margin: Margin, content: impl FnOnce(&mut U
     });
 }
 
-/// "Focus: from – to" of a route, shown under its latency bars.
-fn focus_label(route: &Route) -> Option<String> {
+/// "from – to" of a route's focus.
+fn focus_range(route: &Route) -> Option<String> {
     let from_ms = route.focus_start_ms()?;
     let to_ms = route.focus_end_ms().unwrap_or_else(|| history::unix_ms(SystemTime::now()));
-    Some(format!("Focus {} – {}", clock(from_ms), clock(to_ms)))
+    Some(format!("{} \u{2013} {}", clock(from_ms), clock(to_ms)))
 }
 
 /// Combo box choosing a probe interval; returns whether it changed.
 pub fn interval_choice(ui: &mut Ui, interval: &mut Duration) -> bool {
     let before = *interval;
-    egui::ComboBox::from_id_salt("interval").selected_text(interval_label(*interval)).show_ui(ui, |ui| {
-        for (choice, label) in INTERVALS {
-            ui.selectable_value(interval, choice, label);
-        }
-    });
+    let language = ui.language();
+    egui::ComboBox::from_id_salt("interval")
+        .selected_text(interval_label(*interval, language))
+        .show_ui(ui, |ui| {
+            for (choice, label) in INTERVALS {
+                ui.selectable_value(interval, choice, language.translate(label));
+            }
+        });
     *interval != before
 }
 
 /// Combo box choosing the focus.
 pub fn focus_choice(ui: &mut Ui, focus: &mut Focus) {
-    egui::ComboBox::from_id_salt("focus").selected_text(focus.label()).show_ui(ui, |ui| {
+    let language = ui.language();
+    egui::ComboBox::from_id_salt("focus").selected_text(focus.label(language)).show_ui(ui, |ui| {
         for choice in Focus::ALL {
-            ui.selectable_value(focus, choice, choice.label());
+            ui.selectable_value(focus, choice, choice.label(language));
         }
     });
 }
 
 /// Menu label of a probe interval.
-fn interval_label(interval: Duration) -> String {
-    INTERVALS
-        .iter()
-        .find(|(known, _)| *known == interval)
-        .map_or_else(|| format!("{:.1} seconds", interval.as_secs_f64()), |(_, label)| (*label).to_owned())
+fn interval_label(interval: Duration, language: Language) -> String {
+    INTERVALS.iter().find(|(known, _)| *known == interval).map_or_else(
+        || trf!(language, "{seconds} seconds", seconds = format!("{:.1}", interval.as_secs_f64())),
+        |(_, label)| language.translate(label).to_owned(),
+    )
 }
 
 /// Local wall-clock time `HH:MM:SS` of Unix milliseconds.
@@ -787,17 +811,17 @@ fn hop_row(hop: &Hop, names: &NameCache) -> HopRow {
 }
 
 /// A journal entry as a snapshot alert row.
-fn alert_row(entry: &JournalEntry) -> AlertRow {
+fn alert_row(entry: &JournalEntry, language: Language) -> AlertRow {
     let lasted = match entry.ended_ms {
-        None => "on now".to_owned(),
+        None => tr!(language, "on now").to_owned(),
         Some(ended) if ended == entry.started_ms => String::new(),
         Some(ended) => {
             let seconds = u64::try_from(ended.saturating_sub(entry.started_ms) / 1_000).unwrap_or(0);
-            crate::alerts::span(Duration::from_secs(seconds.max(1)))
+            crate::alerts::span(Duration::from_secs(seconds.max(1)), language)
         }
     };
     let worst = match (entry.worst, entry.unit.as_deref()) {
-        (Some(worst), Some(unit)) => format!("{worst:.0} {unit}"),
+        (Some(worst), Some(unit)) => format!("{worst:.0} {}", crate::alerts::unit_label(unit, language)),
         _ => String::new(),
     };
     AlertRow { started: date_time(entry.started_ms), what: entry.what.clone(), lasted, worst }
@@ -812,15 +836,16 @@ fn date_time(ms: i64) -> String {
 
 /// Timeline title of hop `ttl`, in the style of the target labels: "Hop 10: 208.67.222.222 / dns.sse.cisco.com"
 /// (the reverse name only if there is one).
-fn hop_title(route: &Route, ttl: u8, names: &NameCache) -> String {
+fn hop_title(route: &Route, ttl: u8, names: &NameCache, language: Language) -> String {
     let address = route.hops().iter().find(|hop| hop.ttl == ttl).and_then(|hop| hop.address);
-    match address {
+    let what = match address {
         Some(ip) => match names.get(ip).filter(|name| *name != ip.to_string()) {
-            Some(name) => format!("Hop {ttl}: {ip} / {name}"),
-            None => format!("Hop {ttl}: {ip}"),
+            Some(name) => format!("{ip} / {name}"),
+            None => ip.to_string(),
         },
-        None => format!("Hop {ttl}: no response"),
-    }
+        None => tr!(language, "no response").to_owned(),
+    };
+    trf!(language, "Hop {ttl}: {what}", ttl = ttl, what = what)
 }
 
 #[cfg(test)]

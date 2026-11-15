@@ -4,6 +4,8 @@
 
 use std::net::IpAddr;
 
+use crate::i18n::{Language, tr, trf};
+
 /// Checks (one a second) a new route must hold before it counts.
 pub const STABLE_CHECKS: u32 = 10;
 
@@ -21,22 +23,24 @@ pub struct RouteChange {
 }
 
 impl RouteChange {
-    /// The change as a phrase: "hop 3 10.74.232.97 → 192.168.1.1, 12 → 11 hops".
-    pub fn describe(&self) -> String {
+    /// The change as a phrase: "hop 3 10.74.232.97 → 192.168.1.1, hops 12 → 11".
+    pub fn describe(&self, language: Language) -> String {
         let mut parts = Vec::new();
         let first_difference = self.before.iter().zip(&self.after).find(|(old, new)| old != new);
         match first_difference {
             Some(((old_ttl, old_ip), (new_ttl, new_ip))) if old_ttl == new_ttl => {
-                parts.push(format!("hop {old_ttl} {old_ip} \u{2192} {new_ip}"));
+                parts.push(trf!(language, "hop {ttl} {old} \u{2192} {new}", ttl = old_ttl, old = old_ip, new = new_ip));
             }
-            Some(((_, old_ip), (new_ttl, new_ip))) => parts.push(format!("hop {new_ttl} {old_ip} \u{2192} {new_ip}")),
+            Some(((_, old_ip), (new_ttl, new_ip))) => {
+                parts.push(trf!(language, "hop {ttl} {old} \u{2192} {new}", ttl = new_ttl, old = old_ip, new = new_ip));
+            }
             None => {}
         }
         let (old_len, new_len) = (hop_count(&self.before), hop_count(&self.after));
         if old_len != new_len {
-            parts.push(format!("{old_len} \u{2192} {new_len} hops"));
+            parts.push(trf!(language, "hops {old} \u{2192} {new}", old = old_len, new = new_len));
         }
-        if parts.is_empty() { "the route changed".to_owned() } else { parts.join(", ") }
+        if parts.is_empty() { tr!(language, "the route changed").to_owned() } else { parts.join(", ") }
     }
 }
 
@@ -107,7 +111,7 @@ mod tests {
             assert_eq!(watch.check(path(&[1, 5, 3])), None);
         }
         let change = watch.check(path(&[1, 5, 3])).expect("held long enough");
-        assert_eq!(change.describe(), "hop 2 10.0.0.2 \u{2192} 10.0.0.5");
+        assert_eq!(change.describe(Language::English), "hop 2 10.0.0.2 \u{2192} 10.0.0.5");
         assert_eq!(watch.check(path(&[1, 5, 3])), None, "reported once");
     }
 
@@ -131,8 +135,8 @@ mod tests {
             change = watch.check(path(&[1, 2, 4]));
         }
         assert_eq!(
-            change.map(|change| change.describe()),
-            Some("hop 3 10.0.0.3 \u{2192} 10.0.0.4, 4 \u{2192} 3 hops".to_owned())
+            change.map(|change| change.describe(Language::English)),
+            Some("hop 3 10.0.0.3 \u{2192} 10.0.0.4, hops 4 \u{2192} 3".to_owned())
         );
     }
 }

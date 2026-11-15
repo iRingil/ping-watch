@@ -22,7 +22,7 @@ tauri-winrt-notification = "0.8.1"
 thiserror = "2.0.21"
 tray-icon = "0.26.1"
 ureq = "3.5.2"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_IO"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_Globalization"] }
 windows-registry = "0.100.0"
 
 [lints.rust]

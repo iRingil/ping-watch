@@ -7,6 +7,7 @@ use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Ui};
 use egui_extras::{Column, TableBuilder};
 
 use crate::alerts::{Condition, ConditionKind, Rule, Targets};
+use crate::i18n::{Lang, n, tr};
 use crate::store::alerts::AlertStore;
 use crate::ui::icons::{self, Icon, Style};
 use crate::ui::settings::{close_mark, label_first_row, page_tabs, settings_grid};
@@ -173,17 +174,17 @@ impl AlertsWindow {
             ui.set_max_width(WIDTH);
             let close = ui
                 .horizontal(|ui| {
-                    ui.label(RichText::new("Alerts").font(theme::heading_font(18.0)));
+                    ui.label(RichText::new(tr!(ui, "Alerts")).font(theme::heading_font(18.0)));
                     ui.with_layout(Layout::right_to_left(Align::Center), close_mark).inner
                 })
                 .inner;
             ui.add_space(8.0);
-            page_tabs(ui, &[(Page::Rules, "Rules"), (Page::Journal, "Journal")], &mut self.page);
+            page_tabs(ui, &[(Page::Rules, n!("Rules")), (Page::Journal, n!("Journal"))], &mut self.page);
             ui.add_space(12.0);
             ui.allocate_ui(egui::vec2(WIDTH, PAGE_HEIGHT), |ui| {
                 ui.set_min_height(PAGE_HEIGHT);
                 let Some(store) = store else {
-                    ui.weak("Alerts need the history database, which couldn't be opened.");
+                    ui.weak(tr!(ui, "Alerts need the history database, which couldn't be opened."));
                     return;
                 };
                 match self.page {
@@ -224,7 +225,7 @@ impl AlertsWindow {
             for rule in rules {
                 ui.horizontal(|ui| {
                     let mut enabled = rule.enabled;
-                    if ui.checkbox(&mut enabled, "").on_hover_text("On or off").changed() {
+                    if ui.checkbox(&mut enabled, "").on_hover_text(tr!(ui, "On or off")).changed() {
                         let toggled = Rule { enabled, ..rule.clone() };
                         if let Err(error) = store.save_rule(&toggled) {
                             log::error!("cannot save the alert rule: {error}");
@@ -232,32 +233,32 @@ impl AlertsWindow {
                         changed = true;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Cross, Style::Normal, "Delete").clicked() {
+                        if icons::button(ui, Icon::Cross, Style::Normal, tr!(ui, "Delete")).clicked() {
                             if let Err(error) = store.delete_rule(rule.id) {
                                 log::error!("cannot delete the alert rule: {error}");
                             }
                             changed = true;
                         }
-                        if icons::button(ui, Icon::Pencil, Style::Normal, "Edit").clicked() {
+                        if icons::button(ui, Icon::Pencil, Style::Normal, tr!(ui, "Edit")).clicked() {
                             self.draft = Some(Draft::of(rule));
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                             let palette = theme::palette(ui);
                             let color = if rule.enabled { palette.ink } else { palette.ink_muted };
-                            ui.label(RichText::new(rule.describe()).color(color));
+                            ui.label(RichText::new(rule.describe(ui.language())).color(color));
                             if !rule.notify {
-                                ui.weak("(journal and timeline only)");
+                                ui.weak(tr!(ui, "(journal and timeline only)"));
                             }
                         });
                     });
                 });
             }
             if rules.is_empty() {
-                ui.weak("No rules. Add one to be told when a target slows down or drops packets.");
+                ui.weak(tr!(ui, "No rules. Add one to be told when a target slows down or drops packets."));
             }
         });
         ui.add_space(8.0);
-        if ui.button("Add a rule").clicked() {
+        if ui.button(tr!(ui, "Add a rule")).clicked() {
             self.draft = Some(Draft::new());
         }
         changed
@@ -277,35 +278,40 @@ enum FormAnswer {
 
 /// The form of a rule: condition, its numbers, targets, notifications.
 fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
-    ui.label(RichText::new(if draft.id == 0 { "New rule" } else { "Edit rule" }).font(theme::heading_font(15.0)));
+    ui.label(
+        RichText::new(if draft.id == 0 { tr!(ui, "New rule") } else { tr!(ui, "Edit rule") })
+            .font(theme::heading_font(15.0)),
+    );
     ui.add_space(6.0);
     settings_grid(ui, "alert-rule", |ui| {
-        ui.weak("When");
-        egui::ComboBox::from_id_salt("alert-kind").selected_text(draft.kind.label()).show_ui(ui, |ui| {
-            for kind in ConditionKind::ALL {
-                ui.selectable_value(&mut draft.kind, kind, kind.label());
-            }
-        });
+        ui.weak(tr!(ui, "When"));
+        egui::ComboBox::from_id_salt("alert-kind")
+            .selected_text(ui.language().translate(draft.kind.label()))
+            .show_ui(ui, |ui| {
+                for kind in ConditionKind::ALL {
+                    ui.selectable_value(&mut draft.kind, kind, ui.language().translate(kind.label()));
+                }
+            });
         ui.end_row();
         match draft.kind {
             ConditionKind::Loss => {
-                ui.weak("is above");
+                ui.weak(tr!(ui, "is above"));
                 ui.add(egui::DragValue::new(&mut draft.percent).range(1.0..=100.0).speed(0.5).suffix(" %"));
                 ui.end_row();
-                ui.weak("over the last");
+                ui.weak(tr!(ui, "over the last"));
                 period_choice(ui, "alert-window", &mut draft.window, &WINDOWS);
                 ui.end_row();
             }
             ConditionKind::Latency => {
-                ui.weak("is above");
+                ui.weak(tr!(ui, "is above"));
                 ui.add(egui::DragValue::new(&mut draft.ms).range(10.0..=5_000.0).speed(1.0).suffix(" ms"));
                 ui.end_row();
-                ui.weak("over the last");
+                ui.weak(tr!(ui, "over the last"));
                 period_choice(ui, "alert-window", &mut draft.window, &WINDOWS);
                 ui.end_row();
             }
             ConditionKind::Unreachable => {
-                ui.weak("for");
+                ui.weak(tr!(ui, "for"));
                 period_choice(ui, "alert-after", &mut draft.after, &SILENCES);
                 ui.end_row();
             }
@@ -324,9 +330,10 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
         let visible_rows = if draft.all_targets || choices.is_empty() { 0 } else { rows.min(TARGET_ROWS) };
         let row_height = ui.spacing().interact_size.y;
         let lines = u8::try_from(visible_rows.saturating_add(1)).unwrap_or(u8::MAX);
-        label_first_row(ui, "Targets", lines, row_height);
+        let label = tr!(ui, "Targets");
+        label_first_row(ui, label, lines, row_height);
         ui.vertical(|ui| {
-            ui.checkbox(&mut draft.all_targets, "All targets");
+            ui.checkbox(&mut draft.all_targets, tr!(ui, "All targets"));
             if visible_rows == 0 {
                 return;
             }
@@ -354,27 +361,32 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
         });
         ui.end_row();
         let route = draft.kind == ConditionKind::RouteChanged;
-        label_first_row(ui, "Tell me", if route { 1 } else { 2 }, ui.spacing().interact_size.y);
+        let label = tr!(ui, "Tell me");
+        label_first_row(ui, label, if route { 1 } else { 2 }, ui.spacing().interact_size.y);
         ui.vertical(|ui| {
-            ui.checkbox(&mut draft.notify, "With a Windows notification");
+            ui.checkbox(&mut draft.notify, tr!(ui, "With a Windows notification"));
             if !route {
-                ui.checkbox(&mut draft.notify_recovery, "Also when it's over");
+                ui.checkbox(&mut draft.notify_recovery, tr!(ui, "Also when it's over"));
             }
         });
         ui.end_row();
     });
     ui.add_space(4.0);
-    ui.weak("Every alert is written to the journal and marked on the target's timeline.");
+    ui.weak(tr!(ui, "Every alert is written to the journal and marked on the target's timeline."));
     ui.add_space(10.0);
     let can_save = draft.all_targets || !draft.hosts.is_empty();
     let mut answer = FormAnswer::None;
     ui.horizontal(|ui| {
         let palette = theme::palette(ui);
-        let save = egui::Button::new(RichText::new("Save").color(palette.on_signal)).fill(palette.signal);
-        if ui.add_enabled(can_save, save).on_disabled_hover_text("Choose at least one target").clicked() {
+        let save = egui::Button::new(RichText::new(tr!(ui, "Save")).color(palette.on_signal)).fill(palette.signal);
+        if ui
+            .add_enabled(can_save, save)
+            .on_disabled_hover_text(tr!(ui, "Choose at least one target"))
+            .clicked()
+        {
             answer = FormAnswer::Save;
         }
-        if ui.button("Cancel").clicked() {
+        if ui.button(tr!(ui, "Cancel")).clicked() {
             answer = FormAnswer::Cancel;
         }
     });
@@ -383,11 +395,14 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
 
 /// Combo box choosing a period from `options`.
 fn period_choice(ui: &mut Ui, id: &str, value: &mut Duration, options: &[Duration]) {
-    egui::ComboBox::from_id_salt(id).selected_text(crate::alerts::span(*value)).show_ui(ui, |ui| {
-        for option in options {
-            ui.selectable_value(value, *option, crate::alerts::span(*option));
-        }
-    });
+    let language = ui.language();
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(crate::alerts::span(*value, language))
+        .show_ui(ui, |ui| {
+            for option in options {
+                ui.selectable_value(value, *option, crate::alerts::span(*option, language));
+            }
+        });
 }
 
 /// The journal page: newest first, with a button to clear it. Fixed columns that fit the window; a long "What" is
@@ -398,7 +413,7 @@ fn journal_page(ui: &mut Ui, store: &AlertStore) {
         .inspect_err(|error| log::error!("cannot read the alert journal: {error}"))
         .unwrap_or_default();
     if journal.is_empty() {
-        ui.weak("Nothing has fired yet.");
+        ui.weak(tr!(ui, "Nothing has fired yet."));
         return;
     }
     let palette = theme::palette(ui);
@@ -413,9 +428,9 @@ fn journal_page(ui: &mut Ui, store: &AlertStore) {
             .column(Column::exact(74.0))
             .column(Column::exact(58.0))
             .header(JOURNAL_ROW, |mut header| {
-                for title in ["Started", "Target", "What", "Lasted", "Worst"] {
+                for title in [n!("Started"), n!("Target"), n!("What"), n!("Lasted"), n!("Worst")] {
                     header.col(|ui| {
-                        ui.weak(title);
+                        ui.weak(ui.language().translate(title));
                     });
                 }
             })
@@ -435,24 +450,24 @@ fn journal_page(ui: &mut Ui, store: &AlertStore) {
                     });
                     row.col(|ui| match entry.ended_ms {
                         None => {
-                            ui.colored_label(palette.bad, "on now");
+                            ui.colored_label(palette.bad, tr!(ui, "on now"));
                         }
                         Some(ended) if ended == entry.started_ms => {}
                         Some(ended) => {
                             let seconds = u64::try_from(ended.saturating_sub(entry.started_ms) / 1_000).unwrap_or(0);
-                            ui.label(crate::alerts::span(Duration::from_secs(seconds.max(1))));
+                            ui.label(crate::alerts::span(Duration::from_secs(seconds.max(1)), ui.language()));
                         }
                     });
                     row.col(|ui| {
                         if let (Some(worst), Some(unit)) = (entry.worst, entry.unit.as_deref()) {
-                            ui.label(format!("{worst:.0} {unit}"));
+                            ui.label(format!("{worst:.0} {}", crate::alerts::unit_label(unit, ui.language())));
                         }
                     });
                 });
             });
     });
     ui.add_space(8.0);
-    if ui.button("Clear the journal").clicked()
+    if ui.button(tr!(ui, "Clear the journal")).clicked()
         && let Err(error) = store.clear_journal()
     {
         log::error!("cannot clear the alert journal: {error}");

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::i18n::Language;
 use crate::store::history::HistoryError;
 use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
@@ -49,6 +50,8 @@ pub struct AppSettings {
     pub theme: ThemeChoice,
     /// Look for a new version once a day.
     pub check_updates: bool,
+    /// Interface language.
+    pub language: Language,
 }
 
 impl Default for AppSettings {
@@ -66,6 +69,7 @@ impl Default for AppSettings {
             retention: Duration::from_secs(7 * 24 * 60 * 60),
             theme: ThemeChoice::default(),
             check_updates: true,
+            language: Language::English,
         }
     }
 }
@@ -141,6 +145,11 @@ impl SettingsStore {
                 .unwrap_or(fallback.retention),
             theme: self.get("theme")?.and_then(|key| ThemeChoice::from_key(&key)).unwrap_or(fallback.theme),
             check_updates: self.get("check_updates")?.map_or(fallback.check_updates, |value| value == "1"),
+            // Until chosen, the language Windows itself is shown in.
+            language: self
+                .get("language")?
+                .and_then(|key| Language::from_key(&key))
+                .unwrap_or_else(Language::of_windows),
         })
     }
 
@@ -184,6 +193,7 @@ impl SettingsStore {
             ("retention_s", settings.retention.as_secs().to_string()),
             ("theme", settings.theme.key().to_owned()),
             ("check_updates", if settings.check_updates { "1".to_owned() } else { "0".to_owned() }),
+            ("language", settings.language.key().to_owned()),
         ];
         let transaction = self.connection.transaction()?;
         for (key, value) in values {
@@ -205,7 +215,9 @@ mod tests {
     #[test]
     fn defaults_before_the_first_save() {
         let store = SettingsStore::open_in_memory().expect("store opens");
-        assert_eq!(store.load().ok(), Some(AppSettings::default()));
+        let loaded = store.load().expect("loads");
+        assert_eq!(loaded.language, Language::of_windows(), "until chosen, the language of Windows");
+        assert_eq!(AppSettings { language: Language::English, ..loaded }, AppSettings::default());
     }
 
     #[test]
@@ -223,6 +235,7 @@ mod tests {
             retention: DAY,
             theme: ThemeChoice::Light,
             check_updates: false,
+            language: Language::German,
         };
         store.save(&settings).expect("saved");
         assert_eq!(store.load().ok(), Some(settings));
@@ -246,6 +259,7 @@ mod tests {
                 .execute("INSERT INTO app_settings (key, value) VALUES (?1, ?2)", params![key, value])
                 .expect("inserted");
         }
-        assert_eq!(store.load().ok(), Some(AppSettings::default()));
+        let loaded = store.load().expect("loads");
+        assert_eq!(AppSettings { language: Language::English, ..loaded }, AppSettings::default());
     }
 }

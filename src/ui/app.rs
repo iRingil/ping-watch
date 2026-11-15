@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::alerts::{Condition, Engine, Event, Observe, Rule, WindowStats};
+use crate::i18n::{self, Language, tr, trf, trn};
 use crate::probe::names::NameCache;
 use crate::snapshot::{self, Snapshot};
 use crate::store::alerts::AlertStore;
@@ -123,6 +124,8 @@ pub struct PingWatchApp {
     quit: Arc<AtomicBool>,
     /// The theme choice last applied to the context, `None` before the first frame.
     applied_theme: Option<ThemeChoice>,
+    /// The language last applied to the context and the tray, `None` before the first frame.
+    applied_language: Option<Language>,
     /// Alert rules and journal, `None` if history is off.
     alert_store: Option<AlertStore>,
     /// The alert rules as stored.
@@ -238,6 +241,7 @@ impl PingWatchApp {
             settings_window: SettingsWindow::default(),
             quit,
             applied_theme: None,
+            applied_language: None,
             alert_store,
             alert_rules,
             alert_engine: Engine::default(),
@@ -266,6 +270,7 @@ impl PingWatchApp {
 
     /// Acts on one alert event: the journal, a mark on the target's timeline, a notification if the rule asks.
     fn on_alert(&self, event: Event, now_ms: i64) {
+        let language = self.settings.language;
         let rule_of = |rule_id: i64| self.alert_rules.iter().find(|rule| rule.id == rule_id);
         let mark = |host: &str, text: &str| {
             let target_id =
@@ -282,15 +287,16 @@ impl PingWatchApp {
                 let Some(rule) = rule_of(rule_id) else {
                     return;
                 };
-                let (measured, unit) = measured(&rule.condition, value);
+                let (measured, unit) = measured(&rule.condition, value, language);
+                let what = rule.condition.describe(language);
                 if let Some(journal) = journal
-                    && let Err(error) = journal.start(rule_id, &host, &rule.condition.describe(), now_ms, value, unit)
+                    && let Err(error) = journal.start(rule_id, &host, &what, now_ms, value, unit)
                 {
                     log::warn!("cannot write the alert journal: {error}");
                 }
-                mark(&host, &format!("Alert: {measured} ({})", rule.condition.describe()));
+                mark(&host, &trf!(language, "Alert: {measured} (rule: {rule})", measured = measured, rule = what));
                 if rule.notify {
-                    self.notifier.show(&format!("{host}: {measured}"), &capitalized(&rule.condition.describe()));
+                    self.notifier.show(&format!("{host}: {measured}"), &what);
                 }
             }
             Event::Ended { rule_id, host, started_ms, worst, recovered } => {
@@ -303,24 +309,35 @@ impl PingWatchApp {
                     return;
                 };
                 let seconds = u64::try_from(now_ms.saturating_sub(started_ms) / 1_000).unwrap_or(0);
-                let lasted = crate::alerts::span(Duration::from_secs(seconds.max(1)));
-                let (worst_text, _) = measured(&rule.condition, worst);
-                mark(&host, &format!("Back to normal after {lasted} (worst: {worst_text})"));
+                let lasted = crate::alerts::span(Duration::from_secs(seconds.max(1)), language);
+                let (worst_text, _) = measured(&rule.condition, worst, language);
+                mark(
+                    &host,
+                    &trf!(
+                        language,
+                        "Back to normal after {lasted} (worst: {worst})",
+                        lasted = lasted,
+                        worst = worst_text
+                    ),
+                );
                 if rule.notify_recovery {
-                    self.notifier
-                        .show(&format!("{host} is back to normal"), &format!("Lasted {lasted}, worst: {worst_text}"));
+                    self.notifier.show(
+                        &trf!(language, "{host} is back to normal", host = host),
+                        &trf!(language, "Lasted {lasted}, worst: {worst}", lasted = lasted, worst = worst_text),
+                    );
                 }
             }
             Event::RouteChanged { rule_id, host, change } => {
-                let what = change.describe();
+                let what = change.describe(language);
+                let note = trf!(language, "Route changed: {what}", what = what);
                 if let Some(journal) = journal
-                    && let Err(error) = journal.note(rule_id, &host, &format!("Route changed: {what}"), now_ms)
+                    && let Err(error) = journal.note(rule_id, &host, &note, now_ms)
                 {
                     log::warn!("cannot write the alert journal: {error}");
                 }
-                mark(&host, &format!("Route changed: {what}"));
+                mark(&host, &note);
                 if rule_of(rule_id).is_some_and(|rule| rule.notify) {
-                    self.notifier.show(&format!("{host}: route changed"), &what);
+                    self.notifier.show(&trf!(language, "{host}: route changed", host = host), &what);
                 }
             }
         }
@@ -346,9 +363,10 @@ impl PingWatchApp {
                     }
                     if let Outcome::Newer { version, .. } = outcome {
                         self.update_available = true;
+                        let language = self.settings.language;
                         self.notifier.show(
-                            &format!("Ping Watch {version} is available"),
-                            "Settings → About has the link to download it",
+                            &trf!(language, "Ping Watch {version} is available", version = version),
+                            tr!(language, "Settings → About has the link to download it"),
                         );
                         self.settings_window.set_update_result(result.clone());
                     }
@@ -380,6 +398,7 @@ impl PingWatchApp {
     /// at first) runs on its own thread, so the window keeps drawing while it is open.
     fn save_snapshot(&self) {
         let journal = self.alert_store.as_ref().and_then(|store| store.journal().ok()).unwrap_or_default();
+        let language = self.settings.language;
         let snapshot = match self.page {
             Page::Target(index) => {
                 let Some(report) =
@@ -390,16 +409,22 @@ impl PingWatchApp {
                 };
                 Snapshot::Target(Box::new(report))
             }
-            Page::AllTargets => self.all_targets.snapshot(&self.tabs, self.reader.as_ref(), &self.alerting_hosts()),
+            Page::AllTargets => {
+                self.all_targets.snapshot(&self.tabs, self.reader.as_ref(), &self.alerting_hosts(), language)
+            }
         };
         let now = chrono::Local::now();
-        let html = snapshot::html(&snapshot, &now.format("%d.%m.%Y %H:%M:%S").to_string(), env!("CARGO_PKG_VERSION"));
-        let file_name = snapshot.file_name(&now.format("%Y-%m-%d %H-%M").to_string());
+        let html = snapshot::html(
+            &snapshot,
+            &now.format("%d.%m.%Y %H:%M:%S").to_string(),
+            env!("CARGO_PKG_VERSION"),
+            language,
+        );
+        let file_name = snapshot.file_name(&now.format("%Y-%m-%d %H-%M").to_string(), language);
+        let (title, filter) = (tr!(language, "Save snapshot"), tr!(language, "Web page"));
         let spawned = std::thread::Builder::new().name("snapshot".to_owned()).spawn(move || {
-            let mut dialog = rfd::FileDialog::new()
-                .set_title("Save snapshot")
-                .set_file_name(&file_name)
-                .add_filter("Web page", &["html"]);
+            let mut dialog =
+                rfd::FileDialog::new().set_title(title).set_file_name(&file_name).add_filter(filter, &["html"]);
             if let Some(desktop) = dirs::desktop_dir() {
                 dialog = dialog.set_directory(desktop);
             }
@@ -538,7 +563,7 @@ impl PingWatchApp {
         self.tab_bar_page = self.page;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = TAB_GAP;
-            if tab_widget(ui, self.page == Page::AllTargets, "All targets", false, false).0.clicked() {
+            if tab_widget(ui, self.page == Page::AllTargets, tr!(ui, "All targets"), false, false).0.clicked() {
                 self.page = Page::AllTargets;
             }
             // A tracing tab is labelled like its headings ("address / description"), others by the host entered.
@@ -626,11 +651,13 @@ impl PingWatchApp {
                 }
             }
             let plus = Button::new(RichText::new("+").font(theme::heading_font(16.0))).frame(false);
-            if ui.add_sized([PLUS_WIDTH, TAB_HEIGHT], plus).on_hover_text("New target (Ctrl+N)").clicked() {
+            if ui.add_sized([PLUS_WIDTH, TAB_HEIGHT], plus).on_hover_text(tr!(ui, "New target (Ctrl+N)")).clicked() {
                 new_target = true;
             }
             ui.add_space((ui.available_width() - SNAPSHOT_WIDTH - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 3.0).max(0.0));
-            if bar_button(ui, icons::Icon::Camera, SNAPSHOT_WIDTH, "Save a snapshot of this page (HTML)").clicked() {
+            if bar_button(ui, icons::Icon::Camera, SNAPSHOT_WIDTH, tr!(ui, "Save a snapshot of this page (HTML)"))
+                .clicked()
+            {
                 self.save_snapshot();
             }
             if bell_button(ui, self.alert_engine.active_count()).clicked() {
@@ -678,7 +705,11 @@ fn gear_button(ui: &mut Ui, update_available: bool) -> egui::Response {
         ui.painter()
             .circle_filled(egui::pos2(rect.right() - 6.0, rect.top() + 8.0), 4.0, theme::palette(ui).signal);
     }
-    response.on_hover_text(if update_available { "A new version is available: see About" } else { "Settings and more" })
+    response.on_hover_text(if update_available {
+        tr!(ui, "A new version is available: see About")
+    } else {
+        tr!(ui, "Settings and more")
+    })
 }
 
 /// Width of a tab titled `title`, with a close mark if `closable` and the alert dot if `alert`.
@@ -724,9 +755,8 @@ fn bell_button(ui: &mut Ui, active: usize) -> egui::Response {
         );
     }
     let tooltip = match active {
-        0 => "Alerts".to_owned(),
-        1 => "Alerts: 1 is on now".to_owned(),
-        count => format!("Alerts: {count} are on now"),
+        0 => tr!(ui, "Alerts").to_owned(),
+        count => trn!(ui, u64::try_from(count).unwrap_or(u64::MAX), "Alerts: {n} is on now|Alerts: {n} are on now"),
     };
     response.on_hover_text(tooltip)
 }
@@ -752,7 +782,7 @@ fn scroll_arrow(ui: &mut Ui, left: bool, active: bool) -> bool {
         egui::pos2(center.x + back, center.y + 6.0),
     ];
     painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
-    let tooltip = if left { "Earlier tabs" } else { "Later tabs" };
+    let tooltip = if left { tr!(ui, "Earlier tabs") } else { tr!(ui, "Later tabs") };
     response.on_hover_text(tooltip).clicked()
 }
 
@@ -794,7 +824,9 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool, alert: bool)
             egui::pos2(rect.right() - TAB_PADDING / 2.0 - TAB_CLOSE_WIDTH / 2.0, rect.center().y),
             Vec2::splat(TAB_CLOSE_WIDTH),
         );
-        let close = ui.interact(close_rect, response.id.with("close"), Sense::click()).on_hover_text("Close and stop");
+        let close = ui
+            .interact(close_rect, response.id.with("close"), Sense::click())
+            .on_hover_text(tr!(ui, "Close and stop"));
         let color = if close.hovered() { theme::palette(ui).bad } else { theme::palette(ui).ink_muted };
         ui.painter()
             .text(close_rect.center(), egui::Align2::CENTER_CENTER, "\u{d7}", theme::heading_font(16.0), color);
@@ -885,10 +917,10 @@ impl PingWatchApp {
             }
             let active = self.alert_engine.active_count();
             if active > 0 {
-                status_problem(ui, &if active == 1 { "1 alert on".to_owned() } else { format!("{active} alerts on") });
+                status_problem(ui, &trn!(ui, u64::try_from(active).unwrap_or(u64::MAX), "{n} alert on|{n} alerts on"));
                 ui.separator();
             }
-            status_segment(ui, "Targets", self.tabs.len().to_string());
+            status_segment(ui, tr!(ui, "Targets"), self.tabs.len().to_string());
             let problems: Vec<(String, String)> =
                 self.tabs.iter().filter_map(|tab| tab.problem().map(|problem| (tab.title(), problem))).collect();
             match problems.as_slice() {
@@ -899,7 +931,7 @@ impl PingWatchApp {
                 }
                 more => {
                     ui.separator();
-                    status_problem(ui, &format!("Errors {}", more.len()));
+                    status_problem(ui, &trf!(ui, "Errors {count}", count = more.len()));
                 }
             }
         });
@@ -917,22 +949,26 @@ fn tab_status(ui: &mut Ui, tab: &Tab) {
         ui.weak(&overview.status);
         return;
     };
-    status_segment(ui, "Target", label);
+    status_segment(ui, tr!(ui, "Target"), label);
     let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
     ui.separator();
     let average = stats.and_then(|stats| stats.average());
     status_segment(
         ui,
-        "Avg",
-        average.map_or_else(|| "-".to_owned(), |average| format!("{} ms", format_ms(Some(average)))),
+        tr!(ui, "Avg"),
+        average.map_or_else(|| "-".to_owned(), |average| trf!(ui, "{ms} ms", ms = format_ms(Some(average)))),
     );
     ui.separator();
-    status_segment(ui, "Loss", stats.map_or_else(|| "-".to_owned(), |stats| format!("{:.1} %", stats.loss_percent())));
+    status_segment(
+        ui,
+        tr!(ui, "Loss"),
+        stats.map_or_else(|| "-".to_owned(), |stats| format!("{:.1} %", stats.loss_percent())),
+    );
     ui.separator();
-    status_segment(ui, "Hops", overview.hops.map_or_else(|| "-".to_owned(), |hops| hops.to_string()));
+    status_segment(ui, tr!(ui, "Hops"), overview.hops.map_or_else(|| "-".to_owned(), |hops| hops.to_string()));
     if tab.is_paused() {
         ui.separator();
-        ui.colored_label(theme::palette(ui).warn, "Paused");
+        ui.colored_label(theme::palette(ui).warn, tr!(ui, "Paused"));
     }
 }
 
@@ -994,6 +1030,14 @@ impl eframe::App for PingWatchApp {
         if self.applied_theme != Some(self.settings.theme) {
             self.settings.theme.apply(ctx);
             self.applied_theme = Some(self.settings.theme);
+        }
+        if self.applied_language != Some(self.settings.language) {
+            let language = self.settings.language;
+            i18n::set(ctx, language);
+            if let Some(tray) = &self.tray {
+                tray.set_labels(tr!(language, "Show Ping Watch"), tr!(language, "Exit"));
+            }
+            self.applied_language = Some(language);
         }
         self.hide_instead_of_closing(ctx);
         self.track_window(ctx);
@@ -1114,17 +1158,12 @@ impl Observe for Watched<'_> {
 
 /// A measured value of `condition` for people, with its unit: "loss 23 %", "average latency 180 ms",
 /// "no answer for 30 seconds".
-fn measured(condition: &Condition, value: f64) -> (String, &'static str) {
+fn measured(condition: &Condition, value: f64, language: Language) -> (String, &'static str) {
+    let value = format!("{value:.0}");
     match condition {
-        Condition::Loss { .. } => (format!("loss {value:.0} %"), "%"),
-        Condition::Latency { .. } => (format!("average latency {value:.0} ms"), "ms"),
-        Condition::Unreachable { .. } => (format!("no answer for {value:.0} s"), "s"),
+        Condition::Loss { .. } => (trf!(language, "Loss {value} %", value = value), "%"),
+        Condition::Latency { .. } => (trf!(language, "Average latency {value} ms", value = value), "ms"),
+        Condition::Unreachable { .. } => (trf!(language, "No answer for {value} s", value = value), "s"),
         Condition::RouteChanged => (String::new(), ""),
     }
-}
-
-/// `text` with a capital first letter.
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }

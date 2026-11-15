@@ -34,6 +34,10 @@ pub enum TrayError {
 pub struct Tray {
     /// Keeps the icon in the tray.
     _icon: TrayIcon,
+    /// The menu's "Show" item, relabelled when the language changes.
+    show: MenuItem,
+    /// The menu's "Exit" item.
+    exit: MenuItem,
     /// Commands from the icon and its menu, sent by the event handlers.
     commands: Receiver<TrayCommand>,
 }
@@ -83,7 +87,13 @@ impl Tray {
                 forward(&sender, &menu_ctx, TrayCommand::Exit);
             }
         }));
-        Ok(Self { _icon: tray, commands })
+        Ok(Self { _icon: tray, show, exit, commands })
+    }
+
+    /// Relabels the menu (after a language change).
+    pub fn set_labels(&self, show: &str, exit: &str) {
+        self.show.set_text(show);
+        self.exit.set_text(exit);
     }
 
     /// The next command from the tray, if any.

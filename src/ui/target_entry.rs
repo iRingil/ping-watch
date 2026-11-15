@@ -6,6 +6,7 @@ use eframe::egui::{
     Ui, pos2,
 };
 
+use crate::i18n::{tr, trf};
 use crate::store::targets::{Family, SavedTarget, TargetList};
 use crate::ui::icons::{self, Icon};
 use crate::ui::theme;
@@ -58,7 +59,7 @@ impl TargetEntry {
     pub fn show(&mut self, ui: &mut Ui, targets: Option<&TargetList>, enabled: bool) -> bool {
         // Room on the right of the field for the arrow that opens the target list.
         let field = TextEdit::singleline(&mut self.text)
-            .hint_text("Enter target name or IP")
+            .hint_text(tr!(ui, "Enter target name or IP"))
             .desired_width(ENTRY_WIDTH)
             .margin(Margin { left: 6, right: ARROW_WIDTH as i8, top: 3, bottom: 3 });
         let input = ui.add_enabled(enabled, field);
@@ -105,12 +106,15 @@ impl TargetEntry {
         let all = match targets.all() {
             Ok(all) => all,
             Err(error) => {
-                ui.colored_label(theme::palette(ui).bad, format!("Cannot read the target list: {error}"));
+                ui.colored_label(
+                    theme::palette(ui).bad,
+                    trf!(ui, "Cannot read the target list: {error}", error = error),
+                );
                 return None;
             }
         };
         if all.is_empty() {
-            ui.weak("No saved targets. Every target you trace is added here.");
+            ui.weak(tr!(ui, "No saved targets. Every target you trace is added here."));
             return None;
         }
         let mut picked = None;
@@ -140,14 +144,16 @@ impl TargetEntry {
         let mut close = false;
         egui::Modal::new(egui::Id::unique("edit-target")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.label(RichText::new("Edit target").font(theme::heading_font(17.0)));
+            ui.label(RichText::new(tr!(ui, "Edit target")).font(theme::heading_font(17.0)));
             ui.add_space(6.0);
             egui::Grid::new("edit-target-fields").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                ui.weak("Address");
+                ui.weak(tr!(ui, "Address"));
                 ui.add(TextEdit::singleline(&mut draft.address).desired_width(f32::INFINITY));
                 ui.end_row();
-                ui.weak("Name");
-                ui.add(TextEdit::singleline(&mut draft.name).hint_text("optional").desired_width(f32::INFINITY));
+                ui.weak(tr!(ui, "Name"));
+                ui.add(
+                    TextEdit::singleline(&mut draft.name).hint_text(tr!(ui, "optional")).desired_width(f32::INFINITY),
+                );
                 ui.end_row();
             });
             if let Some(error) = &draft.error {
@@ -156,13 +162,13 @@ impl TargetEntry {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let can_save = !draft.address.trim().is_empty();
-                if ui.add_enabled(can_save, primary_button(ui, "Save")).clicked() {
+                if ui.add_enabled(can_save, primary_button(ui, tr!(ui, "Save"))).clicked() {
                     match targets.update(draft.id, &draft.address, &draft.name) {
                         Ok(()) => close = true,
-                        Err(error) => draft.error = Some(format!("Not saved: {error}")),
+                        Err(error) => draft.error = Some(trf!(ui, "Not saved: {error}", error = error)),
                     }
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr!(ui, "Cancel")).clicked() {
                     close = true;
                 }
             });

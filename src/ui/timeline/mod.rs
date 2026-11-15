@@ -17,6 +17,7 @@ use egui_plot::{
 use self::fetch::{Fetched, Fetcher, Request};
 use self::series::millis_of;
 pub use self::series::{Period, Series, Trace, Window, clock, seconds, time_marks, value_marks};
+use crate::i18n::{self, Lang, Language, tr, trf};
 use crate::store::history::{self, Comment, HopKey};
 use crate::ui::latency_bars::{GOOD_MS, WARN_MS};
 use crate::ui::theme;
@@ -142,18 +143,18 @@ impl Timeline {
         let now_ms = history::unix_ms(SystemTime::now());
         self.header(ui, title, now_ms);
         let (Some(path), Some(target_id)) = (history_path, target_id) else {
-            ui.label("History is off, so there is nothing to chart.");
+            ui.label(tr!(ui, "History is off, so there is nothing to chart."));
             return;
         };
         let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
-        if let Some(error) = self.sync(path, target_id, hop, now_ms, interval_ms) {
+        if let Some(error) = self.sync(path, (target_id, hop), now_ms, interval_ms, ui.language()) {
             ui.colored_label(theme::palette(ui).bad, error);
             return;
         }
         let Some(shown) = &self.shown else {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Loading history…");
+                ui.label(tr!(ui, "Loading history…"));
             });
             return;
         };
@@ -178,15 +179,15 @@ impl Timeline {
             ui.label(RichText::new(title).font(theme::heading_font(15.0)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 egui::ComboBox::from_id_salt("timeline-period")
-                    .selected_text(self.period.label())
+                    .selected_text(self.period.label(ui.language()))
                     .show_ui(ui, |ui| {
                         for period in Period::ALL {
-                            ui.selectable_value(&mut self.period, period, period.label());
+                            ui.selectable_value(&mut self.period, period, period.label(ui.language()));
                         }
                     });
                 let (from, to) = self.visible_range(now_ms);
                 ui.label(format!("({} - {})", clock(from, "%H:%M:%S"), clock(to, "%H:%M:%S")));
-                if self.end_ms.is_some() && ui.small_button("Reset Focus to Current").clicked() {
+                if self.end_ms.is_some() && ui.small_button(tr!(ui, "Reset focus to current")).clicked() {
                     self.end_ms = None;
                 }
             });
@@ -195,11 +196,21 @@ impl Timeline {
 
     /// Takes arrived answers and queries again when the data on screen no longer fits. Returns an error to show
     /// instead of the chart.
-    fn sync(&mut self, path: &Path, target_id: i64, hop: HopKey, now_ms: i64, interval_ms: i64) -> Option<String> {
+    fn sync(
+        &mut self,
+        path: &Path,
+        request: (i64, HopKey),
+        now_ms: i64,
+        interval_ms: i64,
+        language: Language,
+    ) -> Option<String> {
+        let (target_id, hop) = request;
         if self.fetcher.is_none() && self.fetcher_error.is_none() {
             match Fetcher::start(path) {
                 Ok(fetcher) => self.fetcher = Some(fetcher),
-                Err(error) => self.fetcher_error = Some(format!("cannot read history: {error}")),
+                Err(error) => {
+                    self.fetcher_error = Some(trf!(language, "Cannot read the history: {error}", error = error))
+                }
             }
         }
         let Some(fetcher) = &self.fetcher else {
@@ -245,16 +256,16 @@ impl Timeline {
                 ui.separator();
             }
             for period in Period::ALL {
-                if ui.selectable_label(self.period == period, period.label()).clicked() {
+                if ui.selectable_label(self.period == period, period.label(ui.language())).clicked() {
                     choice = Some(MenuChoice::Period(period));
                 }
             }
             ui.separator();
-            if ui.add_enabled(self.end_ms.is_some(), Button::new("Reset Focus to Current")).clicked() {
+            if ui.add_enabled(self.end_ms.is_some(), Button::new(tr!(ui, "Reset focus to current"))).clicked() {
                 choice = Some(MenuChoice::ResetFocus);
             }
             if let Some(at_ms) = self.menu_at_ms
-                && ui.button("Create Comment").clicked()
+                && ui.button(tr!(ui, "Create comment")).clicked()
             {
                 choice = Some(MenuChoice::Comment(at_ms));
             }
@@ -284,7 +295,9 @@ impl Timeline {
         let mut end_s = seconds(self.end_ms.unwrap_or(now_ms));
         ui.spacing_mut().slider_width = ui.available_width();
         let slider = Slider::new(&mut end_s, seconds(range_start)..=seconds(now_ms)).show_value(false);
-        let response = ui.add_enabled(scrollable, slider).on_disabled_hover_text("The whole history fits on the chart");
+        let response = ui
+            .add_enabled(scrollable, slider)
+            .on_disabled_hover_text(tr!(ui, "The whole history fits on the chart"));
         if response.changed() {
             let end_ms = millis_of(end_s);
             // Dropped close to the right end: follow the current time again.
@@ -299,19 +312,19 @@ impl Timeline {
         };
         let mut done = false;
         let mut save = false;
-        egui::Window::new("Create Comment")
+        egui::Window::new(tr!(ctx, "Create comment"))
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(format!("Comment at {}", clock(draft.ts_ms, "%d.%m %H:%M:%S")));
-                ui.add(TextEdit::multiline(&mut draft.text).desired_rows(3).hint_text("What happened?"));
+                ui.label(trf!(ui, "Comment at {time}", time = clock(draft.ts_ms, "%d.%m %H:%M:%S")));
+                ui.add(TextEdit::multiline(&mut draft.text).desired_rows(3).hint_text(tr!(ui, "What happened?")));
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!draft.text.trim().is_empty(), Button::new("Save")).clicked() {
+                    if ui.add_enabled(!draft.text.trim().is_empty(), Button::new(tr!(ui, "Save"))).clicked() {
                         save = true;
                         done = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr!(ui, "Cancel")).clicked() {
                         done = true;
                     }
                 });
@@ -374,6 +387,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
         }
     };
 
+    let language = ui.language();
     let jitter = &shown.series.jitter;
     if !compact {
         base("timeline-jitter", jitter.scale_ms, JITTER_HEIGHT).show_x(false).show_axes([false, true]).show(
@@ -382,11 +396,11 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
                 plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
                 grid(plot, jitter.scale_ms, JITTER_HEIGHT);
                 plot.add(
-                    Text::new("", PlotPoint::new(from_s, jitter.scale_ms), "Jitter (ms)")
+                    Text::new("", PlotPoint::new(from_s, jitter.scale_ms), tr!(language, "Jitter (ms)"))
                         .anchor(Align2::LEFT_TOP)
                         .color(palette.jitter),
                 );
-                add_trace(plot, "Jitter", jitter, palette.jitter);
+                add_trace(plot, tr!(language, "Jitter"), jitter, palette.jitter);
             },
         );
         // Room between the plots, so the jitter strip's "0" and the latency scale's top label don't overlap.
@@ -421,11 +435,11 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
             grid(plot, scale, height);
             // Titled inside, like the jitter strip, so both charts share one y-axis width and line up.
             plot.add(
-                Text::new("", PlotPoint::new(from_s, scale), "Latency (ms)")
+                Text::new("", PlotPoint::new(from_s, scale), tr!(language, "Latency (ms)"))
                     .anchor(Align2::LEFT_TOP)
                     .color(palette.ink_muted),
             );
-            add_trace(plot, "Latency", latency, palette.ink);
+            add_trace(plot, tr!(language, "Latency"), latency, palette.ink);
             // Loss hangs from the top of the chart: a fully lost bucket is a red bar of full height.
             let bars = shown
                 .series
@@ -435,7 +449,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
                     Bar::new(x, -percent / 100.0 * scale).base_offset(scale).width(bucket_s).fill(palette.loss)
                 })
                 .collect();
-            plot.bar_chart(BarChart::new("Packet loss", bars).color(palette.loss));
+            plot.bar_chart(BarChart::new(tr!(language, "Packet loss"), bars).color(palette.loss));
             for comment in &shown.comments {
                 let x = seconds(comment.ts_ms);
                 plot.vline(VLine::new(&comment.text, x).color(palette.comment).style(LineStyle::dashed_dense()));
@@ -452,12 +466,14 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
 
 /// Adds a trace's line segments and its clipped-spike markers to `plot`.
 fn add_trace(plot: &mut egui_plot::PlotUi<'_>, name: &str, trace: &Trace, color: Color32) {
+    let language = i18n::get(plot.ctx());
     for segment in &trace.segments {
         // Steps repeat x at every riser; without `allow_band(false)` egui_plot fills those as a min–max band.
         plot.line(Line::new(name, PlotPoints::from(segment.clone())).color(color).width(1.0).allow_band(false));
     }
     if !trace.clipped.is_empty() {
-        let points = Points::new(format!("{name} above scale"), PlotPoints::from(trace.clipped.clone()));
+        let points =
+            Points::new(trf!(language, "{name} above scale", name = name), PlotPoints::from(trace.clipped.clone()));
         plot.points(points.shape(MarkerShape::Up).radius(4.0).filled(true).color(color));
     }
 }

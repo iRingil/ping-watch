@@ -1,5 +1,6 @@
 //! Focus: the period the hop table and the latency bars summarize, as in PingPlotter.
 
+use crate::i18n::{Language, n};
 use crate::probe::route::{RECENT_WINDOW, millis};
 
 /// Period whose probes the hop table and latency bars summarize.
@@ -39,17 +40,17 @@ impl Focus {
     ];
 
     /// Menu label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Seconds5 => "5 seconds",
-            Self::Seconds30 => "30 seconds",
-            Self::Seconds60 => "60 seconds",
-            Self::Minutes5 => "5 minutes",
-            Self::Minutes30 => "30 minutes",
-            Self::Minutes60 => "60 minutes",
-            Self::All => "All",
-            Self::Auto => "Auto",
-        }
+    pub fn label(self, language: Language) -> &'static str {
+        language.translate(match self {
+            Self::Seconds5 => n!("5 seconds"),
+            Self::Seconds30 => n!("30 seconds"),
+            Self::Seconds60 => n!("60 seconds"),
+            Self::Minutes5 => n!("5 minutes"),
+            Self::Minutes30 => n!("30 minutes"),
+            Self::Minutes60 => n!("60 minutes"),
+            Self::All => n!("All"),
+            Self::Auto => n!("Auto"),
+        })
     }
 
     /// Stable key for storing the choice.

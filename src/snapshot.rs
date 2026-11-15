@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use eframe::egui::Color32;
 
 use crate::APP_NAME;
+use crate::i18n::{Language, n, tr, trf};
 use crate::ui::theme::LIGHT;
 use crate::ui::timeline::{Period, Series, Trace, clock, seconds, time_marks, value_marks};
 
@@ -104,6 +105,8 @@ pub struct SummaryRow {
     pub address: String,
     /// State: running, paused, alert…
     pub status: String,
+    /// An alert is on for the target (the status is drawn in red).
+    pub alert: bool,
     /// Hops to the target.
     pub hops: Option<usize>,
     /// The target hop's numbers (avg, min, max, cur, jitter unused, loss).
@@ -128,46 +131,42 @@ pub enum Snapshot {
 
 impl Snapshot {
     /// The suggested file name: "Ping Watch 2026-11-15 15-30 OpenDNS.html" (`stamp` is the date and time part).
-    pub fn file_name(&self, stamp: &str) -> String {
+    pub fn file_name(&self, stamp: &str, language: Language) -> String {
         let what = match self {
             Self::Target(report) => report.label.rsplit(" / ").next().unwrap_or(&report.label).to_owned(),
-            Self::AllTargets { .. } => "All targets".to_owned(),
+            Self::AllTargets { .. } => tr!(language, "All targets").to_owned(),
         };
         let safe: String = what.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '-' } else { c }).collect();
         format!("{APP_NAME} {stamp} {safe}.html")
     }
 }
 
-/// The page of `snapshot`, taken at `taken` (local time as shown).
-pub fn html(snapshot: &Snapshot, taken: &str, version: &str) -> String {
+/// The page of `snapshot`, taken at `taken` (local time as shown), in `language`.
+pub fn html(snapshot: &Snapshot, taken: &str, version: &str, language: Language) -> String {
     let title = match snapshot {
         Snapshot::Target(report) => report.label.clone(),
-        Snapshot::AllTargets { .. } => "All targets".to_owned(),
+        Snapshot::AllTargets { .. } => tr!(language, "All targets").to_owned(),
     };
     let mut page = String::new();
-    write_head(&mut page, &title);
+    write_head(&mut page, &title, language);
     // The first section's heading on the left, the title and when the snapshot was taken on the right, in one row.
-    let header = format!(
-        "<header><h1>{}</h1><p class=\"meta\">{} {} · snapshot of {}</p></header>",
-        escape(&title),
-        APP_NAME,
-        escape(version),
-        escape(taken)
-    );
+    let meta =
+        trf!(language, "{app} {version} · snapshot of {taken}", app = APP_NAME, version = version, taken = taken);
+    let header = format!("<header><h1>{}</h1><p class=\"meta\">{}</p></header>", escape(&title), escape(&meta));
     match snapshot {
-        Snapshot::Target(report) => write_target(&mut page, &header, report),
-        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, &header, focus, rows, charts),
+        Snapshot::Target(report) => write_target(&mut page, &header, report, language),
+        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, &header, focus, rows, charts, language),
     }
     page.push_str("</body></html>\n");
     page
 }
 
 /// The document head with the light palette's styles.
-fn write_head(page: &mut String, title: &str) {
+fn write_head(page: &mut String, title: &str, language: Language) {
     let p = &LIGHT;
     let _ = write!(
         page,
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+        "<!doctype html><html lang=\"{lang}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>{title} · {APP_NAME}</title><style>\
 :root{{color-scheme:light}}\
 body{{margin:24px;background:{bg};color:{ink};font:14px/1.45 \"Segoe UI\",system-ui,sans-serif}}\
@@ -183,6 +182,7 @@ svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top
 @media print{{body{{margin:0}}table,.chart{{break-inside:avoid}}}}\
 </style></head><body>",
         title = escape(title),
+        lang = language.key(),
         bg = hex(p.chassis),
         ink = hex(p.ink),
         muted = hex(p.ink_muted),
@@ -195,18 +195,22 @@ svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top
 }
 
 /// The page of a target: table, chart, alerts.
-fn write_target(page: &mut String, header: &str, report: &TargetReport) {
+fn write_target(page: &mut String, header: &str, report: &TargetReport, language: Language) {
     let _ = write!(
         page,
-        "<div class=\"top\"><div><h2>Route</h2><p class=\"muted\">Focus {}</p></div>{header}</div>",
-        escape(&report.focus)
+        "<div class=\"top\"><div><h2>{}</h2><p class=\"muted\">{}</p></div>{header}</div>",
+        tr!(language, "Route"),
+        escape(&trf!(language, "Focus {range}", range = report.focus))
     );
     let scale = bar_scale(report.hops.iter().filter_map(|hop| hop.avg));
-    page.push_str("<table><tr><th class=\"num\">Hop</th><th class=\"num\">Count</th><th>IP</th><th>Name</th>");
-    for title in ["Avg", "Min", "Max", "Cur", "Jitter", "PL%"] {
-        let _ = write!(page, "<th class=\"num\">{title}</th>");
-    }
-    let _ = write!(page, "<th>Latency (0–{scale:.0} ms)</th></tr>");
+    let _ = write!(
+        page,
+        "<table><tr><th class=\"num\">{}</th><th class=\"num\">{}</th><th>IP</th><th>{}</th>",
+        tr!(language, "Hop"),
+        tr!(language, "Count"),
+        tr!(language, "Name")
+    );
+    write_number_titles(page, scale, language);
     for hop in &report.hops {
         let lost = hop.address.is_none();
         let _ = write!(
@@ -216,20 +220,28 @@ fn write_target(page: &mut String, header: &str, report: &TargetReport) {
             hop.ttl,
             hop.sent,
             escape(hop.address.as_deref().unwrap_or("*")),
-            escape(hop.name.as_deref().unwrap_or(if lost { "No response" } else { "" })),
+            escape(hop.name.as_deref().unwrap_or(if lost { tr!(language, "No response") } else { "" })),
         );
         write_numbers(page, hop);
         let _ = write!(page, "<td>{}</td></tr>", latency_bar(hop, scale));
     }
     page.push_str("</table>");
     if let Some(chart) = &report.chart {
-        let _ = write!(page, "<h3>Latency and loss of the target</h3>{}", chart_svg(chart));
+        let _ =
+            write!(page, "<h3>{}</h3>{}", tr!(language, "Latency and loss of the target"), chart_svg(chart, language));
     }
-    page.push_str("<h2>Alerts in this period</h2>");
+    let _ = write!(page, "<h2>{}</h2>", tr!(language, "Alerts in this period"));
     if report.alerts.is_empty() {
-        page.push_str("<p class=\"muted\">None.</p>");
+        let _ = write!(page, "<p class=\"muted\">{}</p>", tr!(language, "None."));
     } else {
-        page.push_str("<table><tr><th>Started</th><th>What</th><th>Lasted</th><th>Worst</th></tr>");
+        let _ = write!(
+            page,
+            "<table><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>",
+            tr!(language, "Started"),
+            tr!(language, "What"),
+            tr!(language, "Lasted"),
+            tr!(language, "Worst")
+        );
         for alert in &report.alerts {
             let _ = write!(
                 page,
@@ -245,20 +257,31 @@ fn write_target(page: &mut String, header: &str, report: &TargetReport) {
 }
 
 /// The page of All targets: table and the ticked charts.
-fn write_all(page: &mut String, header: &str, focus: &str, rows: &[SummaryRow], charts: &[(String, Chart)]) {
+fn write_all(
+    page: &mut String,
+    header: &str,
+    focus: &str,
+    rows: &[SummaryRow],
+    charts: &[(String, Chart)],
+    language: Language,
+) {
     let _ = write!(
         page,
-        "<div class=\"top\"><div><h2>Targets</h2><p class=\"muted\">Focus {}</p></div>{header}</div>",
-        escape(focus)
+        "<div class=\"top\"><div><h2>{}</h2><p class=\"muted\">{}</p></div>{header}</div>",
+        tr!(language, "Targets"),
+        escape(&trf!(language, "Focus {range}", range = focus))
     );
     let scale = bar_scale(rows.iter().filter_map(|row| row.numbers.as_ref().and_then(|hop| hop.avg)));
-    page.push_str("<table><tr><th>Status</th><th>Target</th><th>IP</th><th class=\"num\">Hops</th>");
-    for title in ["Avg", "Min", "Max", "Cur", "Jitter", "PL%"] {
-        let _ = write!(page, "<th class=\"num\">{title}</th>");
-    }
-    let _ = write!(page, "<th>Latency (0–{scale:.0} ms)</th></tr>");
+    let _ = write!(
+        page,
+        "<table><tr><th>{}</th><th>{}</th><th>IP</th><th class=\"num\">{}</th>",
+        tr!(language, "Status"),
+        tr!(language, "Target"),
+        tr!(language, "Hops")
+    );
+    write_number_titles(page, scale, language);
     for row in rows {
-        let status_class = if row.status == "alert" { " class=\"bad\"" } else { "" };
+        let status_class = if row.alert { " class=\"bad\"" } else { "" };
         let _ = write!(
             page,
             "<tr><td{status_class}>{}</td><td>{}</td><td>{}</td><td class=\"num\">{}</td>",
@@ -278,8 +301,17 @@ fn write_all(page: &mut String, header: &str, focus: &str, rows: &[SummaryRow], 
     }
     page.push_str("</table>");
     for (label, chart) in charts {
-        let _ = write!(page, "<h2>{}</h2>{}", escape(label), chart_svg(chart));
+        let _ = write!(page, "<h2>{}</h2>{}", escape(label), chart_svg(chart, language));
     }
+}
+
+/// The titles of the number columns and the latency bar column (its scale `0–scale ms`), closing the header row.
+fn write_number_titles(page: &mut String, scale: f64, language: Language) {
+    for title in [n!("Avg"), n!("Min"), n!("Max"), n!("Cur"), n!("Jitter"), n!("PL%")] {
+        let _ = write!(page, "<th class=\"num\">{}</th>", language.translate(title));
+    }
+    let latency = trf!(language, "Latency (0\u{2013}{scale} ms)", scale = format!("{scale:.0}"));
+    let _ = write!(page, "<th>{}</th></tr>", escape(&latency));
 }
 
 /// The Avg, Min, Max, Cur, Jitter and PL% cells of a hop.
@@ -370,7 +402,7 @@ fn latency_bar(hop: &HopRow, scale: f64) -> String {
 /// A chart as the window draws it: the jitter strip, then the latency steps over the zones (from the first sample
 /// on), loss hanging from the top, a grid over everything on round values and local times, marks as dashed lines
 /// with their text on hover.
-fn chart_svg(chart: &Chart) -> String {
+fn chart_svg(chart: &Chart, language: Language) -> String {
     let p = &LIGHT;
     let (width, left) = (CHART.0, CHART.2);
     let plot_w = width - left;
@@ -387,18 +419,20 @@ fn chart_svg(chart: &Chart) -> String {
     plot(&mut svg, &series.jitter, jitter_top, JITTER_HEIGHT, false, &x, chart, utc_offset_s);
     let _ = write!(
         svg,
-        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">Jitter (ms)</text>",
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">{}</text>",
         left + 4.0,
         jitter_top + 11.0,
-        hex(p.jitter)
+        hex(p.jitter),
+        tr!(language, "Jitter (ms)")
     );
     plot(&mut svg, &series.latency, latency_top, latency_h, true, &x, chart, utc_offset_s);
     let _ = write!(
         svg,
-        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">Latency (ms)</text>",
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">{}</text>",
         left + 4.0,
         latency_top + 11.0,
-        hex(p.ink_muted)
+        hex(p.ink_muted),
+        tr!(language, "Latency (ms)")
     );
     for (value, step) in time_marks(from_s, to_s, utc_offset_s) {
         let label = clock(timeline_millis(value), chart.period.axis_format(step));
@@ -604,11 +638,14 @@ mod tests {
             alerts: Vec::new(),
         };
         assert_eq!(
-            Snapshot::Target(Box::new(report)).file_name("2026-11-15 15-30"),
+            Snapshot::Target(Box::new(report)).file_name("2026-11-15 15-30", Language::English),
             "Ping Watch 2026-11-15 15-30 a-b-c.html"
         );
         let all = Snapshot::AllTargets { focus: String::new(), rows: Vec::new(), charts: Vec::new() };
-        assert_eq!(all.file_name("2026-11-15 15-30"), "Ping Watch 2026-11-15 15-30 All targets.html");
+        assert_eq!(
+            all.file_name("2026-11-15 15-30", Language::English),
+            "Ping Watch 2026-11-15 15-30 All targets.html"
+        );
     }
 
     #[test]
@@ -644,7 +681,7 @@ mod tests {
                 worst: "23 %".to_owned(),
             }],
         };
-        let page = html(&Snapshot::Target(Box::new(report)), "15.11.2026 15:10", "1.0.0");
+        let page = html(&Snapshot::Target(Box::new(report)), "15.11.2026 15:10", "1.0.0", Language::English);
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("1.1.1.1 / Cloudflare"));
         assert!(page.contains("10.0.0.2"));

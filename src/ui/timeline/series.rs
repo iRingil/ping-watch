@@ -1,6 +1,7 @@
 //! Pure chart computations of the timeline: periods, the queried window, chart series with a smoothed scale, and
 //! time axis marks.
 
+use crate::i18n::{Language, n};
 use crate::store::history::Bucket;
 use crate::ui::latency_bars::millis;
 
@@ -104,20 +105,20 @@ impl Period {
     }
 
     /// Menu label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Minute => "60 seconds",
-            Self::Minutes5 => "5 minutes",
-            Self::Minutes10 => "10 minutes",
-            Self::Minutes30 => "30 minutes",
-            Self::Hour => "60 minutes",
-            Self::Hours3 => "3 hours",
-            Self::Hours6 => "6 hours",
-            Self::Hours12 => "12 hours",
-            Self::Day => "24 hours",
-            Self::Days2 => "48 hours",
-            Self::Days7 => "7 days",
-        }
+    pub fn label(self, language: Language) -> &'static str {
+        language.translate(match self {
+            Self::Minute => n!("60 seconds"),
+            Self::Minutes5 => n!("5 minutes"),
+            Self::Minutes10 => n!("10 minutes"),
+            Self::Minutes30 => n!("30 minutes"),
+            Self::Hour => n!("60 minutes"),
+            Self::Hours3 => n!("3 hours"),
+            Self::Hours6 => n!("6 hours"),
+            Self::Hours12 => n!("12 hours"),
+            Self::Day => n!("24 hours"),
+            Self::Days2 => n!("48 hours"),
+            Self::Days7 => n!("7 days"),
+        })
     }
 
     /// `strftime` format of a time axis label for marks `step_s` apart: seconds only when the marks fall between
