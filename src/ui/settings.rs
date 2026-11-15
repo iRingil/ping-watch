@@ -445,7 +445,7 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
         ui.hyperlink_to("PolyForm Noncommercial 1.0.0", LICENSE_URL);
         ui.end_row();
         ui.weak("Font");
-        ui.label("Barlow, © The Barlow Project Authors, SIL Open Font License 1.1");
+        ui.label("Roboto Condensed, © The Roboto Project Authors, SIL Open Font License 1.1");
         ui.end_row();
     });
 }

@@ -1,5 +1,5 @@
-//! The look of the app: an instrument panel set in Barlow (a grotesk in the spirit of DIN road signs, SIL Open Font
-//! License, embedded in the binary), in two palettes — dark (graphite slate with warm "paper" ink) and light (the
+//! The look of the app: an instrument panel set in Roboto Condensed (a narrow grotesk with full Cyrillic, SIL Open
+//! Font License, embedded in the binary), in two palettes — dark (graphite slate with warm "paper" ink) and light (the
 //! same panel in daylight: pale cool slate with graphite ink). Latency zones are the only saturated colors, so
 //! jade / ochre / rose always mean "fine / slow / bad"; the signal blue marks what the user selected or focused.
 
@@ -197,9 +197,9 @@ impl ThemeChoice {
 }
 
 /// Text face, embedded so the app looks the same on any machine (license: `assets/fonts/OFL.txt`).
-const BARLOW_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Barlow-Regular.ttf");
+const TEXT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/RobotoCondensed-Regular.ttf");
 /// Heavier face for headings.
-const BARLOW_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Barlow-Medium.ttf");
+const TEXT_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/RobotoCondensed-Medium.ttf");
 /// Font family of headings and other emphasized labels.
 const HEADING_FAMILY: &str = "heading";
 
@@ -263,15 +263,15 @@ fn style_with(style: &mut egui::Style, palette: &Palette) {
     }
 }
 
-/// Puts Barlow first in the proportional family and makes Barlow Medium the heading family; egui's own fonts stay
-/// as fallback for glyphs Barlow lacks (Cyrillic, symbols).
+/// Puts Roboto Condensed first in the proportional family and makes its Medium the heading family; egui's own fonts
+/// stay as fallback for glyphs it lacks (symbols).
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert("barlow".to_owned(), Arc::new(FontData::from_static(BARLOW_REGULAR)));
-    fonts.font_data.insert("barlow-medium".to_owned(), Arc::new(FontData::from_static(BARLOW_MEDIUM)));
+    fonts.font_data.insert("text".to_owned(), Arc::new(FontData::from_static(TEXT_REGULAR)));
+    fonts.font_data.insert("text-medium".to_owned(), Arc::new(FontData::from_static(TEXT_MEDIUM)));
     let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "barlow".to_owned());
-    let heading = std::iter::once("barlow-medium".to_owned()).chain(fallback).collect();
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "text".to_owned());
+    let heading = std::iter::once("text-medium".to_owned()).chain(fallback).collect();
     fonts.families.insert(FontFamily::Name(HEADING_FAMILY.into()), heading);
     ctx.set_fonts(fonts);
 }

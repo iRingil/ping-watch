@@ -157,5 +157,5 @@ for any noncommercial purpose. It is built with these third-party components:
 - [ureq](https://github.com/algesten/ureq), [serde_json](https://github.com/serde-rs/json): MIT or Apache-2.0
 - [anyhow, thiserror](https://github.com/dtolnay), [log, env_logger](https://github.com/rust-lang/log):
   MIT or Apache-2.0
-- [Barlow](https://github.com/jpt/barlow) font: SIL Open Font License 1.1
+- [Roboto Condensed](https://github.com/googlefonts/roboto-classic) font: SIL Open Font License 1.1
 - [Rust](https://www.rust-lang.org) standard library: MIT or Apache-2.0
