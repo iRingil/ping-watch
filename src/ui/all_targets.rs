@@ -107,7 +107,7 @@ impl AllTargets {
         targets: Option<&TargetList>,
         history_path: Option<&Path>,
     ) -> Option<Request> {
-        let toolbar_frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::symmetric(10, 8));
+        let toolbar_frame = Frame::new().fill(theme::palette(ui).chassis).inner_margin(Margin::symmetric(10, 8));
         let mut request = egui::Panel::top("all-targets-toolbar")
             .frame(toolbar_frame)
             .show(ui, |ui| self.toolbar(ui, tabs, targets))
@@ -214,12 +214,14 @@ impl AllTargets {
                             if ui.checkbox(&mut ticked, "").on_hover_text("Show the chart below").changed() {
                                 toggle = Some(index);
                             }
-                            ui.label(RichText::new(&overview.status).color(theme::INK_MUTED));
+                            ui.label(RichText::new(&overview.status).color(theme::palette(ui).ink_muted));
                         });
                         row.col(|ui| {
                             ui.add_space(4.0);
                             let link = egui::Link::new(
-                                RichText::new(&overview.title).font(theme::heading_font(15.0)).color(theme::SIGNAL),
+                                RichText::new(&overview.title)
+                                    .font(theme::heading_font(15.0))
+                                    .color(theme::palette(ui).signal),
                             );
                             if ui.add(link).on_hover_text("Open its tab").clicked() {
                                 request = Some(Request::Open(index));

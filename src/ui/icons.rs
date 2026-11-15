@@ -115,7 +115,7 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
             // The Union Jack, simplified to read at 20 x 12 points: blue field, white and red saltires, white and
             // red crosses. Drawn in its own colors; `color` only dims it for an unselected choice.
             let flag = Rect::from_center_size(c, vec2(20.0, 12.0));
-            let dim = |rgb: Color32| if color == theme::INK { rgb } else { rgb.gamma_multiply(0.6) };
+            let dim = |rgb: Color32| if color == theme::palette(ui).ink { rgb } else { rgb.gamma_multiply(0.6) };
             let mut clipped = painter.clone();
             clipped.set_clip_rect(flag);
             clipped.rect_filled(flag, 0.0, dim(Color32::from_rgb(0x01, 0x21, 0x69)));
@@ -136,10 +136,13 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
 fn colors(ui: &Ui, style: Style, hovered: bool) -> (Color32, Color32) {
     let widgets = &ui.visuals().widgets;
     match style {
-        Style::Primary => (if hovered { theme::SIGNAL_HOVER } else { theme::SIGNAL }, theme::CHASSIS),
+        Style::Primary => (
+            if hovered { theme::palette(ui).signal_hover } else { theme::palette(ui).signal },
+            theme::palette(ui).on_signal,
+        ),
         Style::Normal => {
             let fill = if hovered { widgets.hovered.weak_bg_fill } else { widgets.inactive.weak_bg_fill };
-            (fill, theme::INK)
+            (fill, theme::palette(ui).ink)
         }
     }
 }
@@ -149,7 +152,7 @@ pub fn button(ui: &mut Ui, icon: Icon, style: Style, tooltip: &str) -> Response 
     let (rect, response) = ui.allocate_exact_size(button_size(ui), Sense::click());
     let (fill, icon_color) = colors(ui, style, response.hovered());
     ui.painter()
-        .rect(rect, CornerRadius::same(3), fill, Stroke::new(1.0, theme::RULE), StrokeKind::Inside);
+        .rect(rect, CornerRadius::same(3), fill, Stroke::new(1.0, theme::palette(ui).rule), StrokeKind::Inside);
     paint(ui, rect.center(), icon, icon_color);
     response.on_hover_text(tooltip)
 }
@@ -180,10 +183,15 @@ pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str)
     let (menu_fill, _) = colors(ui, Style::Normal, menu.hovered());
     painter.rect_filled(main_rect, CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, main_fill);
     painter.rect_filled(menu_rect, CornerRadius { nw: 0, sw: 0, ne: 3, se: 3 }, menu_fill);
-    painter.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, theme::RULE), StrokeKind::Inside);
-    painter.vline(main_rect.right(), rect.y_range().shrink(4.0), Stroke::new(1.0, theme::RULE));
+    painter.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, theme::palette(ui).rule), StrokeKind::Inside);
+    painter.vline(main_rect.right(), rect.y_range().shrink(4.0), Stroke::new(1.0, theme::palette(ui).rule));
     paint(ui, main_rect.center(), icon, icon_color);
-    paint(ui, menu_rect.center(), Icon::ArrowDown, if menu.hovered() { theme::INK } else { theme::INK_MUTED });
+    paint(
+        ui,
+        menu_rect.center(),
+        Icon::ArrowDown,
+        if menu.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
+    );
     Split { main, menu }
 }
 
@@ -194,16 +202,22 @@ pub fn menu_row(ui: &mut Ui, label: &str, shortcut: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
     if response.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(3), theme::PANE_HEADER);
+        painter.rect_filled(rect, CornerRadius::same(3), theme::palette(ui).pane_header);
     }
     let font = egui::FontId::proportional(15.0);
-    painter.text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, label, font.clone(), theme::INK);
+    painter.text(
+        pos2(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font.clone(),
+        theme::palette(ui).ink,
+    );
     painter.text(
         pos2(rect.right() - 8.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
         shortcut,
         font,
-        theme::INK_MUTED,
+        theme::palette(ui).ink_muted,
     );
     response
 }

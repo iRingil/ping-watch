@@ -7,8 +7,7 @@ use std::time::Duration;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 use crate::probe::stats::HopStats;
-use crate::ui::theme::{self, BAD, GOOD, INK_MUTED, WARN};
-pub use crate::ui::theme::{BAD_ZONE, GOOD_ZONE, WARN_ZONE};
+use crate::ui::theme;
 
 /// Latency below which a hop is fine (green zone).
 pub const GOOD_MS: f64 = 100.0;
@@ -21,14 +20,6 @@ const SCALE_STEP_MS: f64 = 50.0;
 /// The scale is this many times the highest hop average.
 const SCALE_PER_AVERAGE: f64 = 2.0;
 
-/// Background of a row whose hop doesn't answer.
-const LOST_ROW: Color32 = Color32::from_rgb(0x69, 0x2b, 0x3c);
-/// Color of the min–max range.
-const RANGE_COLOR: Color32 = Color32::from_rgb(0xa9, 0xae, 0xb8);
-/// Color of the average marker.
-const AVG_COLOR: Color32 = theme::SIGNAL;
-/// Color of the current-latency dot and of the line connecting averages.
-const CURRENT_COLOR: Color32 = BAD;
 /// Size of the legend in the toolbar.
 const LEGEND_SIZE: Vec2 = vec2(150.0, 26.0);
 
@@ -60,51 +51,58 @@ fn cell_rect(ui: &mut Ui) -> Rect {
 
 /// Header of the latency column: scale start, title and scale end.
 pub fn header(ui: &mut Ui, scale_ms: f64) {
+    let palette = theme::palette(ui);
     let rect = cell_rect(ui);
     let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, theme::PANE_HEADER);
-    painter.vline(rect.left() + 0.5, rect.y_range().shrink(4.0), Stroke::new(1.0, theme::RULE));
+    painter.rect_filled(rect, 0.0, theme::palette(ui).pane_header);
+    painter.vline(rect.left() + 0.5, rect.y_range().shrink(4.0), Stroke::new(1.0, theme::palette(ui).rule));
     let font = theme::heading_font(12.5);
     // The scale ends sit on tabs in their zone's color, so the header doubles as the axis of the bars below.
     let tab = |anchor: Align2, text: String, zone: Color32| {
-        let text_size = painter.layout_no_wrap(text.clone(), font.clone(), theme::INK).size();
+        let text_size = painter.layout_no_wrap(text.clone(), font.clone(), theme::palette(ui).ink).size();
         let size = vec2(text_size.x + 12.0, text_size.y + 4.0);
         let tab = anchor.align_size_within_rect(size, rect.shrink2(vec2(0.0, 3.0)));
         painter.rect_filled(tab, CornerRadius::same(2), zone);
-        painter.text(tab.center(), Align2::CENTER_CENTER, text, font.clone(), theme::INK);
+        painter.text(tab.center(), Align2::CENTER_CENTER, text, font.clone(), theme::palette(ui).ink);
     };
-    tab(Align2::LEFT_CENTER, "0 ms".to_owned(), GOOD_ZONE);
-    let end_zone = if scale_ms > WARN_MS { BAD_ZONE } else { WARN_ZONE };
+    tab(Align2::LEFT_CENTER, "0 ms".to_owned(), palette.good_zone);
+    let end_zone = if scale_ms > WARN_MS { palette.bad_zone } else { palette.warn_zone };
     tab(Align2::RIGHT_CENTER, format!("{scale_ms:.0} ms"), end_zone);
-    painter.text(rect.center(), Align2::CENTER_CENTER, "Latency", font, INK_MUTED);
+    painter.text(rect.center(), Align2::CENTER_CENTER, "Latency", font, palette.ink_muted);
 }
 
 /// Legend of the latency zones for the toolbar: a bar in the three zone colors with the 100 / 200 ms boundaries.
 pub fn legend(ui: &mut Ui) {
+    let palette = theme::palette(ui);
     let (rect, _) = ui.allocate_exact_size(LEGEND_SIZE, Sense::hover());
     let painter = ui.painter();
     let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 6.0), rect.right_bottom());
     let third = bar.width() / 3.0;
-    for (index, color) in [GOOD, WARN, BAD].into_iter().enumerate() {
+    for (index, color) in [palette.good, palette.warn, palette.bad].into_iter().enumerate() {
         let left = bar.left() + third * index as f32;
         painter.rect_filled(Rect::from_x_y_ranges(left..=left + third, bar.y_range()), 0.0, color);
     }
     let font = eframe::egui::FontId::proportional(12.0);
     for (index, label) in [(1.0, "100 ms"), (2.0, "200 ms")] {
         let x = bar.left() + third * index;
-        painter.text(pos2(x, bar.top() - 2.0), Align2::CENTER_BOTTOM, label, font.clone(), INK_MUTED);
+        painter.text(pos2(x, bar.top() - 2.0), Align2::CENTER_BOTTOM, label, font.clone(), palette.ink_muted);
     }
 }
 
 /// Draws the bar of one hop in its table cell; returns the position of the average marker, if any.
 pub fn cell(ui: &mut Ui, stats: &HopStats, answering: bool, scale_ms: f64) -> Option<Pos2> {
+    let palette = theme::palette(ui);
     let rect = cell_rect(ui);
     let painter = ui.painter();
     if !answering {
-        painter.rect_filled(rect, 0.0, LOST_ROW);
+        painter.rect_filled(rect, 0.0, palette.lost);
         return None;
     }
-    let zones = [(0.0, GOOD_MS, GOOD_ZONE), (GOOD_MS, WARN_MS, WARN_ZONE), (WARN_MS, scale_ms, BAD_ZONE)];
+    let zones = [
+        (0.0, GOOD_MS, palette.good_zone),
+        (GOOD_MS, WARN_MS, palette.warn_zone),
+        (WARN_MS, scale_ms, palette.bad_zone),
+    ];
     for (from, to, color) in zones {
         let zone = Rect::from_x_y_ranges(x_of(rect, from, scale_ms)..=x_of(rect, to, scale_ms), rect.y_range());
         painter.rect_filled(zone, 0.0, color);
@@ -117,13 +115,13 @@ pub fn cell(ui: &mut Ui, stats: &HopStats, answering: bool, scale_ms: f64) -> Op
             pos2(rect.left(), rect.center().y - rect.height() * 0.3),
             vec2(width, rect.height() * 0.6),
         );
-        painter.rect_filled(bar, 0.0, LOST_ROW);
-        painter.rect_stroke(bar, 0.0, Stroke::new(1.0, BAD), egui::StrokeKind::Inside);
+        painter.rect_filled(bar, 0.0, palette.lost);
+        painter.rect_stroke(bar, 0.0, Stroke::new(1.0, palette.bad), egui::StrokeKind::Inside);
     }
     let y = rect.center().y;
     if let (Some(best), Some(worst)) = (stats.best(), stats.worst()) {
         let (left, right) = (x_of(rect, millis(best), scale_ms), x_of(rect, millis(worst), scale_ms));
-        let stroke = Stroke::new(1.0, RANGE_COLOR);
+        let stroke = Stroke::new(1.0, palette.range);
         painter.line_segment([pos2(left, y), pos2(right, y)], stroke);
         painter.line_segment([pos2(left, y - 3.0), pos2(left, y + 3.0)], stroke);
         if millis(worst) > scale_ms {
@@ -135,18 +133,19 @@ pub fn cell(ui: &mut Ui, stats: &HopStats, answering: bool, scale_ms: f64) -> Op
         }
     }
     if let Some(current) = stats.last() {
-        painter.circle_filled(pos2(x_of(rect, millis(current), scale_ms), y), 2.5, CURRENT_COLOR);
+        painter.circle_filled(pos2(x_of(rect, millis(current), scale_ms), y), 2.5, palette.bad);
     }
     let average = stats.average().map(|avg| pos2(x_of(rect, millis(avg), scale_ms), y));
     if let Some(point) = average {
-        painter.line_segment([pos2(point.x, y - 5.0), pos2(point.x, y + 5.0)], Stroke::new(2.0, AVG_COLOR));
+        painter.line_segment([pos2(point.x, y - 5.0), pos2(point.x, y + 5.0)], Stroke::new(2.0, palette.signal));
     }
     average
 }
 
 /// Connects the average markers of consecutive answering hops with a line.
 pub fn connect(ui: &Ui, points: &[Pos2]) {
-    let stroke = Stroke::new(1.0, CURRENT_COLOR);
+    let palette = theme::palette(ui);
+    let stroke = Stroke::new(1.0, palette.bad);
     for pair in points.windows(2) {
         if let [from, to] = pair {
             ui.painter().line_segment([*from, *to], stroke);

@@ -21,6 +21,7 @@ use crate::ui::settings::SettingsWindow;
 use crate::ui::tab::{self, Action, Tab};
 use crate::ui::tab_strip;
 use crate::ui::theme;
+use crate::ui::theme::ThemeChoice;
 use crate::ui::tray::{Tray, TrayCommand};
 
 /// Least time between two stores of the window state while it changes (moving, resizing).
@@ -100,6 +101,8 @@ pub struct PingWatchApp {
     settings_window: SettingsWindow,
     /// Set when the app must really quit (tray Exit, Ctrl+C), even if the close button only hides the window.
     quit: Arc<AtomicBool>,
+    /// The theme choice last applied to the context, `None` before the first frame.
+    applied_theme: Option<ThemeChoice>,
 }
 
 impl PingWatchApp {
@@ -186,6 +189,7 @@ impl PingWatchApp {
             settings_store,
             settings_window: SettingsWindow::default(),
             quit,
+            applied_theme: None,
         }
     }
 
@@ -285,7 +289,7 @@ impl PingWatchApp {
         let mut new_target = false;
         // The baseline the tabs stand on; the open tab covers it, so it reads as joined to the toolbar below.
         let bar = ui.max_rect();
-        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, theme::RULE));
+        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, theme::palette(ui).rule));
         let reveal = match self.page {
             Page::Target(index) if self.page != self.tab_bar_page => Some(index),
             Page::Target(_) | Page::AllTargets => None,
@@ -365,7 +369,7 @@ impl PingWatchApp {
                         egui::pos2(peek.right() - fade_width, peek.top()),
                         egui::pos2(peek.right(), peek.bottom() - 1.0),
                     );
-                    fade_out(ui, fade, theme::WELL);
+                    fade_out(ui, fade, theme::palette(ui).bar);
                 }
                 ui.add_space(room);
                 if scroll_arrow(ui, false, last < titles.len()) {
@@ -407,17 +411,20 @@ fn fade_out(ui: &Ui, rect: Rect, color: egui::Color32) {
 fn gear_button(ui: &mut Ui) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(GEAR_WIDTH, TAB_HEIGHT), Sense::click());
     if response.hovered() {
-        ui.painter()
-            .rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), theme::PANE_HEADER);
+        ui.painter().rect_filled(
+            rect.shrink2(Vec2::new(0.0, 3.0)),
+            CornerRadius::same(3),
+            theme::palette(ui).pane_header,
+        );
     }
-    let color = if response.hovered() { theme::INK } else { theme::INK_MUTED };
+    let color = if response.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted };
     icons::paint(ui, rect.center(), icons::Icon::Gear, color);
     response.on_hover_text("Settings and more")
 }
 
 /// Width of a tab titled `title`, with a close mark if `closable`.
 fn tab_width(ui: &Ui, title: &str, closable: bool) -> f32 {
-    let galley = ui.painter().layout_no_wrap(title.to_owned(), theme::heading_font(14.5), theme::INK);
+    let galley = ui.painter().layout_no_wrap(title.to_owned(), theme::heading_font(14.5), theme::palette(ui).ink);
     galley.size().x + TAB_PADDING * 2.0 + if closable { TAB_CLOSE_WIDTH } else { 0.0 }
 }
 
@@ -431,9 +438,9 @@ fn scroll_arrow(ui: &mut Ui, left: bool, active: bool) -> bool {
     }
     let painter = ui.painter();
     if response.hovered() {
-        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), theme::PANE_HEADER);
+        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), theme::palette(ui).pane_header);
     }
-    let color = if response.hovered() { theme::INK } else { theme::INK_MUTED };
+    let color = if response.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted };
     let center = rect.center();
     let (tip, back) = if left { (-4.0, 3.0) } else { (4.0, -3.0) };
     let points = vec![
@@ -451,28 +458,28 @@ fn scroll_arrow(ui: &mut Ui, left: bool, active: bool) -> bool {
 /// and whether its close mark was clicked.
 fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Response, bool) {
     let font = theme::heading_font(14.5);
-    let text_color = if open { theme::INK } else { theme::INK_MUTED };
+    let text_color = if open { theme::palette(ui).ink } else { theme::palette(ui).ink_muted };
     let galley = ui.painter().layout_no_wrap(title.to_owned(), font, text_color);
     let close_width = if closable { TAB_CLOSE_WIDTH } else { 0.0 };
     let size = Vec2::new(galley.size().x + TAB_PADDING * 2.0 + close_width, TAB_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
     let fill = if open {
-        theme::CHASSIS
+        theme::palette(ui).chassis
     } else if response.hovered() {
-        theme::PANE_HEADER
+        theme::palette(ui).pane_header
     } else {
-        theme::TAB_IDLE
+        theme::palette(ui).tab_idle
     };
     let corners = CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 };
     let painter = ui.painter();
-    painter.rect(rect, corners, fill, Stroke::new(1.0, theme::RULE), StrokeKind::Inside);
+    painter.rect(rect, corners, fill, Stroke::new(1.0, theme::palette(ui).rule), StrokeKind::Inside);
     if open {
         // Open the bottom edge into the toolbar and mark it with a signal line just above (a line along the top
         // would cut across the rounded corners).
         let inner = (rect.left() + 1.0)..=(rect.right() - 1.0);
         painter.hline(inner.clone(), rect.bottom() - 0.5, Stroke::new(2.0, fill));
-        painter.hline(inner, rect.bottom() - 3.0, Stroke::new(2.0, theme::SIGNAL));
+        painter.hline(inner, rect.bottom() - 3.0, Stroke::new(2.0, theme::palette(ui).signal));
     }
     let text_pos = egui::pos2(rect.left() + TAB_PADDING, rect.center().y - galley.size().y / 2.0);
     painter.galley(text_pos, galley, text_color);
@@ -484,7 +491,7 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Re
             Vec2::splat(TAB_CLOSE_WIDTH),
         );
         let close = ui.interact(close_rect, response.id.with("close"), Sense::click()).on_hover_text("Close and stop");
-        let color = if close.hovered() { theme::BAD } else { theme::INK_MUTED };
+        let color = if close.hovered() { theme::palette(ui).bad } else { theme::palette(ui).ink_muted };
         ui.painter()
             .text(close_rect.center(), egui::Align2::CENTER_CENTER, "\u{d7}", theme::heading_font(16.0), color);
         close_clicked = close.clicked();
@@ -616,22 +623,25 @@ fn tab_status(ui: &mut Ui, tab: &Tab) {
     status_segment(ui, "Hops", overview.hops.map_or_else(|| "-".to_owned(), |hops| hops.to_string()));
     if tab.is_paused() {
         ui.separator();
-        ui.colored_label(theme::WARN, "Paused");
+        ui.colored_label(theme::palette(ui).warn, "Paused");
     }
 }
 
 /// The open page under the tab bar: a box continuing the open tab down to the status bar (its sides and bottom
 /// are outlined, its top is the tab bar's baseline), inset from the window edges like the tabs.
 fn page<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
-    let frame = Frame::new().fill(theme::WELL).inner_margin(Margin { left: 10, right: 10, top: 0, bottom: 8 });
+    let frame =
+        Frame::new()
+            .fill(theme::palette(ui).bar)
+            .inner_margin(Margin { left: 10, right: 10, top: 0, bottom: 8 });
     egui::CentralPanel::default()
         .frame(frame)
         .show(ui, |ui| {
             let rect = ui.max_rect();
-            ui.painter().rect_filled(rect, 0.0, theme::CHASSIS);
+            ui.painter().rect_filled(rect, 0.0, theme::palette(ui).chassis);
             let inner = content(ui);
             // Drawn after the content, whose toolbar fill would cover them.
-            let stroke = Stroke::new(1.0, theme::RULE);
+            let stroke = Stroke::new(1.0, theme::palette(ui).rule);
             let painter = ui.painter();
             painter.vline(rect.left() + 0.5, rect.y_range(), stroke);
             painter.vline(rect.right() - 0.5, rect.y_range(), stroke);
@@ -650,8 +660,8 @@ fn status_segment(ui: &mut Ui, label: &str, value: String) {
 /// A problem in the status bar: a red dot and the message.
 fn status_problem(ui: &mut Ui, message: &str) {
     let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-    ui.painter().circle_filled(dot.center(), 4.0, theme::BAD);
-    ui.colored_label(theme::BAD, message);
+    ui.painter().circle_filled(dot.center(), 4.0, theme::palette(ui).bad);
+    ui.colored_label(theme::palette(ui).bad, message);
 }
 
 /// The action of a pressed keyboard shortcut, if any (consumed so widgets don't see it).
@@ -672,6 +682,10 @@ fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
 impl eframe::App for PingWatchApp {
     /// Handles the tray icon and keeps the window state; runs even while the window is minimized or hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.applied_theme != Some(self.settings.theme) {
+            self.settings.theme.apply(ctx);
+            self.applied_theme = Some(self.settings.theme);
+        }
         self.hide_instead_of_closing(ctx);
         self.track_window(ctx);
         self.track_tabs();
@@ -705,12 +719,15 @@ impl eframe::App for PingWatchApp {
         }
         // Tabs that resolved last frame are checked before anything borrows them for drawing.
         self.merge_duplicate_traces();
-        let bar_frame = Frame::new().fill(theme::WELL).inner_margin(Margin { left: 10, right: 10, top: 6, bottom: 0 });
+        let bar_frame =
+            Frame::new()
+                .fill(theme::palette(ui).bar)
+                .inner_margin(Margin { left: 10, right: 10, top: 6, bottom: 0 });
         egui::Panel::top("tab-bar")
             .frame(bar_frame)
             .show_separator_line(false)
             .show(ui, |ui| self.tab_bar(ui));
-        let status_frame = Frame::new().fill(theme::WELL).inner_margin(Margin::symmetric(12, 5));
+        let status_frame = Frame::new().fill(theme::palette(ui).bar).inner_margin(Margin::symmetric(12, 5));
         egui::Panel::bottom("status-bar")
             .frame(status_frame)
             .resizable(false)

@@ -453,7 +453,7 @@ impl Tab {
     pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>, table_share: &mut f32) -> Option<Action> {
         self.save_settings(context.targets);
         let route = self.route();
-        let toolbar_frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::symmetric(10, 8));
+        let toolbar_frame = Frame::new().fill(theme::palette(ui).chassis).inner_margin(Margin::symmetric(10, 8));
         let action = egui::Panel::top("tab-toolbar")
             .frame(toolbar_frame)
             .show(ui, |ui| self.toolbar(ui, context.targets))
@@ -543,9 +543,9 @@ impl Tab {
         let paused = session.tracer.is_paused();
         // One split button, as in PingPlotter: the face pauses or resumes, the arrow lists the other actions.
         let split = if paused {
-            icons::split_button(ui, Icon::Play, theme::GOOD, "Resume probing")
+            icons::split_button(ui, Icon::Play, theme::palette(ui).good, "Resume probing")
         } else {
-            icons::split_button(ui, Icon::Pause, theme::SIGNAL, "Pause probing (the numbers are kept)")
+            icons::split_button(ui, Icon::Pause, theme::palette(ui).signal, "Pause probing (the numbers are kept)")
         };
         if split.main.clicked() {
             session.tracer.set_paused(!paused);
@@ -591,7 +591,7 @@ pub fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
         *table_share = share.clamp(*TABLE_SHARE_RANGE.start(), *TABLE_SHARE_RANGE.end());
     }
     let active = response.hovered() || response.dragged();
-    let color = if active { theme::SIGNAL } else { theme::RULE };
+    let color = if active { theme::palette(ui).signal } else { theme::palette(ui).rule };
     let center = rect.center();
     // A full-width hairline with a thicker grip in the middle shows where to grab.
     ui.painter().hline(rect.x_range(), center.y, Stroke::new(1.0, color));
@@ -603,7 +603,7 @@ pub fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
 pub fn pane(ui: &mut Ui, rect: Rect, margin: Margin, content: impl FnOnce(&mut Ui)) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
     child.set_clip_rect(rect.intersect(ui.clip_rect()));
-    theme::pane_frame().inner_margin(margin).show(&mut child, |ui| {
+    theme::pane_frame(ui).inner_margin(margin).show(&mut child, |ui| {
         ui.set_min_size(ui.available_size());
         content(ui);
     });

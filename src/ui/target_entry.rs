@@ -79,7 +79,7 @@ impl TargetEntry {
             ui,
             arrow_rect.center(),
             Icon::ArrowDown,
-            if arrow.hovered() { theme::INK } else { theme::INK_MUTED },
+            if arrow.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
         );
         if enabled && let Some(targets) = targets {
             Popup::from_toggle_button_response(&arrow)
@@ -105,7 +105,7 @@ impl TargetEntry {
         let all = match targets.all() {
             Ok(all) => all,
             Err(error) => {
-                ui.colored_label(theme::BAD, format!("Cannot read the target list: {error}"));
+                ui.colored_label(theme::palette(ui).bad, format!("Cannot read the target list: {error}"));
                 return None;
             }
         };
@@ -151,12 +151,12 @@ impl TargetEntry {
                 ui.end_row();
             });
             if let Some(error) = &draft.error {
-                ui.colored_label(theme::BAD, error);
+                ui.colored_label(theme::palette(ui).bad, error);
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let can_save = !draft.address.trim().is_empty();
-                if ui.add_enabled(can_save, primary_button("Save")).clicked() {
+                if ui.add_enabled(can_save, primary_button(ui, "Save")).clicked() {
                     match targets.update(draft.id, &draft.address, &draft.name) {
                         Ok(()) => close = true,
                         Err(error) => draft.error = Some(format!("Not saved: {error}")),
@@ -219,21 +219,37 @@ fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
 
     let painter = ui.painter();
     if row.hovered() || edit.hovered() || delete.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(3), theme::PANE_HEADER);
+        painter.rect_filled(rect, CornerRadius::same(3), theme::palette(ui).pane_header);
     }
     let font = egui::FontId::proportional(15.0);
     let text_y = rect.center().y;
-    painter.text(pos2(rect.left() + 8.0, text_y), egui::Align2::LEFT_CENTER, &target.address, font.clone(), theme::INK);
+    painter.text(
+        pos2(rect.left() + 8.0, text_y),
+        egui::Align2::LEFT_CENTER,
+        &target.address,
+        font.clone(),
+        theme::palette(ui).ink,
+    );
     let description_right = edit_rect.left() - 8.0;
     painter.text(
         pos2(description_right, text_y),
         egui::Align2::RIGHT_CENTER,
         target_description(target),
         font,
-        theme::INK_MUTED,
+        theme::palette(ui).ink_muted,
     );
-    icons::paint(ui, edit_rect.center(), Icon::Pencil, if edit.hovered() { theme::SIGNAL } else { theme::INK_MUTED });
-    icons::paint(ui, delete_rect.center(), Icon::Cross, if delete.hovered() { theme::BAD } else { theme::INK_MUTED });
+    icons::paint(
+        ui,
+        edit_rect.center(),
+        Icon::Pencil,
+        if edit.hovered() { theme::palette(ui).signal } else { theme::palette(ui).ink_muted },
+    );
+    icons::paint(
+        ui,
+        delete_rect.center(),
+        Icon::Cross,
+        if delete.hovered() { theme::palette(ui).bad } else { theme::palette(ui).ink_muted },
+    );
 
     if delete.clicked() {
         RowAction::Delete
@@ -257,6 +273,7 @@ fn target_description(target: &SavedTarget) -> String {
 }
 
 /// The main button of a group: signal-colored, so it reads as "the thing to press".
-fn primary_button(text: &str) -> Button<'_> {
-    Button::new(RichText::new(text).color(theme::CHASSIS)).fill(theme::SIGNAL)
+fn primary_button<'a>(ui: &Ui, text: &'a str) -> Button<'a> {
+    let palette = theme::palette(ui);
+    Button::new(RichText::new(text).color(palette.on_signal)).fill(palette.signal)
 }

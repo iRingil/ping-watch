@@ -11,7 +11,7 @@ use crate::store::autostart;
 use crate::store::settings::{AppSettings, MAX_HOPS, RETENTIONS, TIMEOUTS};
 use crate::ui::icons::{self, Icon};
 use crate::ui::tab;
-use crate::ui::theme;
+use crate::ui::theme::{self, ThemeChoice};
 use crate::ui::timeline::Period;
 
 /// Width of the window's content.
@@ -134,7 +134,7 @@ impl SettingsWindow {
                 match self.page {
                     Page::General => self.general(ui, settings),
                     Page::Tracing => tracing(ui, settings),
-                    Page::Appearance => appearance(ui),
+                    Page::Appearance => appearance(ui, settings),
                     Page::Language => language(ui),
                     Page::About => self.about(ui, data_folder),
                 }
@@ -153,12 +153,16 @@ impl SettingsWindow {
                 ui.spacing_mut().item_spacing.x = 18.0;
                 for page in Page::ALL {
                     let shown = self.page == page;
-                    let color = if shown { theme::INK } else { theme::INK_MUTED };
+                    let color = if shown { theme::palette(ui).ink } else { theme::palette(ui).ink_muted };
                     let text = RichText::new(page.title()).font(theme::heading_font(15.0)).color(color);
                     let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
                     if shown {
                         let rect = response.rect;
-                        ui.painter().hline(rect.x_range(), rect.bottom() + 4.0, egui::Stroke::new(2.0, theme::SIGNAL));
+                        ui.painter().hline(
+                            rect.x_range(),
+                            rect.bottom() + 4.0,
+                            egui::Stroke::new(2.0, theme::palette(ui).signal),
+                        );
                     }
                     if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         self.page = page;
@@ -166,8 +170,11 @@ impl SettingsWindow {
                 }
             })
             .response;
-        ui.painter()
-            .hline(ui.max_rect().x_range(), row.rect.bottom() + 5.5, egui::Stroke::new(1.0, theme::RULE));
+        ui.painter().hline(
+            ui.max_rect().x_range(),
+            row.rect.bottom() + 5.5,
+            egui::Stroke::new(1.0, theme::palette(ui).rule),
+        );
     }
 
     /// General: what the close button does, starting with Windows.
@@ -185,7 +192,7 @@ impl SettingsWindow {
                     self.autostart_error = autostart::set_enabled(self.autostart).err().map(|error| error.to_string());
                 }
                 if let Some(error) = &self.autostart_error {
-                    ui.colored_label(theme::BAD, error);
+                    ui.colored_label(theme::palette(ui).bad, error);
                 }
             });
             ui.end_row();
@@ -226,16 +233,20 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
 }
 
 /// Appearance: the theme — follow Windows, dark or light (only dark so far).
-fn appearance(ui: &mut Ui) {
+fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
     settings_grid(ui, "settings-appearance", |ui| {
         ui.weak("Theme");
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 18.0;
-            let themes = [(Icon::Auto, "Auto", false), (Icon::Moon, "Dark", true), (Icon::Sun, "Light", false)];
-            for (icon, label, selected) in themes {
-                let response = icon_option(ui, icon, label, selected);
-                if !selected {
-                    response.on_disabled_hover_text("Needs the light theme, which isn't ready yet");
+            let themes = [
+                (ThemeChoice::Auto, Icon::Auto, "Auto", "Follows the Windows app theme"),
+                (ThemeChoice::Dark, Icon::Moon, "Dark", "Graphite panel, light text"),
+                (ThemeChoice::Light, Icon::Sun, "Light", "Pale panel, dark text"),
+            ];
+            for (choice, icon, label, hint) in themes {
+                let response = icon_option(ui, icon, label, settings.theme == choice, true).on_hover_text(hint);
+                if response.clicked() {
+                    settings.theme = choice;
                 }
             }
         });
@@ -247,19 +258,23 @@ fn appearance(ui: &mut Ui) {
 fn language(ui: &mut Ui) {
     settings_grid(ui, "settings-language", |ui| {
         ui.weak("Interface");
-        icon_option(ui, Icon::FlagGb, "English", true).on_disabled_hover_text("Other languages aren't ready yet");
+        icon_option(ui, Icon::FlagGb, "English", true, false)
+            .on_disabled_hover_text("Other languages aren't ready yet");
         ui.end_row();
     });
 }
 
-/// A choice shown as a radio button, its icon and its label; disabled while only one choice exists.
-fn icon_option(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> egui::Response {
+/// A choice shown as a radio button, its icon and its label, all clickable as one when `enabled` (disabled while
+/// it is the only choice there is).
+fn icon_option(ui: &mut Ui, icon: Icon, label: &str, selected: bool, enabled: bool) -> egui::Response {
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let radio = ui.add_enabled(false, egui::RadioButton::new(selected, ""));
-        let (rect, icon_response) = ui.allocate_exact_size(egui::vec2(22.0, 18.0), egui::Sense::hover());
-        icons::paint(ui, rect.center(), icon, if selected { theme::INK } else { theme::INK_MUTED });
-        let text = ui.add_enabled(false, egui::Label::new(label));
+        let radio = ui.add_enabled(enabled, egui::RadioButton::new(selected, ""));
+        let (rect, icon_response) = ui.allocate_exact_size(egui::vec2(22.0, 18.0), sense);
+        let palette = theme::palette(ui);
+        icons::paint(ui, rect.center(), icon, if selected { palette.ink } else { palette.ink_muted });
+        let text = ui.add_enabled(enabled, egui::Label::new(label).sense(sense));
         radio.union(icon_response).union(text)
     })
     .inner
@@ -269,9 +284,14 @@ fn icon_option(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> egui::Re
 fn close_mark(ui: &mut Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
     if response.hovered() {
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), theme::PANE_HEADER);
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), theme::palette(ui).pane_header);
     }
-    icons::paint(ui, rect.center(), Icon::Cross, if response.hovered() { theme::INK } else { theme::INK_MUTED });
+    icons::paint(
+        ui,
+        rect.center(),
+        Icon::Cross,
+        if response.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
+    );
     response.on_hover_text("Close (Esc)").clicked()
 }
 

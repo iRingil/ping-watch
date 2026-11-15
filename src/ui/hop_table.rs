@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
-use crate::ui::theme;
+use crate::ui::theme::{self, Palette};
 use egui_extras::{Column, TableBuilder, TableRow};
 
 use crate::probe::names::NameCache;
@@ -66,12 +66,12 @@ impl LossLevel {
         }
     }
 
-    /// Color used for this level.
-    fn color(self) -> Color32 {
+    /// Color used for this level in `palette`.
+    fn color(self, palette: &Palette) -> Color32 {
         match self {
-            Self::None => theme::GOOD,
-            Self::Some => theme::WARN,
-            Self::Heavy => theme::BAD,
+            Self::None => palette.good,
+            Self::Some => palette.warn,
+            Self::Heavy => palette.bad,
         }
     }
 }
@@ -174,7 +174,7 @@ fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&s
     row.col(|ui| {
         summary_band(ui);
         if let Some(focus) = focus {
-            cell(ui, true, RichText::new(focus).small().color(theme::INK_MUTED));
+            cell(ui, true, RichText::new(focus).small().color(theme::palette(ui).ink_muted));
         }
     });
 }
@@ -188,12 +188,15 @@ pub fn header_cell(ui: &mut Ui, first: bool, numeric: bool, title: &str, row_wid
         let row = eframe::egui::Rect::from_min_size(cell_rect.min, Vec2::new(row_width, cell_rect.height()));
         let mut painter = ui.painter().clone();
         painter.set_clip_rect(row.expand(1.0));
-        painter.rect_filled(row, 0.0, theme::PANE_HEADER);
+        painter.rect_filled(row, 0.0, theme::palette(ui).pane_header);
     } else {
-        ui.painter()
-            .vline(cell_rect.left() + 0.5, cell_rect.y_range().shrink(4.0), Stroke::new(1.0, theme::RULE));
+        ui.painter().vline(
+            cell_rect.left() + 0.5,
+            cell_rect.y_range().shrink(4.0),
+            Stroke::new(1.0, theme::palette(ui).rule),
+        );
     }
-    let text = RichText::new(title).color(theme::INK_MUTED);
+    let text = RichText::new(title).color(theme::palette(ui).ink_muted);
     if numeric {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(HEADER_INSET);
@@ -209,8 +212,8 @@ pub fn header_cell(ui: &mut Ui, first: bool, numeric: bool, title: &str, row_wid
 /// cells join into one unbroken band.
 fn summary_band(ui: &mut Ui) {
     let rect = ui.max_rect();
-    ui.painter().rect_filled(rect, 0.0, theme::PANE_HEADER);
-    ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.5, theme::INK_MUTED));
+    ui.painter().rect_filled(rect, 0.0, theme::palette(ui).pane_header);
+    ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.5, theme::palette(ui).ink_muted));
 }
 
 /// Fills the Avg, Min, Max, Cur, Jitter and PL% columns; `summary` gives them the summary row's band.
@@ -240,10 +243,11 @@ fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats, summary: bool) {
         cell(ui, true, format_ms(stats.jitter()));
     });
     let loss = stats.loss_percent();
-    let loss_text = RichText::new(format!("{loss:.1}"));
-    let loss_text = if loss > 0.0 { loss_text.color(LossLevel::of(loss).color()) } else { loss_text };
     row.col(|ui| {
         band(ui);
+        let loss_text = RichText::new(format!("{loss:.1}"));
+        let loss_text =
+            if loss > 0.0 { loss_text.color(LossLevel::of(loss).color(theme::palette(ui))) } else { loss_text };
         cell(ui, true, loss_text);
     });
 }
@@ -257,21 +261,27 @@ fn badge(ui: &mut Ui, hop: &Hop) {
         return;
     }
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(BADGE_SIZE), Sense::hover());
-    let color = hop.stats.average().map_or(theme::INK_MUTED, latency_color);
+    let palette = theme::palette(ui);
+    let color = hop.stats.average().map_or(palette.ink_muted, |average| latency_color(average, palette));
     ui.painter().circle_filled(rect.center(), BADGE_SIZE / 2.0, color);
-    ui.painter()
-        .text(rect.center(), Align2::CENTER_CENTER, text, theme::heading_font(12.0), theme::CHASSIS);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        theme::heading_font(12.0),
+        theme::palette(ui).on_signal,
+    );
 }
 
-/// Color of a latency's zone: green below 100 ms, amber below 200 ms, red above.
-fn latency_color(latency: Duration) -> Color32 {
+/// Color of a latency's zone in `palette`: green below 100 ms, amber below 200 ms, red above.
+fn latency_color(latency: Duration, palette: &Palette) -> Color32 {
     let ms = latency_bars::millis(latency);
     if ms < latency_bars::GOOD_MS {
-        theme::GOOD
+        palette.good
     } else if ms < latency_bars::WARN_MS {
-        theme::WARN
+        palette.warn
     } else {
-        theme::BAD
+        palette.bad
     }
 }
 
@@ -307,9 +317,10 @@ mod tests {
 
     #[test]
     fn badge_color_follows_latency_zones() {
-        assert_eq!(latency_color(Duration::from_millis(52)), theme::GOOD);
-        assert_eq!(latency_color(Duration::from_millis(177)), theme::WARN);
-        assert_eq!(latency_color(Duration::from_millis(260)), theme::BAD);
+        let palette = &theme::DARK;
+        assert_eq!(latency_color(Duration::from_millis(52), palette), palette.good);
+        assert_eq!(latency_color(Duration::from_millis(177), palette), palette.warn);
+        assert_eq!(latency_color(Duration::from_millis(260), palette), palette.bad);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::store::history::HistoryError;
 use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
+use crate::ui::theme::ThemeChoice;
 use crate::ui::timeline::Period;
 
 /// Schema: one row per setting.
@@ -44,6 +45,8 @@ pub struct AppSettings {
     pub max_hops: u8,
     /// How long samples are kept.
     pub retention: Duration,
+    /// Dark, light or following Windows.
+    pub theme: ThemeChoice,
 }
 
 impl Default for AppSettings {
@@ -59,6 +62,7 @@ impl Default for AppSettings {
             max_hops: 30,
             // The longest period the timeline shows.
             retention: Duration::from_secs(7 * 24 * 60 * 60),
+            theme: ThemeChoice::default(),
         }
     }
 }
@@ -132,6 +136,7 @@ impl SettingsStore {
                 .map(Duration::from_secs)
                 .filter(|retention| RETENTIONS.contains(retention))
                 .unwrap_or(fallback.retention),
+            theme: self.get("theme")?.and_then(|key| ThemeChoice::from_key(&key)).unwrap_or(fallback.theme),
         })
     }
 
@@ -150,6 +155,7 @@ impl SettingsStore {
             ("timeout_ms", millis(settings.timeout)),
             ("max_hops", settings.max_hops.to_string()),
             ("retention_s", settings.retention.as_secs().to_string()),
+            ("theme", settings.theme.key().to_owned()),
         ];
         let transaction = self.connection.transaction()?;
         for (key, value) in values {
@@ -187,6 +193,7 @@ mod tests {
             timeout: Duration::from_secs(2),
             max_hops: 40,
             retention: DAY,
+            theme: ThemeChoice::Light,
         };
         store.save(&settings).expect("saved");
         assert_eq!(store.load().ok(), Some(settings));

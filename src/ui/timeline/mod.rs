@@ -19,7 +19,7 @@ pub use self::series::Period;
 use self::series::{Series, Trace, Window, clock, millis_of, seconds, time_marks, value_marks};
 use crate::store::history::{self, Comment, HopKey};
 use crate::ui::latency_bars::{GOOD_MS, WARN_MS};
-use crate::ui::theme::{self, BAD_ZONE, GOOD_ZONE, WARN_ZONE};
+use crate::ui::theme;
 
 /// Longest time between history queries of a live timeline, however coarse the buckets are.
 const MAX_REFRESH: Duration = Duration::from_secs(60);
@@ -29,17 +29,6 @@ const PLOT_GAP: f32 = 8.0;
 const JITTER_HEIGHT: f32 = 44.0;
 /// Width of the y axis, equal for both plots so their time axes line up.
 const Y_AXIS_WIDTH: f32 = 40.0;
-/// Color of the latency line.
-const LATENCY_COLOR: Color32 = theme::INK;
-/// Color of the jitter line.
-const JITTER_COLOR: Color32 = Color32::from_rgb(0xff, 0x8a, 0x65);
-/// Color of the packet loss bars.
-const LOSS_COLOR: Color32 = Color32::from_rgb(0xd6, 0x45, 0x5e);
-/// Grid lines, drawn over everything (zones included) so they look the same on zones and on the bare plot: a faint
-/// muted ink. (egui_plot's own grid lies under the zones and glares on the bare plot.)
-const GRID: Color32 = Color32::from_rgba_premultiplied(0x15, 0x16, 0x19, 0x26);
-/// Color of comment markers.
-const COMMENT_COLOR: Color32 = Color32::from_rgb(0xff, 0xd5, 0x4f);
 
 /// Chart data on screen and what it was built from.
 #[derive(Debug)]
@@ -158,7 +147,7 @@ impl Timeline {
         };
         let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
         if let Some(error) = self.sync(path, target_id, hop, now_ms, interval_ms) {
-            ui.colored_label(theme::BAD, error);
+            ui.colored_label(theme::palette(ui).bad, error);
             return;
         }
         let Some(shown) = &self.shown else {
@@ -341,6 +330,9 @@ impl Timeline {
 /// pointer.
 /// `compact` leaves out the jitter strip and the slider's row.
 fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Response, Option<PlotPoint>) {
+    // Grid lines are drawn by us over everything (zones included), so they look the same on zones and on the
+    // bare plot; egui_plot's own grid lies under the zones and glares on the bare plot.
+    let palette = theme::palette(ui);
     let window = shown.request.window;
     let (from_s, to_s, bucket_s) = (seconds(window.from_ms), seconds(window.to_ms), seconds(window.bucket_ms));
     let utc_offset_s = i64::from(chrono::Local::now().offset().local_minus_utc());
@@ -375,10 +367,10 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
     };
     let grid = |plot: &mut egui_plot::PlotUi<'_>, scale: f64, height: f32| {
         for (value, _) in value_marks(scale, height).into_iter().skip(1) {
-            plot.hline(HLine::new("", value).color(GRID).width(1.0).allow_hover(false));
+            plot.hline(HLine::new("", value).color(palette.grid).width(1.0).allow_hover(false));
         }
         for (value, _) in time_marks(from_s, to_s, utc_offset_s) {
-            plot.vline(VLine::new("", value).color(GRID).width(1.0).allow_hover(false));
+            plot.vline(VLine::new("", value).color(palette.grid).width(1.0).allow_hover(false));
         }
     };
 
@@ -392,9 +384,9 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
                 plot.add(
                     Text::new("", PlotPoint::new(from_s, jitter.scale_ms), "Jitter (ms)")
                         .anchor(Align2::LEFT_TOP)
-                        .color(JITTER_COLOR),
+                        .color(palette.jitter),
                 );
-                add_trace(plot, "Jitter", jitter, JITTER_COLOR);
+                add_trace(plot, "Jitter", jitter, palette.jitter);
             },
         );
         // Room between the plots, so the jitter strip's "0" and the latency scale's top label don't overlap.
@@ -411,9 +403,11 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
             plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, scale]));
             // Zones are painted only where there is data, as in PingPlotter; time before the first sample stays plain.
             if let Some(data_from_s) = shown.series.first_s {
-                for (low, high, color) in
-                    [(0.0, GOOD_MS, GOOD_ZONE), (GOOD_MS, WARN_MS, WARN_ZONE), (WARN_MS, scale, BAD_ZONE)]
-                {
+                for (low, high, color) in [
+                    (0.0, GOOD_MS, palette.good_zone),
+                    (GOOD_MS, WARN_MS, palette.warn_zone),
+                    (WARN_MS, scale, palette.bad_zone),
+                ] {
                     if low < scale {
                         let top = high.min(scale);
                         let corners = vec![[data_from_s, low], [to_s, low], [to_s, top], [data_from_s, top]];
@@ -429,26 +423,26 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
             plot.add(
                 Text::new("", PlotPoint::new(from_s, scale), "Latency (ms)")
                     .anchor(Align2::LEFT_TOP)
-                    .color(theme::INK_MUTED),
+                    .color(palette.ink_muted),
             );
-            add_trace(plot, "Latency", latency, LATENCY_COLOR);
+            add_trace(plot, "Latency", latency, palette.ink);
             // Loss hangs from the top of the chart: a fully lost bucket is a red bar of full height.
             let bars = shown
                 .series
                 .loss
                 .iter()
                 .map(|&(x, percent)| {
-                    Bar::new(x, -percent / 100.0 * scale).base_offset(scale).width(bucket_s).fill(LOSS_COLOR)
+                    Bar::new(x, -percent / 100.0 * scale).base_offset(scale).width(bucket_s).fill(palette.loss)
                 })
                 .collect();
-            plot.bar_chart(BarChart::new("Packet loss", bars).color(LOSS_COLOR));
+            plot.bar_chart(BarChart::new("Packet loss", bars).color(palette.loss));
             for comment in &shown.comments {
                 let x = seconds(comment.ts_ms);
-                plot.vline(VLine::new(&comment.text, x).color(COMMENT_COLOR).style(LineStyle::dashed_dense()));
+                plot.vline(VLine::new(&comment.text, x).color(palette.comment).style(LineStyle::dashed_dense()));
                 plot.add(
                     Text::new("", PlotPoint::new(x, scale), &comment.text)
                         .anchor(Align2::LEFT_TOP)
-                        .color(COMMENT_COLOR),
+                        .color(palette.comment),
                 );
             }
             plot.pointer_coordinate()
