@@ -24,6 +24,8 @@ const LOGO_SIZE: f32 = 96.0;
 const SITE_URL: &str = "https://iringil.github.io/ping-watch/";
 /// The project's source code.
 const REPO_URL: &str = "https://github.com/iRingil/ping-watch";
+/// The license's text.
+const LICENSE_URL: &str = "https://polyformproject.org/licenses/noncommercial/1.0.0/";
 /// Width of the drop-down lists, the same for all.
 const COMBO_WIDTH: f32 = 150.0;
 /// Space between the label column and the controls.
@@ -334,6 +336,9 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
                 ui.weak("none, history is off");
             }
         });
+        ui.end_row();
+        ui.weak("License");
+        ui.hyperlink_to("PolyForm Noncommercial 1.0.0", LICENSE_URL);
         ui.end_row();
         ui.weak("Font");
         ui.label("Barlow, © The Barlow Project Authors, SIL Open Font License 1.1");
