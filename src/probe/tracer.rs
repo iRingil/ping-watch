@@ -8,9 +8,9 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::history::unix_ms;
-use crate::icmp::{IcmpError, Pinger};
-use crate::route::{ProbeOutcome, Route, RouteState, Sample};
+use crate::probe::icmp::{IcmpError, Pinger};
+use crate::probe::route::{ProbeOutcome, Route, RouteState, Sample};
+use crate::store::history::unix_ms;
 use crate::sync::lock;
 
 /// Tracing parameters.

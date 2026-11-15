@@ -17,9 +17,9 @@ use egui_plot::{
 use self::fetch::{Fetched, Fetcher, Request};
 pub use self::series::Period;
 use self::series::{Series, Trace, Window, clock, millis_of, seconds, time_marks, value_marks};
-use crate::history::{self, Comment, HopKey};
-use crate::latency_bars::{GOOD_MS, WARN_MS};
-use crate::theme::{self, BAD_ZONE, GOOD_ZONE, WARN_ZONE};
+use crate::store::history::{self, Comment, HopKey};
+use crate::ui::latency_bars::{GOOD_MS, WARN_MS};
+use crate::ui::theme::{self, BAD_ZONE, GOOD_ZONE, WARN_ZONE};
 
 /// Longest time between history queries of a live timeline, however coarse the buckets are.
 const MAX_REFRESH: Duration = Duration::from_secs(60);

@@ -46,9 +46,9 @@ pub const WARN: Color32 = Color32::from_rgb(0xe2, 0xa1, 0x3e);
 pub const BAD: Color32 = Color32::from_rgb(0xe0, 0x5f, 0x74);
 
 /// Text face, embedded so the app looks the same on any machine (license: `assets/fonts/OFL.txt`).
-const BARLOW_REGULAR: &[u8] = include_bytes!("../assets/fonts/Barlow-Regular.ttf");
+const BARLOW_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Barlow-Regular.ttf");
 /// Heavier face for headings.
-const BARLOW_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Barlow-Medium.ttf");
+const BARLOW_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Barlow-Medium.ttf");
 /// Font family of headings and other emphasized labels.
 const HEADING_FAMILY: &str = "heading";
 

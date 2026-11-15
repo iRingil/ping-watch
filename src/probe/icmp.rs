@@ -13,7 +13,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::Networking::WinSock::{AF_INET6, IN6_ADDR, IN6_ADDR_0, SOCKADDR_IN6};
 
-use crate::route::ProbeOutcome;
+use crate::probe::route::ProbeOutcome;
 
 /// Payload sent in every echo request.
 const PAYLOAD: [u8; 32] = [0; 32];

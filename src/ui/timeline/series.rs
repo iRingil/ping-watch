@@ -1,8 +1,8 @@
 //! Pure chart computations of the timeline: periods, the queried window, chart series with a smoothed scale, and
 //! time axis marks.
 
-use crate::history::Bucket;
-use crate::latency_bars::millis;
+use crate::store::history::Bucket;
+use crate::ui::latency_bars::millis;
 
 /// Roughly how many buckets a period is split into: about one per pixel column of the chart.
 const TARGET_BUCKETS: i64 = 600;

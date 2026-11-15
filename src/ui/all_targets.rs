@@ -8,17 +8,17 @@ use std::time::{Duration, SystemTime};
 use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
 
-use crate::focus::Focus;
-use crate::history;
-use crate::hop_table::{self, format_ms};
-use crate::icons::{self, Icon, Style};
-use crate::latency_bars;
-use crate::tab::{self, Overview, Tab};
-use crate::target_entry::TargetEntry;
-use crate::targets::{TargetList, TraceSettings};
-use crate::theme;
-use crate::timeline::Period;
-use crate::window_state::{AllTargetsSettings, WindowStore};
+use crate::store::history;
+use crate::store::targets::{TargetList, TraceSettings};
+use crate::store::window_state::{AllTargetsSettings, WindowStore};
+use crate::ui::focus::Focus;
+use crate::ui::hop_table::{self, format_ms};
+use crate::ui::icons::{self, Icon, Style};
+use crate::ui::latency_bars;
+use crate::ui::tab::{self, Overview, Tab};
+use crate::ui::target_entry::TargetEntry;
+use crate::ui::theme;
+use crate::ui::timeline::Period;
 
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 24.0;

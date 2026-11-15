@@ -1,6 +1,6 @@
 //! Focus: the period the hop table and the latency bars summarize, as in PingPlotter.
 
-use crate::route::{RECENT_WINDOW, millis};
+use crate::probe::route::{RECENT_WINDOW, millis};
 
 /// Period whose probes the hop table and latency bars summarize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

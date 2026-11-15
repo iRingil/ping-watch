@@ -5,7 +5,7 @@ use eframe::egui::{
     self, Color32, CornerRadius, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
-use crate::theme;
+use crate::ui::theme;
 
 /// What an icon shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use super::series::{Period, Window};
-use crate::history::{Bucket, Comment, HistoryError, HopKey, Store};
+use crate::store::history::{Bucket, Comment, HistoryError, HopKey, Store};
 
 /// What the chart needs: one hop of one target over one window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

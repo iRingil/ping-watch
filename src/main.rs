@@ -5,34 +5,16 @@
 // Release builds are GUI-only; debug builds keep the console for `RUST_LOG` output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod all_targets;
-mod app;
-mod focus;
-mod history;
-mod hop_table;
-mod icmp;
-mod icons;
-mod latency_bars;
-mod names;
-mod presets;
-mod route;
-mod stats;
+mod probe;
+mod store;
 mod sync;
-mod tab;
-mod tab_strip;
-mod target_entry;
-mod targets;
-mod theme;
-mod timeline;
-mod tracer;
-mod tray;
-mod window_state;
+mod ui;
 
 use anyhow::anyhow;
 use eframe::egui;
 
-use crate::app::PingWatchApp;
-use crate::window_state::{WindowState, WindowStore};
+use crate::store::window_state::{WindowState, WindowStore};
+use crate::ui::app::PingWatchApp;
 
 /// Name of the app as users see it: window title, data folder, executable properties, documentation.
 pub const APP_NAME: &str = "Ping Watch";
@@ -62,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let hosts: Vec<String> = std::env::args().skip(1).collect();
     // The window comes back where and as it was left.
-    let window_store = history::default_path()
+    let window_store = store::history::default_path()
         .ok()
         .and_then(|path| WindowStore::open(&path).inspect_err(|error| log::warn!("{error}")).ok());
     let saved_window = window_store
@@ -86,9 +68,9 @@ fn main() -> anyhow::Result<()> {
         APP_NAME,
         options,
         Box::new(move |creation| {
-            theme::apply(&creation.egui_ctx);
+            ui::theme::apply(&creation.egui_ctx);
             // Created here, on the event loop's thread, as the tray needs. Without it the app still works.
-            let tray = tray::Tray::new(&creation.egui_ctx, ICON_PNG, APP_NAME)
+            let tray = ui::tray::Tray::new(&creation.egui_ctx, ICON_PNG, APP_NAME)
                 .inspect_err(|error| log::warn!("{error}"))
                 .ok();
             // Ctrl+C, Ctrl+Break, a closed console, logoff and shutdown (an IDE's Stop button sends Ctrl+C) close

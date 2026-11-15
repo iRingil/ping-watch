@@ -11,19 +11,19 @@ use eframe::egui::{
     self, Align, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup, Rect, RichText, Stroke, Ui, pos2,
 };
 
-use crate::focus::Focus;
-use crate::history::{self, HopKey, Recorder, Store};
-use crate::hop_table;
-use crate::icons::{self, Icon, Style};
-use crate::latency_bars;
-use crate::names::{NameCache, resolve};
-use crate::route::{Hop, Route};
-use crate::target_entry::TargetEntry;
-use crate::targets::{TargetList, TraceSettings};
-use crate::theme;
-use crate::timeline::{Period, Timeline};
-use crate::tracer::{TraceConfig, Tracer};
-use crate::window_state::SavedTab;
+use crate::probe::names::{NameCache, resolve};
+use crate::probe::route::{Hop, Route};
+use crate::probe::tracer::{TraceConfig, Tracer};
+use crate::store::history::{self, HopKey, Recorder, Store};
+use crate::store::targets::{TargetList, TraceSettings};
+use crate::store::window_state::SavedTab;
+use crate::ui::focus::Focus;
+use crate::ui::hop_table;
+use crate::ui::icons::{self, Icon, Style};
+use crate::ui::latency_bars;
+use crate::ui::target_entry::TargetEntry;
+use crate::ui::theme;
+use crate::ui::timeline::{Period, Timeline};
 
 /// Probe intervals offered in the toolbar.
 const INTERVALS: [(Duration, &str); 7] = [

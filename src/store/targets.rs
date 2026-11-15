@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::focus::Focus;
-use crate::history::HistoryError;
-use crate::presets;
-use crate::timeline::Period;
+use crate::store::history::HistoryError;
+use crate::store::presets;
+use crate::ui::focus::Focus;
+use crate::ui::timeline::Period;
 
 /// Schema of the list; `family` is 4, 6 or NULL (a host name not resolved yet); the settings columns are all NULL
 /// until the target is first traced.

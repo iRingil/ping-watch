@@ -7,16 +7,16 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
-use crate::all_targets::{AllTargets, Request};
-use crate::history::{self, Store};
-use crate::hop_table::format_ms;
-use crate::names::NameCache;
-use crate::tab::{self, Action, Tab};
-use crate::tab_strip;
-use crate::targets::TargetList;
-use crate::theme;
-use crate::tray::{Tray, TrayCommand};
-use crate::window_state::{SavedTab, WindowState, WindowStore};
+use crate::probe::names::NameCache;
+use crate::store::history::{self, Store};
+use crate::store::targets::TargetList;
+use crate::store::window_state::{SavedTab, WindowState, WindowStore};
+use crate::ui::all_targets::{AllTargets, Request};
+use crate::ui::hop_table::format_ms;
+use crate::ui::tab::{self, Action, Tab};
+use crate::ui::tab_strip;
+use crate::ui::theme;
+use crate::ui::tray::{Tray, TrayCommand};
 
 /// Least time between two stores of the window state while it changes (moving, resizing).
 const WINDOW_SAVE_INTERVAL: Duration = Duration::from_secs(1);

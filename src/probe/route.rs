@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use crate::stats::HopStats;
+use crate::probe::stats::HopStats;
 
 /// How far back each hop keeps individual probes: the longest focus period that isn't "all".
 pub const RECENT_WINDOW: Duration = Duration::from_secs(60 * 60);

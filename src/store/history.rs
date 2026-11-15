@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, params};
 
-use crate::route::{ProbeOutcome, Sample};
+use crate::probe::route::{ProbeOutcome, Sample};
 
 /// Rows before the current one in the rolling jitter window (the window holds this + 1 answers). A macro so it can
 /// go into the SQL text with `concat!`.

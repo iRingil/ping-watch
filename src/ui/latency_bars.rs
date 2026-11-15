@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
-use crate::stats::HopStats;
-use crate::theme::{self, BAD, GOOD, INK_MUTED, WARN};
-pub use crate::theme::{BAD_ZONE, GOOD_ZONE, WARN_ZONE};
+use crate::probe::stats::HopStats;
+use crate::ui::theme::{self, BAD, GOOD, INK_MUTED, WARN};
+pub use crate::ui::theme::{BAD_ZONE, GOOD_ZONE, WARN_ZONE};
 
 /// Latency below which a hop is fine (green zone).
 pub const GOOD_MS: f64 = 100.0;

@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::focus::Focus;
-use crate::history::HistoryError;
-use crate::targets::TraceSettings;
-use crate::timeline::Period;
+use crate::store::history::HistoryError;
+use crate::store::targets::TraceSettings;
+use crate::ui::focus::Focus;
+use crate::ui::timeline::Period;
 
 /// Schema: window geometry as key/value rows, the open tabs in order, and the All targets settings (one row).
 const SCHEMA: &str = "

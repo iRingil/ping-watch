@@ -6,9 +6,9 @@ use eframe::egui::{
     Ui, pos2,
 };
 
-use crate::icons::{self, Icon};
-use crate::targets::{Family, SavedTarget, TargetList};
-use crate::theme;
+use crate::store::targets::{Family, SavedTarget, TargetList};
+use crate::ui::icons::{self, Icon};
+use crate::ui::theme;
 
 /// Width of the target field.
 const ENTRY_WIDTH: f32 = 360.0;

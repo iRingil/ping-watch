@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
-use crate::theme;
+use crate::ui::theme;
 use egui_extras::{Column, TableBuilder, TableRow};
 
-use crate::latency_bars;
-use crate::names::NameCache;
-use crate::route::{Hop, Route};
-use crate::stats::HopStats;
+use crate::probe::names::NameCache;
+use crate::probe::route::{Hop, Route};
+use crate::probe::stats::HopStats;
+use crate::ui::latency_bars;
 
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 22.0;
