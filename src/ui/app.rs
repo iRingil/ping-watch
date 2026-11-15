@@ -11,6 +11,7 @@ use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Se
 
 use crate::alerts::{Condition, Engine, Event, Observe, Rule, WindowStats};
 use crate::probe::names::NameCache;
+use crate::snapshot::{self, Snapshot};
 use crate::store::alerts::AlertStore;
 use crate::store::history::{self, Store};
 use crate::store::settings::{AppSettings, SettingsStore};
@@ -47,6 +48,8 @@ const ARROW_WIDTH: f32 = 22.0;
 const PEEK_MIN_WIDTH: f32 = 16.0;
 /// Width of the fade at the end of a scrolled tab strip.
 const FADE_WIDTH: f32 = 48.0;
+/// Width of the snapshot button left of the bell.
+const SNAPSHOT_WIDTH: f32 = 28.0;
 /// Width of the bell (alerts) button left of the gear.
 const BELL_WIDTH: f32 = 28.0;
 /// Room for the red dot of a tab with an alert on.
@@ -373,6 +376,49 @@ impl PingWatchApp {
         self.update_check = Some(Check::start(REPOSITORY, env!("CARGO_PKG_VERSION")));
     }
 
+    /// Saves the shown page as an HTML snapshot: the page is written here, then a "Save as" dialog (on the desktop
+    /// at first) runs on its own thread, so the window keeps drawing while it is open.
+    fn save_snapshot(&self) {
+        let journal = self.alert_store.as_ref().and_then(|store| store.journal().ok()).unwrap_or_default();
+        let snapshot = match self.page {
+            Page::Target(index) => {
+                let Some(report) =
+                    self.tabs.get(index).and_then(|tab| tab.snapshot(&self.names, self.reader.as_ref(), &journal))
+                else {
+                    log::info!("nothing to snapshot: the tab doesn't trace");
+                    return;
+                };
+                Snapshot::Target(report)
+            }
+            Page::AllTargets => self.all_targets.snapshot(&self.tabs, self.reader.as_ref(), &self.alerting_hosts()),
+        };
+        let now = chrono::Local::now();
+        let html =
+            snapshot::html(&snapshot, &now.format("%d.%m.%Y %H:%M:%S").to_string(), env!("CARGO_PKG_VERSION"), &|ms| {
+                chrono::DateTime::from_timestamp_millis(ms)
+                    .map(|time| time.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                    .unwrap_or_default()
+            });
+        let file_name = snapshot.file_name(&now.format("%Y-%m-%d %H-%M").to_string());
+        let spawned = std::thread::Builder::new().name("snapshot".to_owned()).spawn(move || {
+            let mut dialog = rfd::FileDialog::new()
+                .set_title("Save snapshot")
+                .set_file_name(&file_name)
+                .add_filter("Web page", &["html"]);
+            if let Some(desktop) = dirs::desktop_dir() {
+                dialog = dialog.set_directory(desktop);
+            }
+            if let Some(path) = dialog.save_file()
+                && let Err(error) = std::fs::write(&path, html)
+            {
+                log::error!("cannot save the snapshot to {}: {error}", path.display());
+            }
+        });
+        if let Err(error) = spawned {
+            log::error!("cannot open the save dialog: {error}");
+        }
+    }
+
     /// Reloads the alert rules after the Alerts window changed them.
     fn reload_alert_rules(&mut self) {
         if let Some(store) = &self.alert_store {
@@ -512,7 +558,7 @@ impl PingWatchApp {
             let all_width: f32 = widths.iter().map(|width| width + TAB_GAP).sum();
             let available = ui.available_width();
             // The gear keeps its place at the right end whatever the tabs do.
-            let available = available - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 2.0;
+            let available = available - SNAPSHOT_WIDTH - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 3.0;
             let (first, count, strip) = if all_width + PLUS_WIDTH <= available {
                 (0, titles.len(), None)
             } else {
@@ -588,7 +634,10 @@ impl PingWatchApp {
             if ui.add_sized([PLUS_WIDTH, TAB_HEIGHT], plus).on_hover_text("New target (Ctrl+N)").clicked() {
                 new_target = true;
             }
-            ui.add_space((ui.available_width() - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 2.0).max(0.0));
+            ui.add_space((ui.available_width() - SNAPSHOT_WIDTH - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 3.0).max(0.0));
+            if bar_button(ui, icons::Icon::Camera, SNAPSHOT_WIDTH, "Save a snapshot of this page (HTML)").clicked() {
+                self.save_snapshot();
+            }
             if bell_button(ui, self.alert_engine.active_count()).clicked() {
                 self.alerts_window.open();
             }
@@ -644,6 +693,18 @@ fn tab_width(ui: &Ui, title: &str, closable: bool, alert: bool) -> f32 {
         + TAB_PADDING * 2.0
         + if closable { TAB_CLOSE_WIDTH } else { 0.0 }
         + if alert { ALERT_DOT_WIDTH } else { 0.0 }
+}
+
+/// A plain icon button of the tab bar (`width` wide), lit under the pointer.
+fn bar_button(ui: &mut Ui, icon: icons::Icon, width: f32, tooltip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TAB_HEIGHT), Sense::click());
+    let palette = theme::palette(ui);
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), palette.pane_header);
+    }
+    icons::paint(ui, rect.center(), icon, if response.hovered() { palette.ink } else { palette.ink_muted });
+    response.on_hover_text(tooltip)
 }
 
 /// The bell left of the gear: opens the Alerts window; a red badge counts the alerts that are on.

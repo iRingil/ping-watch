@@ -75,6 +75,8 @@ stands out at once. It keeps the history, so you can look back at what happened 
 - **Alerts.** Rules for loss and latency, for one target or all of them, such as "loss above 5 % for two minutes".
   Windows shows a notification when a rule fires and another when the connection is fine again; every alert is kept
   in a log and marked on the timeline.
+- **Snapshots.** One click saves the shown target, or All targets, as a single HTML page: the hop table, the
+  latency and loss chart and the alerts of the period, ready to send to your provider or to print.
 - **IPv4 and IPv6**, host names or addresses, with a list of public DNS servers to start from.
 - **In the background.** The close button can hide Ping Watch to the notification area, where it keeps tracing, and
   it can start with Windows.

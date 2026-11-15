@@ -7,6 +7,7 @@
 
 mod alerts;
 mod probe;
+mod snapshot;
 mod store;
 mod sync;
 mod ui;

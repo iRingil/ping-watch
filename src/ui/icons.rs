@@ -32,6 +32,8 @@ pub enum Icon {
     FlagGb,
     /// Bell: alerts.
     Bell,
+    /// Camera: snapshot.
+    Camera,
 }
 
 /// Look of an icon button.
@@ -112,6 +114,14 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
                 })
                 .collect();
             painter.add(egui::Shape::convex_polygon(half, color, Stroke::NONE));
+        }
+        Icon::Camera => {
+            let body = Rect::from_center_size(pos2(c.x, c.y + 1.0), vec2(16.0, 11.0));
+            painter.rect_filled(body, CornerRadius::same(2), color);
+            let bump = Rect::from_center_size(pos2(c.x - 2.0, c.y - 5.5), vec2(6.0, 3.0));
+            painter.rect_filled(bump, CornerRadius::same(1), color);
+            painter.circle_filled(pos2(c.x, c.y + 1.0), 3.6, ui.visuals().panel_fill);
+            painter.circle_filled(pos2(c.x, c.y + 1.0), 2.0, color);
         }
         Icon::Bell => {
             // A dome widening into a rim, a clapper under it.

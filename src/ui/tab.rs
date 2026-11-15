@@ -15,6 +15,8 @@ use crate::alerts::WindowStats;
 use crate::probe::names::{NameCache, resolve};
 use crate::probe::route::{Hop, Route};
 use crate::probe::tracer::{TraceConfig, Tracer};
+use crate::snapshot::{AlertRow, Chart, ChartPoint, HopRow, TargetReport};
+use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, HopKey, Recorder, Store};
 use crate::store::settings::AppSettings;
 use crate::store::targets::{TargetList, TraceSettings};
@@ -39,6 +41,8 @@ const INTERVALS: [(Duration, &str); 7] = [
 ];
 /// Width of the running trace's menu.
 const TRACE_MENU_WIDTH: f32 = 230.0;
+/// Buckets of a snapshot chart (fewer when the probe interval is longer).
+const SNAPSHOT_BUCKETS: i64 = 300;
 /// Share of the pane area the hop table gets at first; the timeline gets the rest.
 pub const TABLE_SHARE: f32 = 0.66;
 /// Limits of the table's share when the splitter is dragged, so neither pane disappears.
@@ -456,6 +460,60 @@ impl Tab {
             .unwrap_or_default()
     }
 
+    /// The tab as a snapshot: the route over the focus, the target's chart over the timeline's period and the
+    /// alerts of that period from `journal`; `None` unless the trace runs.
+    pub fn snapshot(
+        &self,
+        names: &NameCache,
+        reader: Option<&Store>,
+        journal: &[JournalEntry],
+    ) -> Option<TargetReport> {
+        let route = self.route()?;
+        let label = self.label()?;
+        let hops = route.hops().iter().map(|hop| hop_row(hop, names)).collect();
+        let focus = focus_label(&route)
+            .map(|text| text.trim_start_matches("Focus ").to_owned())
+            .unwrap_or_else(|| "since the trace started".to_owned());
+        let now_ms = history::unix_ms(SystemTime::now());
+        let (from_ms, to_ms) = self.timeline.visible_range(now_ms);
+        let alerts = journal
+            .iter()
+            .filter(|entry| entry.host.eq_ignore_ascii_case(&self.host))
+            .filter(|entry| entry.started_ms <= to_ms && entry.ended_ms.is_none_or(|ended| ended >= from_ms))
+            .map(alert_row)
+            .collect();
+        Some(TargetReport { label, focus, hops, chart: self.chart_over(reader, from_ms, to_ms), alerts })
+    }
+
+    /// The target's latency and loss over `from_ms`..`to_ms` from the history, with the comments of that period.
+    pub fn chart_over(&self, reader: Option<&Store>, from_ms: i64, to_ms: i64) -> Option<Chart> {
+        let (target_id, reader) = (self.history_id()?, reader?);
+        let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
+        let bucket_ms = (to_ms.saturating_sub(from_ms) / SNAPSHOT_BUCKETS).max(interval_ms).max(1);
+        let buckets = reader
+            .buckets(target_id, HopKey::Target, from_ms, to_ms, bucket_ms)
+            .inspect_err(|error| log::warn!("cannot read the history for the snapshot: {error}"))
+            .ok()?;
+        let points = buckets
+            .iter()
+            .map(|bucket| {
+                let loss = if bucket.sent == 0 {
+                    0.0
+                } else {
+                    f64::from(bucket.sent.saturating_sub(bucket.received)) / f64::from(bucket.sent) * 100.0
+                };
+                ChartPoint { start_ms: bucket.start_ms, avg: bucket.avg.map(latency_bars::millis), loss }
+            })
+            .collect();
+        let marks = reader
+            .comments(target_id, from_ms, to_ms)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|comment| (comment.ts_ms, comment.text))
+            .collect();
+        Some(Chart { from_ms, to_ms, bucket_ms, points, marks })
+    }
+
     /// Whether the trace is paused.
     pub fn is_paused(&self) -> bool {
         matches!(&self.state, State::Running(session) if session.tracer.is_paused())
@@ -713,6 +771,47 @@ fn target_label(target: IpAddr, host: &str, name: Option<&str>, reverse: Option<
 /// Name under which a host's history is stored.
 fn history_key(host: &str) -> String {
     host.to_lowercase()
+}
+
+/// A hop of the route as a snapshot table row.
+fn hop_row(hop: &Hop, names: &NameCache) -> HopRow {
+    let stats = &hop.stats;
+    HopRow {
+        ttl: hop.ttl,
+        address: hop.address.map(|ip| ip.to_string()),
+        name: hop.address.and_then(|ip| names.get(ip).filter(|name| *name != ip.to_string())),
+        sent: stats.sent(),
+        avg: stats.average().map(latency_bars::millis),
+        min: stats.best().map(latency_bars::millis),
+        max: stats.worst().map(latency_bars::millis),
+        cur: stats.last().map(latency_bars::millis),
+        jitter: stats.jitter().map(latency_bars::millis),
+        loss: stats.loss_percent(),
+    }
+}
+
+/// A journal entry as a snapshot alert row.
+fn alert_row(entry: &JournalEntry) -> AlertRow {
+    let lasted = match entry.ended_ms {
+        None => "on now".to_owned(),
+        Some(ended) if ended == entry.started_ms => String::new(),
+        Some(ended) => {
+            let seconds = u64::try_from(ended.saturating_sub(entry.started_ms) / 1_000).unwrap_or(0);
+            crate::alerts::span(Duration::from_secs(seconds.max(1)))
+        }
+    };
+    let worst = match (entry.worst, entry.unit.as_deref()) {
+        (Some(worst), Some(unit)) => format!("{worst:.0} {unit}"),
+        _ => String::new(),
+    };
+    AlertRow { started: date_time(entry.started_ms), what: entry.what.clone(), lasted, worst }
+}
+
+/// Local "15.11 13:05:12" of Unix ms.
+fn date_time(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|time| time.with_timezone(&chrono::Local).format("%d.%m %H:%M:%S").to_string())
+        .unwrap_or_default()
 }
 
 /// Timeline title of hop `ttl`, in the style of the target labels: "Hop 10: 208.67.222.222 / dns.sse.cisco.com"

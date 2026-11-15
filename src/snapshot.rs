@@ -1,0 +1,578 @@
+//! Snapshot: the shown target (or All targets) as one self-contained HTML page — the hop table with latency bars,
+//! the latency and loss chart of the period as inline SVG, and the alerts of that period. Always in the light
+//! palette, laid out for printing too. Pure: the window gathers the data, this module only writes the page.
+
+use std::fmt::Write as _;
+
+use eframe::egui::Color32;
+
+use crate::APP_NAME;
+use crate::ui::theme::LIGHT;
+
+/// Latency below which a value is fine (green zone), ms.
+const GOOD_MS: f64 = 100.0;
+/// Latency below which a value is acceptable (amber zone), ms; above it is red.
+const WARN_MS: f64 = 200.0;
+/// Size of a latency bar in the table.
+const BAR: (f64, f64) = (220.0, 14.0);
+/// Size of a chart, and its left and bottom margins for the axis labels.
+const CHART: (f64, f64, f64, f64) = (1000.0, 230.0, 44.0, 22.0);
+/// Room above a chart's plot, so the top latency label isn't cut off.
+const CHART_TOP: f64 = 12.0;
+/// Labels on a chart's time axis.
+const TIME_LABELS: i64 = 6;
+
+/// One hop of the table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HopRow {
+    /// Hop number.
+    pub ttl: u8,
+    /// Address that answered, `None` for no answer.
+    pub address: Option<String>,
+    /// Reverse name, if it differs from the address.
+    pub name: Option<String>,
+    /// Probes sent over the focus period.
+    pub sent: u64,
+    /// Average, best, worst and current latency, ms.
+    pub avg: Option<f64>,
+    /// Best latency, ms.
+    pub min: Option<f64>,
+    /// Worst latency, ms.
+    pub max: Option<f64>,
+    /// Latest probe, ms; `None` if it was lost.
+    pub cur: Option<f64>,
+    /// Jitter, ms.
+    pub jitter: Option<f64>,
+    /// Packet loss, percent.
+    pub loss: f64,
+}
+
+/// One time bucket of a chart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChartPoint {
+    /// Start of the bucket, Unix ms.
+    pub start_ms: i64,
+    /// Average latency, ms; `None` if nothing answered.
+    pub avg: Option<f64>,
+    /// Packet loss, percent.
+    pub loss: f64,
+}
+
+/// A latency and loss chart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chart {
+    /// Period shown, Unix ms.
+    pub from_ms: i64,
+    /// End of the period, Unix ms.
+    pub to_ms: i64,
+    /// Length of a bucket, ms.
+    pub bucket_ms: i64,
+    /// The buckets.
+    pub points: Vec<ChartPoint>,
+    /// Comments and alert marks: time and text.
+    pub marks: Vec<(i64, String)>,
+}
+
+/// An alert of the period.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertRow {
+    /// When it started, as shown.
+    pub started: String,
+    /// What happened.
+    pub what: String,
+    /// How long it lasted, as shown (empty for a moment).
+    pub lasted: String,
+    /// The worst value, as shown.
+    pub worst: String,
+}
+
+/// A target tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetReport {
+    /// The target's label, "208.67.222.222 / OpenDNS".
+    pub label: String,
+    /// Period of the table, as shown ("12:43:25 – 12:53:25").
+    pub focus: String,
+    /// The hops.
+    pub hops: Vec<HopRow>,
+    /// The target's chart over the timeline's period.
+    pub chart: Option<Chart>,
+    /// Alerts of the chart's period.
+    pub alerts: Vec<AlertRow>,
+}
+
+/// A row of All targets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryRow {
+    /// Host as entered.
+    pub title: String,
+    /// Traced address.
+    pub address: String,
+    /// State: running, paused, alert…
+    pub status: String,
+    /// Hops to the target.
+    pub hops: Option<usize>,
+    /// The target hop's numbers (avg, min, max, cur, jitter unused, loss).
+    pub numbers: Option<HopRow>,
+}
+
+/// What a snapshot shows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Snapshot {
+    /// One target.
+    Target(TargetReport),
+    /// All targets: the table and the charts that are ticked.
+    AllTargets {
+        /// Period of the table, as shown.
+        focus: String,
+        /// The rows.
+        rows: Vec<SummaryRow>,
+        /// Charts with their target's label.
+        charts: Vec<(String, Chart)>,
+    },
+}
+
+impl Snapshot {
+    /// The suggested file name: "Ping Watch 2026-11-15 15-30 OpenDNS.html" (`stamp` is the date and time part).
+    pub fn file_name(&self, stamp: &str) -> String {
+        let what = match self {
+            Self::Target(report) => report.label.rsplit(" / ").next().unwrap_or(&report.label).to_owned(),
+            Self::AllTargets { .. } => "All targets".to_owned(),
+        };
+        let safe: String = what.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        format!("{APP_NAME} {stamp} {safe}.html")
+    }
+}
+
+/// The page of `snapshot`, taken at `taken` (local time as shown), with `clock` turning Unix ms into local times for
+/// the chart axes ("15:04").
+pub fn html(snapshot: &Snapshot, taken: &str, version: &str, clock: &dyn Fn(i64) -> String) -> String {
+    let title = match snapshot {
+        Snapshot::Target(report) => report.label.clone(),
+        Snapshot::AllTargets { .. } => "All targets".to_owned(),
+    };
+    let mut page = String::new();
+    write_head(&mut page, &title);
+    let _ = write!(
+        page,
+        "<header><h1>{}</h1><p class=\"meta\">{} {} · snapshot of {}</p></header>",
+        escape(&title),
+        APP_NAME,
+        escape(version),
+        escape(taken)
+    );
+    match snapshot {
+        Snapshot::Target(report) => write_target(&mut page, report, clock),
+        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, focus, rows, charts, clock),
+    }
+    page.push_str("</body></html>\n");
+    page
+}
+
+/// The document head with the light palette's styles.
+fn write_head(page: &mut String, title: &str) {
+    let p = &LIGHT;
+    let _ = write!(
+        page,
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>{title} · {APP_NAME}</title><style>\
+:root{{color-scheme:light}}\
+body{{margin:24px;background:{bg};color:{ink};font:14px/1.45 \"Segoe UI\",system-ui,sans-serif}}\
+h1{{margin:0;font-size:22px;font-weight:600}}h2{{margin:28px 0 8px;font-size:16px;font-weight:600}}\
+.meta,.muted{{color:{muted}}}.meta{{margin:2px 0 0}}\
+table{{border-collapse:collapse;width:100%;background:{pane};border:1px solid {rule}}}\
+th{{background:{header};color:{muted};font-weight:500;text-align:left;padding:5px 8px;border-bottom:1px solid {rule}}}\
+td{{padding:4px 8px;border-top:1px solid {stripe};white-space:nowrap}}\
+.num{{text-align:right;font-variant-numeric:tabular-nums}}.bad{{color:{bad}}}.lost td{{color:{muted}}}\
+svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top:6px}}\
+@media print{{body{{margin:0}}table,.chart{{break-inside:avoid}}}}\
+</style></head><body>",
+        title = escape(title),
+        bg = hex(p.chassis),
+        ink = hex(p.ink),
+        muted = hex(p.ink_muted),
+        pane = hex(p.pane),
+        rule = hex(p.rule),
+        header = hex(p.pane_header),
+        stripe = hex(p.stripe),
+        bad = hex(p.bad),
+    );
+}
+
+/// The page of a target: table, chart, alerts.
+fn write_target(page: &mut String, report: &TargetReport, clock: &dyn Fn(i64) -> String) {
+    let _ = write!(page, "<h2>Route</h2><p class=\"muted\">Focus {}</p>", escape(&report.focus));
+    let scale = bar_scale(report.hops.iter().filter_map(|hop| hop.avg));
+    page.push_str("<table><tr><th class=\"num\">Hop</th><th class=\"num\">Count</th><th>IP</th><th>Name</th>");
+    for title in ["Avg", "Min", "Max", "Cur", "Jitter", "PL%"] {
+        let _ = write!(page, "<th class=\"num\">{title}</th>");
+    }
+    let _ = write!(page, "<th>Latency (0–{scale:.0} ms)</th></tr>");
+    for hop in &report.hops {
+        let lost = hop.address.is_none();
+        let _ = write!(
+            page,
+            "<tr{}><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td>",
+            if lost { " class=\"lost\"" } else { "" },
+            hop.ttl,
+            hop.sent,
+            escape(hop.address.as_deref().unwrap_or("*")),
+            escape(hop.name.as_deref().unwrap_or(if lost { "No response" } else { "" })),
+        );
+        write_numbers(page, hop);
+        let _ = write!(page, "<td>{}</td></tr>", latency_bar(hop, scale));
+    }
+    page.push_str("</table>");
+    if let Some(chart) = &report.chart {
+        let _ = write!(page, "<h2>Latency and loss of the target</h2>{}", chart_svg(chart, clock));
+    }
+    page.push_str("<h2>Alerts in this period</h2>");
+    if report.alerts.is_empty() {
+        page.push_str("<p class=\"muted\">None.</p>");
+    } else {
+        page.push_str("<table><tr><th>Started</th><th>What</th><th>Lasted</th><th>Worst</th></tr>");
+        for alert in &report.alerts {
+            let _ = write!(
+                page,
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                escape(&alert.started),
+                escape(&alert.what),
+                escape(&alert.lasted),
+                escape(&alert.worst)
+            );
+        }
+        page.push_str("</table>");
+    }
+}
+
+/// The page of All targets: table and the ticked charts.
+fn write_all(
+    page: &mut String,
+    focus: &str,
+    rows: &[SummaryRow],
+    charts: &[(String, Chart)],
+    clock: &dyn Fn(i64) -> String,
+) {
+    let _ = write!(page, "<h2>Targets</h2><p class=\"muted\">Focus {}</p>", escape(focus));
+    let scale = bar_scale(rows.iter().filter_map(|row| row.numbers.as_ref().and_then(|hop| hop.avg)));
+    page.push_str("<table><tr><th>Status</th><th>Target</th><th>IP</th><th class=\"num\">Hops</th>");
+    for title in ["Avg", "Min", "Max", "Cur", "Jitter", "PL%"] {
+        let _ = write!(page, "<th class=\"num\">{title}</th>");
+    }
+    let _ = write!(page, "<th>Latency (0–{scale:.0} ms)</th></tr>");
+    for row in rows {
+        let status_class = if row.status == "alert" { " class=\"bad\"" } else { "" };
+        let _ = write!(
+            page,
+            "<tr><td{status_class}>{}</td><td>{}</td><td>{}</td><td class=\"num\">{}</td>",
+            escape(&row.status),
+            escape(&row.title),
+            escape(&row.address),
+            row.hops.map(|hops| hops.to_string()).unwrap_or_default()
+        );
+        match &row.numbers {
+            Some(hop) => {
+                write_numbers(page, hop);
+                let _ = write!(page, "<td>{}</td>", latency_bar(hop, scale));
+            }
+            None => page.push_str(&"<td></td>".repeat(7)),
+        }
+        page.push_str("</tr>");
+    }
+    page.push_str("</table>");
+    for (label, chart) in charts {
+        let _ = write!(page, "<h2>{}</h2>{}", escape(label), chart_svg(chart, clock));
+    }
+}
+
+/// The Avg, Min, Max, Cur, Jitter and PL% cells of a hop.
+fn write_numbers(page: &mut String, hop: &HopRow) {
+    for value in [hop.avg, hop.min, hop.max] {
+        let _ = write!(page, "<td class=\"num\">{}</td>", ms(value));
+    }
+    let current = match hop.cur {
+        Some(value) => format!("{value:.1}"),
+        None if hop.sent > 0 => "*".to_owned(),
+        None => "-".to_owned(),
+    };
+    let _ = write!(page, "<td class=\"num\">{current}</td><td class=\"num\">{}</td>", ms(hop.jitter));
+    let loss_class = if hop.loss > 0.0 { "num bad" } else { "num" };
+    let _ = write!(page, "<td class=\"{loss_class}\">{:.1}</td>", hop.loss);
+}
+
+/// A latency as shown in the table: one decimal, "-" for none.
+fn ms(value: Option<f64>) -> String {
+    value.map_or_else(|| "-".to_owned(), |value| format!("{value:.1}"))
+}
+
+/// The scale of the latency bars: twice the highest average, rounded up to 50 ms, at least 250 ms (as the app).
+fn bar_scale(averages: impl Iterator<Item = f64>) -> f64 {
+    let highest = averages.fold(0.0_f64, f64::max);
+    ((highest * 2.0 / 50.0).ceil() * 50.0).max(250.0)
+}
+
+/// A hop's latency bar: zones, the loss share, the min–max range, the average and the current value.
+fn latency_bar(hop: &HopRow, scale: f64) -> String {
+    let p = &LIGHT;
+    let (width, height) = BAR;
+    let x = |value: f64| (value / scale).clamp(0.0, 1.0) * width;
+    let mut svg = format!("<svg width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">");
+    if hop.address.is_none() {
+        let _ = write!(svg, "<rect width=\"{width}\" height=\"{height}\" fill=\"{}\"/>", hex(p.lost));
+        svg.push_str("</svg>");
+        return svg;
+    }
+    for (from, to, color) in
+        [(0.0, GOOD_MS, p.good_zone), (GOOD_MS, WARN_MS, p.warn_zone), (WARN_MS, scale, p.bad_zone)]
+    {
+        let _ = write!(
+            svg,
+            "<rect x=\"{:.1}\" width=\"{:.1}\" height=\"{height}\" fill=\"{}\"/>",
+            x(from),
+            (x(to) - x(from)).max(0.0),
+            hex(color)
+        );
+    }
+    if hop.loss > 0.0 {
+        let loss_width = width * (hop.loss / 100.0).clamp(0.0, 1.0);
+        let _ = write!(
+            svg,
+            "<rect y=\"{:.1}\" width=\"{loss_width:.1}\" height=\"{:.1}\" fill=\"{}\" stroke=\"{}\"/>",
+            height * 0.2,
+            height * 0.6,
+            hex(p.lost),
+            hex(p.bad)
+        );
+    }
+    let middle = height / 2.0;
+    if let (Some(min), Some(max)) = (hop.min, hop.max) {
+        let _ = write!(
+            svg,
+            "<line x1=\"{:.1}\" x2=\"{:.1}\" y1=\"{middle}\" y2=\"{middle}\" stroke=\"{}\"/>",
+            x(min),
+            x(max),
+            hex(p.range)
+        );
+    }
+    if let Some(avg) = hop.avg {
+        let _ = write!(
+            svg,
+            "<line x1=\"{0:.1}\" x2=\"{0:.1}\" y1=\"2\" y2=\"{1}\" stroke=\"{2}\" stroke-width=\"2\"/>",
+            x(avg),
+            height - 2.0,
+            hex(p.signal)
+        );
+    }
+    if let Some(cur) = hop.cur {
+        let _ = write!(svg, "<circle cx=\"{:.1}\" cy=\"{middle}\" r=\"2.5\" fill=\"{}\"/>", x(cur), hex(p.bad));
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+/// A chart: zones up to a scale of 1.2 × the highest average (rounded, at least 100 ms), the average latency as a
+/// line, loss hanging from the top, marks as dashed lines with their text on hover, time and latency labels.
+fn chart_svg(chart: &Chart, clock: &dyn Fn(i64) -> String) -> String {
+    let p = &LIGHT;
+    let (width, height, left, bottom) = CHART;
+    let (plot_w, plot_h) = (width - left, height - bottom - CHART_TOP);
+    let highest = chart.points.iter().filter_map(|point| point.avg).fold(0.0_f64, f64::max);
+    let scale = ((highest * 1.2 / 50.0).ceil() * 50.0).max(100.0);
+    #[expect(clippy::cast_precision_loss, reason = "times in ms fit an f64 exactly enough for drawing")]
+    let span = (chart.to_ms.saturating_sub(chart.from_ms)).max(1) as f64;
+    #[expect(clippy::cast_precision_loss, reason = "times in ms fit an f64 exactly enough for drawing")]
+    let x = |ms: i64| left + (ms.saturating_sub(chart.from_ms) as f64 / span).clamp(0.0, 1.0) * plot_w;
+    let y = |value: f64| CHART_TOP + plot_h - (value / scale).clamp(0.0, 1.0) * plot_h;
+    let mut svg = format!("<svg class=\"chart\" viewBox=\"0 0 {width} {height}\" width=\"100%\" role=\"img\">");
+    if let Some(first) = chart.points.first() {
+        let data_x = x(first.start_ms);
+        for (low, high, color) in
+            [(0.0, GOOD_MS, p.good_zone), (GOOD_MS, WARN_MS, p.warn_zone), (WARN_MS, scale, p.bad_zone)]
+        {
+            if low < scale {
+                let top = y(high.min(scale));
+                let _ = write!(
+                    svg,
+                    "<rect x=\"{data_x:.1}\" y=\"{top:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\"/>",
+                    (left + plot_w - data_x).max(0.0),
+                    y(low) - top,
+                    hex(color)
+                );
+            }
+        }
+    }
+    for step in 0..=2_u8 {
+        let value = scale * f64::from(step) / 2.0;
+        let _ = write!(
+            svg,
+            "<line x1=\"{left}\" x2=\"{width}\" y1=\"{0:.1}\" y2=\"{0:.1}\" stroke=\"#00000018\"/><text x=\"{1}\" y=\"{2:.1}\" font-size=\"11\" text-anchor=\"end\" fill=\"{3}\">{value:.0}</text>",
+            y(value),
+            left - 6.0,
+            y(value) + 4.0,
+            hex(p.ink_muted)
+        );
+    }
+    #[expect(clippy::cast_precision_loss, reason = "a bucket length in ms")]
+    let bucket_w = (chart.bucket_ms as f64 / span * plot_w).max(1.0);
+    for point in chart.points.iter().filter(|point| point.loss > 0.0) {
+        let _ = write!(
+            svg,
+            "<rect x=\"{:.1}\" y=\"{CHART_TOP}\" width=\"{bucket_w:.1}\" height=\"{:.1}\" fill=\"{}\"/>",
+            x(point.start_ms),
+            point.loss / 100.0 * plot_h,
+            hex(p.loss)
+        );
+    }
+    // The average as a line, broken where nothing answered.
+    let mut segment = Vec::new();
+    let flush = |segment: &mut Vec<String>, svg: &mut String| {
+        if segment.len() > 1 {
+            let _ = write!(
+                svg,
+                "<polyline fill=\"none\" stroke=\"{}\" stroke-width=\"1.2\" points=\"{}\"/>",
+                hex(p.ink),
+                segment.join(" ")
+            );
+        }
+        segment.clear();
+    };
+    for point in &chart.points {
+        match point.avg {
+            Some(avg) => segment.push(format!("{:.1},{:.1}", x(point.start_ms), y(avg))),
+            None => flush(&mut segment, &mut svg),
+        }
+    }
+    flush(&mut segment, &mut svg);
+    for (at_ms, text) in &chart.marks {
+        let _ = write!(
+            svg,
+            "<line x1=\"{0:.1}\" x2=\"{0:.1}\" y1=\"{CHART_TOP}\" y2=\"{1}\" stroke=\"{2}\" stroke-dasharray=\"4 3\"><title>{3}</title></line>",
+            x(*at_ms),
+            CHART_TOP + plot_h,
+            hex(p.comment),
+            escape(text)
+        );
+    }
+    for step in 0..TIME_LABELS {
+        let at = chart.from_ms.saturating_add(
+            chart
+                .to_ms
+                .saturating_sub(chart.from_ms)
+                .saturating_mul(step)
+                .checked_div(TIME_LABELS - 1)
+                .unwrap_or(0),
+        );
+        let anchor = if step == 0 {
+            "start"
+        } else if step == TIME_LABELS - 1 {
+            "end"
+        } else {
+            "middle"
+        };
+        let _ = write!(
+            svg,
+            "<text x=\"{:.1}\" y=\"{}\" font-size=\"11\" text-anchor=\"{anchor}\" fill=\"{}\">{}</text>",
+            x(at),
+            height - 6.0,
+            hex(p.ink_muted),
+            escape(&clock(at))
+        );
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+/// `#rrggbb` of a color.
+fn hex(color: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+}
+
+/// Text made safe for HTML.
+fn escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hop answering from 10.0.0.`last` in `avg` ms.
+    fn hop(ttl: u8, avg: f64, loss: f64) -> HopRow {
+        HopRow {
+            ttl,
+            address: Some(format!("10.0.0.{ttl}")),
+            name: None,
+            sent: 10,
+            avg: Some(avg),
+            min: Some(avg - 1.0),
+            max: Some(avg + 1.0),
+            cur: Some(avg),
+            jitter: Some(0.5),
+            loss,
+        }
+    }
+
+    #[test]
+    fn text_is_escaped() {
+        assert_eq!(escape("<b>\"A&B\"</b>"), "&lt;b&gt;&quot;A&amp;B&quot;&lt;/b&gt;");
+    }
+
+    #[test]
+    fn file_names_are_safe() {
+        let report = TargetReport {
+            label: "1.1.1.1 / a/b:c".to_owned(),
+            focus: String::new(),
+            hops: Vec::new(),
+            chart: None,
+            alerts: Vec::new(),
+        };
+        assert_eq!(Snapshot::Target(report).file_name("2026-11-15 15-30"), "Ping Watch 2026-11-15 15-30 a-b-c.html");
+        let all = Snapshot::AllTargets { focus: String::new(), rows: Vec::new(), charts: Vec::new() };
+        assert_eq!(all.file_name("2026-11-15 15-30"), "Ping Watch 2026-11-15 15-30 All targets.html");
+    }
+
+    #[test]
+    fn a_target_page_has_its_parts() {
+        let chart = Chart {
+            from_ms: 0,
+            to_ms: 60_000,
+            bucket_ms: 1_000,
+            points: vec![
+                ChartPoint { start_ms: 0, avg: Some(20.0), loss: 0.0 },
+                ChartPoint { start_ms: 1_000, avg: Some(25.0), loss: 50.0 },
+            ],
+            marks: vec![(30_000, "Route changed <here>".to_owned())],
+        };
+        let report = TargetReport {
+            label: "1.1.1.1 / Cloudflare".to_owned(),
+            focus: "15:00 – 15:10".to_owned(),
+            hops: vec![hop(1, 2.0, 0.0), hop(2, 30.0, 5.0)],
+            chart: Some(chart),
+            alerts: vec![AlertRow {
+                started: "15.11 15:05".to_owned(),
+                what: "loss above 10 %".to_owned(),
+                lasted: "2 minutes".to_owned(),
+                worst: "23 %".to_owned(),
+            }],
+        };
+        let page = html(&Snapshot::Target(report), "15.11.2026 15:10", "1.0.0", &|ms| format!("t{ms}"));
+        assert!(page.starts_with("<!doctype html>"));
+        assert!(page.contains("1.1.1.1 / Cloudflare"));
+        assert!(page.contains("10.0.0.2"));
+        assert!(page.contains("<polyline"), "the latency line");
+        assert!(page.contains("Route changed &lt;here&gt;"), "marks are escaped");
+        assert!(page.contains("loss above 10 %"));
+        assert!(!page.contains("http"), "nothing is loaded from outside");
+    }
+}

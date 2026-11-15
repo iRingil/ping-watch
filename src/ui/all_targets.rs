@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui, vec2};
 use egui_extras::{Column, TableBuilder};
 
+use crate::snapshot::{HopRow, Snapshot, SummaryRow};
 use crate::store::history;
+use crate::store::history::Store;
 use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::{AllTargetsSettings, WindowStore};
 use crate::ui::focus::Focus;
@@ -78,6 +80,48 @@ impl AllTargets {
     /// Host of the selected row, if any.
     pub fn selected(&self) -> Option<&str> {
         self.selected.as_deref()
+    }
+
+    /// The page as a snapshot: the table over the page's focus and the ticked charts over its period.
+    pub fn snapshot(&self, tabs: &[Tab], reader: Option<&Store>, alerting: &[String]) -> Snapshot {
+        let now_ms = history::unix_ms(SystemTime::now());
+        let visible = (now_ms.saturating_sub(self.settings.trace.period.millis()), now_ms);
+        let focus = match self.settings.trace.focus.range(visible, now_ms) {
+            Some((from, to)) => format!("{} – {}", tab::clock(from), tab::clock(to)),
+            None => "since the traces started".to_owned(),
+        };
+        let rows = tabs
+            .iter()
+            .map(|tab| {
+                let overview = tab.overview_with(self.settings.trace.focus, visible);
+                let alert = alerting.iter().any(|host| host.eq_ignore_ascii_case(&overview.title));
+                let numbers = overview.target_hop.as_ref().map(|hop| HopRow {
+                    ttl: hop.ttl,
+                    address: hop.address.map(|ip| ip.to_string()),
+                    name: None,
+                    sent: hop.stats.sent(),
+                    avg: hop.stats.average().map(latency_bars::millis),
+                    min: hop.stats.best().map(latency_bars::millis),
+                    max: hop.stats.worst().map(latency_bars::millis),
+                    cur: hop.stats.last().map(latency_bars::millis),
+                    jitter: hop.stats.jitter().map(latency_bars::millis),
+                    loss: hop.stats.loss_percent(),
+                });
+                SummaryRow {
+                    title: overview.title.clone(),
+                    address: overview.target.map(|ip| ip.to_string()).unwrap_or_default(),
+                    status: if alert { "alert".to_owned() } else { overview.status.clone() },
+                    hops: overview.hops,
+                    numbers,
+                }
+            })
+            .collect();
+        let charts = tabs
+            .iter()
+            .filter(|tab| tab.is_charted())
+            .filter_map(|tab| Some((tab.label()?, tab.chart_over(reader, visible.0, visible.1)?)))
+            .collect();
+        Snapshot::AllTargets { focus, rows, charts }
     }
 
     /// Interval for targets added on this page.
