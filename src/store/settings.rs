@@ -47,6 +47,8 @@ pub struct AppSettings {
     pub retention: Duration,
     /// Dark, light or following Windows.
     pub theme: ThemeChoice,
+    /// Look for a new version once a day.
+    pub check_updates: bool,
 }
 
 impl Default for AppSettings {
@@ -63,6 +65,7 @@ impl Default for AppSettings {
             // The longest period the timeline shows.
             retention: Duration::from_secs(7 * 24 * 60 * 60),
             theme: ThemeChoice::default(),
+            check_updates: true,
         }
     }
 }
@@ -137,7 +140,31 @@ impl SettingsStore {
                 .filter(|retention| RETENTIONS.contains(retention))
                 .unwrap_or(fallback.retention),
             theme: self.get("theme")?.and_then(|key| ThemeChoice::from_key(&key)).unwrap_or(fallback.theme),
+            check_updates: self.get("check_updates")?.map_or(fallback.check_updates, |value| value == "1"),
         })
+    }
+
+    /// When the last daily update check succeeded, Unix ms; `None` if never.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn last_update_check(&self) -> Result<Option<i64>, HistoryError> {
+        Ok(self.get("update_checked_ms")?.and_then(|value| value.parse().ok()))
+    }
+
+    /// Remembers that the daily update check succeeded at `at_ms`.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn set_last_update_check(&self, at_ms: i64) -> Result<(), HistoryError> {
+        self.connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('update_checked_ms', ?1)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [at_ms.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Stores `settings`.
@@ -156,6 +183,7 @@ impl SettingsStore {
             ("max_hops", settings.max_hops.to_string()),
             ("retention_s", settings.retention.as_secs().to_string()),
             ("theme", settings.theme.key().to_owned()),
+            ("check_updates", if settings.check_updates { "1".to_owned() } else { "0".to_owned() }),
         ];
         let transaction = self.connection.transaction()?;
         for (key, value) in values {
@@ -194,9 +222,19 @@ mod tests {
             max_hops: 40,
             retention: DAY,
             theme: ThemeChoice::Light,
+            check_updates: false,
         };
         store.save(&settings).expect("saved");
         assert_eq!(store.load().ok(), Some(settings));
+    }
+
+    #[test]
+    fn the_last_update_check_is_remembered() {
+        let store = SettingsStore::open_in_memory().expect("store opens");
+        assert_eq!(store.last_update_check().ok(), Some(None));
+        store.set_last_update_check(1_234).expect("saved");
+        store.set_last_update_check(5_678).expect("saved again");
+        assert_eq!(store.last_update_check().ok(), Some(Some(5_678)));
     }
 
     #[test]

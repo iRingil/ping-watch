@@ -1,5 +1,5 @@
 //! Update check: asks GitHub for the latest release of the app and compares its version with this one. Runs on a
-//! thread of its own when the user asks (Settings → About), never by itself.
+//! thread of its own: once a day if the user keeps it on (Settings → General), and when asked in About.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;

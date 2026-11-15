@@ -114,8 +114,8 @@ for:
 
 - **ICMP echo requests** (pings) to the targets you enter and, with growing hop limits, to the routers on the way.
 - **DNS lookups**: the address of a target given by name, and the names of the routers on the route.
-- **GitHub** (`api.github.com`): only when you click Settings → About → Check for updates, a request for the latest
-  release of this repository. Ping Watch never checks by itself.
+- **GitHub** (`api.github.com`): once a day, a request for the latest release of this repository, to tell you when a
+  new version is out (Settings → General → Updates turns it off), and when you click About → Check for updates.
 
 The history, the settings and the list of targets stay on this PC, in the file listed above.
 

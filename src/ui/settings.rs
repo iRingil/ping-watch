@@ -179,6 +179,10 @@ impl SettingsWindow {
                 ui.radio_value(&mut settings.close_to_tray, true, "Hide to the tray and keep tracing");
             });
             ui.end_row();
+            ui.weak("Updates");
+            ui.checkbox(&mut settings.check_updates, "Check for a new version")
+                .on_hover_text("Once a day, in the background; Ping Watch tells you when one is out");
+            ui.end_row();
             ui.weak("Windows sign-in");
             ui.vertical(|ui| {
                 if ui.checkbox(&mut self.autostart, "Start Ping Watch").changed() {
@@ -373,6 +377,11 @@ impl SettingsWindow {
 }
 
 impl SettingsWindow {
+    /// Shows the result of the background check in About, as if the button had been clicked.
+    pub fn set_update_result(&mut self, result: Result<Outcome, UpdateError>) {
+        self.update = UpdateState::Done(result);
+    }
+
     /// The update check's state under the version: a spinner while asking, then what it found.
     fn update_result(&mut self, ui: &mut Ui) {
         if let UpdateState::Checking(check) = &self.update

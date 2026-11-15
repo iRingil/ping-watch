@@ -27,6 +27,7 @@ use crate::ui::tab_strip;
 use crate::ui::theme;
 use crate::ui::theme::ThemeChoice;
 use crate::ui::tray::{Tray, TrayCommand};
+use crate::update::{Check, Outcome, REPOSITORY};
 
 /// Least time between two stores of the window state while it changes (moving, resizing).
 const WINDOW_SAVE_INTERVAL: Duration = Duration::from_secs(1);
@@ -50,6 +51,12 @@ const FADE_WIDTH: f32 = 48.0;
 const BELL_WIDTH: f32 = 28.0;
 /// Room for the red dot of a tab with an alert on.
 const ALERT_DOT_WIDTH: f32 = 14.0;
+/// Wait after the start before the first daily update check, so it doesn't compete with the start itself.
+const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(10);
+/// How often the daily update check runs.
+const UPDATE_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+/// Wait before trying a failed update check again.
+const UPDATE_RETRY: Duration = Duration::from_secs(60 * 60);
 /// How often the alert rules are checked.
 const ALERT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Width of the "+" (new target) button.
@@ -125,6 +132,14 @@ pub struct PingWatchApp {
     notifier: Notifier,
     /// The Alerts window.
     alerts_window: AlertsWindow,
+    /// When the app started (the first daily update check waits a little after it).
+    started_at: Instant,
+    /// The daily update check while it runs.
+    update_check: Option<Check>,
+    /// When to try the daily check again after it failed (no internet), so it doesn't retry every frame.
+    update_retry_at: Option<Instant>,
+    /// A newer version found by the daily check: marks the gear.
+    update_available: bool,
 }
 
 impl PingWatchApp {
@@ -226,6 +241,10 @@ impl PingWatchApp {
             alerts_checked_at: Instant::now(),
             notifier,
             alerts_window: AlertsWindow::default(),
+            started_at: Instant::now(),
+            update_check: None,
+            update_retry_at: None,
+            update_available: false,
         }
     }
 
@@ -302,6 +321,56 @@ impl PingWatchApp {
                 }
             }
         }
+    }
+
+    /// The daily update check: UPDATE_CHECK_DELAY after the start, then once a day (the time of the last success is
+    /// stored, so restarts don't ask again). It runs on its own thread, so a missing network never holds up the
+    /// window; a failure is retried an hour later. A newer version is announced once per check: a notification,
+    /// a mark on the gear and the result in About.
+    fn check_updates_daily(&mut self) {
+        if let Some(check) = &self.update_check {
+            let Some(result) = check.result() else {
+                return;
+            };
+            self.update_check = None;
+            match &result {
+                Ok(outcome) => {
+                    let now_ms = history::unix_ms(std::time::SystemTime::now());
+                    if let Some(store) = &self.settings_store
+                        && let Err(error) = store.set_last_update_check(now_ms)
+                    {
+                        log::warn!("cannot remember the update check: {error}");
+                    }
+                    if let Outcome::Newer { version, .. } = outcome {
+                        self.update_available = true;
+                        self.notifier.show(
+                            &format!("Ping Watch {version} is available"),
+                            "Settings → About has the link to download it",
+                        );
+                        self.settings_window.set_update_result(result.clone());
+                    }
+                }
+                Err(error) => {
+                    log::info!("update check failed, retrying in an hour: {error}");
+                    self.update_retry_at = Instant::now().checked_add(UPDATE_RETRY);
+                }
+            }
+            return;
+        }
+        if !self.settings.check_updates
+            || self.started_at.elapsed() < UPDATE_CHECK_DELAY
+            || self.update_retry_at.is_some_and(|at| Instant::now() < at)
+        {
+            return;
+        }
+        let now_ms = history::unix_ms(std::time::SystemTime::now());
+        let last = self.settings_store.as_ref().and_then(|store| store.last_update_check().ok().flatten());
+        let day_ms = i64::try_from(UPDATE_PERIOD.as_millis()).unwrap_or(i64::MAX);
+        if last.is_some_and(|last| now_ms.saturating_sub(last) < day_ms) {
+            return;
+        }
+        self.update_retry_at = None;
+        self.update_check = Some(Check::start(REPOSITORY, env!("CARGO_PKG_VERSION")));
     }
 
     /// Reloads the alert rules after the Alerts window changed them.
@@ -523,7 +592,7 @@ impl PingWatchApp {
             if bell_button(ui, self.alert_engine.active_count()).clicked() {
                 self.alerts_window.open();
             }
-            if gear_button(ui).clicked() {
+            if gear_button(ui, self.update_available).clicked() {
                 self.settings_window.open();
             }
         });
@@ -550,7 +619,7 @@ fn fade_out(ui: &Ui, rect: Rect, color: egui::Color32) {
 }
 
 /// The gear at the right end of the tab bar: will open the app menu (settings, alerts, copy, about).
-fn gear_button(ui: &mut Ui) -> egui::Response {
+fn gear_button(ui: &mut Ui, update_available: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(GEAR_WIDTH, TAB_HEIGHT), Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(
@@ -561,7 +630,11 @@ fn gear_button(ui: &mut Ui) -> egui::Response {
     }
     let color = if response.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted };
     icons::paint(ui, rect.center(), icons::Icon::Gear, color);
-    response.on_hover_text("Settings and more")
+    if update_available {
+        ui.painter()
+            .circle_filled(egui::pos2(rect.right() - 6.0, rect.top() + 8.0), 4.0, theme::palette(ui).signal);
+    }
+    response.on_hover_text(if update_available { "A new version is available: see About" } else { "Settings and more" })
 }
 
 /// Width of a tab titled `title`, with a close mark if `closable` and the alert dot if `alert`.
@@ -872,6 +945,7 @@ impl eframe::App for PingWatchApp {
         self.all_targets.save(self.window_store.as_ref());
         self.save_settings();
         self.check_alerts();
+        self.check_updates_daily();
         let Some(tray) = &self.tray else {
             return;
         };
