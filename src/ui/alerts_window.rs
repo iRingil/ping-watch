@@ -16,6 +16,12 @@ use crate::ui::theme;
 const WIDTH: f32 = 720.0;
 /// Least height of a page, so switching pages doesn't make the window jump.
 const PAGE_HEIGHT: f32 = 340.0;
+/// Most columns of the rule form's target list.
+const TARGET_COLUMNS: usize = 3;
+/// Rows of the target list shown before it scrolls.
+const TARGET_ROWS: usize = 5;
+/// Width of a column of the target list.
+const TARGET_COLUMN_WIDTH: f32 = 170.0;
 /// Height of a journal row.
 const JOURNAL_ROW: f32 = 24.0;
 /// Periods a loss or latency rule can look back over.
@@ -305,28 +311,45 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
             }
             ConditionKind::RouteChanged => {}
         }
-        let lines = u8::try_from(hosts.len().saturating_add(1)).unwrap_or(u8::MAX);
-        label_first_row(ui, "Targets", lines, ui.spacing().interact_size.y);
+        // The open targets, plus any the rule names that aren't open now.
+        let mut choices: Vec<String> = hosts.to_vec();
+        for host in &draft.hosts {
+            if !choices.iter().any(|choice| choice.eq_ignore_ascii_case(host)) {
+                choices.push(host.clone());
+            }
+        }
+        // Top to bottom, then left to right, in up to TARGET_COLUMNS columns; past TARGET_ROWS rows the list
+        // scrolls, so the rest of the form stays in place. With "All targets" the list isn't needed at all.
+        let rows = choices.len().div_ceil(TARGET_COLUMNS).max(1);
+        let visible_rows = if draft.all_targets || choices.is_empty() { 0 } else { rows.min(TARGET_ROWS) };
+        let row_height = ui.spacing().interact_size.y;
+        let lines = u8::try_from(visible_rows.saturating_add(1)).unwrap_or(u8::MAX);
+        label_first_row(ui, "Targets", lines, row_height);
         ui.vertical(|ui| {
             ui.checkbox(&mut draft.all_targets, "All targets");
-            // The open targets, plus any the rule names that aren't open now.
-            let mut choices: Vec<String> = hosts.to_vec();
-            for host in &draft.hosts {
-                if !choices.iter().any(|choice| choice.eq_ignore_ascii_case(host)) {
-                    choices.push(host.clone());
-                }
+            if visible_rows == 0 {
+                return;
             }
-            ui.add_enabled_ui(!draft.all_targets, |ui| {
-                for host in choices {
-                    let mut chosen = draft.hosts.iter().any(|listed| listed.eq_ignore_ascii_case(&host));
-                    if ui.checkbox(&mut chosen, &host).changed() {
-                        if chosen {
-                            draft.hosts.push(host.clone());
-                        } else {
-                            draft.hosts.retain(|listed| !listed.eq_ignore_ascii_case(&host));
-                        }
+            #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
+            let height = visible_rows as f32 * (row_height + ui.spacing().item_spacing.y);
+            ScrollArea::vertical().id_salt("alert-targets").max_height(height).show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    for column in choices.chunks(rows) {
+                        ui.vertical(|ui| {
+                            ui.set_width(TARGET_COLUMN_WIDTH);
+                            for host in column {
+                                let mut chosen = draft.hosts.iter().any(|listed| listed.eq_ignore_ascii_case(host));
+                                if ui.checkbox(&mut chosen, host).changed() {
+                                    if chosen {
+                                        draft.hosts.push(host.clone());
+                                    } else {
+                                        draft.hosts.retain(|listed| !listed.eq_ignore_ascii_case(host));
+                                    }
+                                }
+                            }
+                        });
                     }
-                }
+                });
             });
         });
         ui.end_row();
