@@ -25,6 +25,8 @@ use crate::ui::app::PingWatchApp;
 
 /// Name of the app as users see it: window title, data folder, executable properties, documentation.
 pub const APP_NAME: &str = "Ping Watch";
+/// The app's website.
+pub const SITE_URL: &str = "https://iringil.github.io/ping-watch/";
 
 /// Inner size of the window on the very first start, logical points.
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [1200.0, 760.0];

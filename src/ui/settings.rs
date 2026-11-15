@@ -22,8 +22,6 @@ const WIDTH: f32 = 520.0;
 const PAGE_HEIGHT: f32 = 290.0;
 /// Side of the logo on the About page.
 const LOGO_SIZE: f32 = 96.0;
-/// The project's web page.
-const SITE_URL: &str = "https://iringil.github.io/ping-watch/";
 /// The project's source code.
 const REPO_URL: &str = "https://github.com/iRingil/ping-watch";
 /// Where problems and ideas are reported (the issue form picker).
@@ -398,7 +396,7 @@ impl SettingsWindow {
                 ));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.hyperlink_to(tr!(ui, "Website"), SITE_URL);
+                    ui.hyperlink_to(tr!(ui, "Website"), crate::SITE_URL);
                     // A painted dot: a bigger glyph would move the baseline of the links beside it.
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(6.0, 12.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot.center(), 2.0, theme::palette(ui).ink_muted);

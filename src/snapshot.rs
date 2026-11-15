@@ -6,10 +6,10 @@ use std::fmt::Write as _;
 
 use eframe::egui::Color32;
 
-use crate::APP_NAME;
 use crate::i18n::{Language, n, tr, trf};
 use crate::ui::theme::LIGHT;
 use crate::ui::timeline::{Period, Series, Trace, clock, seconds, time_marks, value_marks};
+use crate::{APP_NAME, SITE_URL};
 
 /// Latency below which a value is fine (green zone), ms.
 const GOOD_MS: f64 = 100.0;
@@ -150,9 +150,11 @@ pub fn html(snapshot: &Snapshot, taken: &str, version: &str, language: Language)
     let mut page = String::new();
     write_head(&mut page, &title, language);
     // The first section's heading on the left, the title and when the snapshot was taken on the right, in one row.
-    let meta =
-        trf!(language, "{app} {version} · snapshot of {taken}", app = APP_NAME, version = version, taken = taken);
-    let header = format!("<header><h1>{}</h1><p class=\"meta\">{}</p></header>", escape(&title), escape(&meta));
+    // The app and version link to the website; the rest of the line is the translated text, escaped.
+    let app = format!("<a href=\"{SITE_URL}\">{APP_NAME} {}</a>", escape(version));
+    let meta = escape(tr!(language, "{app} · snapshot of {taken}"));
+    let meta = crate::i18n::fill(&meta, &[("app", app), ("taken", escape(taken))]);
+    let header = format!("<header><h1>{}</h1><p class=\"meta\">{meta}</p></header>", escape(&title));
     match snapshot {
         Snapshot::Target(report) => write_target(&mut page, &header, report, language),
         Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, &header, focus, rows, charts, language),
@@ -171,7 +173,7 @@ fn write_head(page: &mut String, title: &str, language: Language) {
 :root{{color-scheme:light}}\
 body{{margin:24px;background:{bg};color:{ink};font:14px/1.45 \"Segoe UI\",system-ui,sans-serif}}\
 h1{{margin:0;font-size:22px;font-weight:600}}h2{{margin:28px 0 8px;font-size:16px;font-weight:600}}h3{{margin:16px 0 4px;font-size:14px;font-weight:600}}\
-.meta,.muted{{color:{muted}}}.meta{{margin:2px 0 0}}\
+.meta,.muted{{color:{muted}}}.meta{{margin:2px 0 0}}.meta a{{color:{link};text-decoration:none}}.meta a:hover{{text-decoration:underline}}\
 .top{{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:8px}}\
 .top h2{{margin:0}}.top p{{margin:2px 0 0}}header{{text-align:right}}\
 table{{border-collapse:collapse;width:100%;background:{pane};border:1px solid {rule}}}\
@@ -184,6 +186,7 @@ svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top
         title = escape(title),
         lang = language.key(),
         bg = hex(p.chassis),
+        link = hex(p.signal),
         ink = hex(p.ink),
         muted = hex(p.ink_muted),
         pane = hex(p.pane),
@@ -689,6 +692,10 @@ mod tests {
         assert!(page.contains("Jitter (ms)"), "the jitter strip");
         assert!(page.contains("Route changed &lt;here&gt;"), "marks are escaped");
         assert!(page.contains("loss above 10 %"));
-        assert!(!page.contains("http"), "nothing is loaded from outside");
+        assert!(
+            page.contains("<a href=\"https://iringil.github.io/ping-watch/\">Ping Watch 1.0.0</a>"),
+            "a link to the site"
+        );
+        assert!(!page.contains("src=") && !page.contains("<link"), "nothing is loaded from outside");
     }
 }

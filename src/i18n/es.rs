@@ -232,7 +232,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("since the trace started", "desde el inicio de la traza"),
     ("since the traces started", "desde el inicio de las trazas"),
     ("the route changed", "la ruta ha cambiado"),
-    ("{app} {version} · snapshot of {taken}", "{app} {version} · instantánea del {taken}"),
+    ("{app} · snapshot of {taken}", "{app} · instantánea del {taken}"),
     ("{host} has no address", "{host} no tiene dirección"),
     ("{host} is back to normal", "{host} ha vuelto a la normalidad"),
     ("{host}: route changed", "{host}: ruta cambiada"),
