@@ -12,6 +12,14 @@ use rusqlite::{Connection, params};
 
 use crate::route::{ProbeOutcome, Sample};
 
+/// Rows before the current one in the rolling jitter window (the window holds this + 1 answers). A macro so it can
+/// go into the SQL text with `concat!`.
+macro_rules! jitter_window_preceding {
+    () => {
+        "9"
+    };
+}
+
 /// How long samples are kept: the longest period the timeline can show.
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How often the recorder writes collected samples.
@@ -76,8 +84,8 @@ pub struct Bucket {
     pub avg: Option<Duration>,
     /// Slowest answer, `None` if nothing was answered.
     pub max: Option<Duration>,
-    /// Mean absolute difference between consecutive answers (the first answer of the queried period has no
-    /// predecessor), `None` if there is no such difference in the bucket.
+    /// Rolling jitter: the mean absolute difference between consecutive answers over the last ten answers, averaged
+    /// over the bucket (the queried period's first answers have shorter windows); `None` if there is none.
     pub jitter: Option<Duration>,
 }
 
@@ -206,22 +214,28 @@ impl Store {
         to_ms: i64,
         bucket_ms: i64,
     ) -> Result<Vec<Bucket>, HistoryError> {
-        // Jitter needs the previous *answered* sample, so it is computed over answered samples only and joined
-        // back by timestamp (unique per target and hop).
-        let mut statement = self.connection.prepare_cached(
+        // Jitter, as in PingPlotter's graph: the mean absolute difference between consecutive *answered* samples
+        // over the last JITTER_WINDOW answers, so a spike shows as a plateau rather than two needles. Computed over
+        // answered samples only and joined back by timestamp (unique per target and hop).
+        let mut statement = self.connection.prepare_cached(concat!(
             "SELECT ?3 + (s.ts_ms - ?3) / ?5 * ?5 AS start,
                     COUNT(*), COUNT(s.rtt_us), MIN(s.rtt_us), CAST(ROUND(AVG(s.rtt_us)) AS INTEGER), MAX(s.rtt_us),
                     CAST(ROUND(AVG(j.jitter)) AS INTEGER)
              FROM samples AS s
              LEFT JOIN (
-                 SELECT ts_ms, ABS(rtt_us - LAG(rtt_us) OVER (ORDER BY ts_ms)) AS jitter
-                 FROM samples
-                 WHERE target_id = ?1 AND ttl = ?2 AND ts_ms >= ?3 AND ts_ms < ?4 AND rtt_us IS NOT NULL
+                 SELECT ts_ms, AVG(step) OVER (ORDER BY ts_ms ROWS BETWEEN ",
+            jitter_window_preceding!(),
+            " PRECEDING AND CURRENT ROW) AS jitter
+                 FROM (
+                     SELECT ts_ms, ABS(rtt_us - LAG(rtt_us) OVER (ORDER BY ts_ms)) AS step
+                     FROM samples
+                     WHERE target_id = ?1 AND ttl = ?2 AND ts_ms >= ?3 AND ts_ms < ?4 AND rtt_us IS NOT NULL
+                 )
              ) AS j ON j.ts_ms = s.ts_ms
              WHERE s.target_id = ?1 AND s.ttl = ?2 AND s.ts_ms >= ?3 AND s.ts_ms < ?4
              GROUP BY start
-             ORDER BY start",
-        )?;
+             ORDER BY start"
+        ))?;
         let rows = statement.query_map(params![target_id, ttl, from_ms, to_ms, bucket_ms.max(1)], |row| {
             Ok(Bucket {
                 start_ms: row.get(0)?,
@@ -407,11 +421,27 @@ mod tests {
         assert_eq!(
             buckets,
             [
-                // Jitter: 30 after 10 → 20; the lost probe is skipped; 20 after 30 → 10.
+                // Steps between answers: 30 after 10 → 20, the lost probe skipped, 20 after 30 → 10. Rolling jitter:
+                // 20 at 1.5 s, (20 + 10) / 2 = 15 at 2 s.
                 Bucket { start_ms: 1_000, sent: 3, received: 2, min: ms(10), avg: ms(20), max: ms(30), jitter: ms(20) },
-                Bucket { start_ms: 2_000, sent: 1, received: 1, min: ms(20), avg: ms(20), max: ms(20), jitter: ms(10) },
+                Bucket { start_ms: 2_000, sent: 1, received: 1, min: ms(20), avg: ms(20), max: ms(20), jitter: ms(15) },
             ]
         );
+    }
+
+    #[test]
+    fn a_spike_raises_jitter_for_the_whole_window() {
+        let (mut store, target) = store_with_target();
+        let samples: Vec<Sample> = (0_i64..25)
+            .map(|second| reply(1, second.saturating_mul(1_000), if second == 5 { 300 } else { 50 }))
+            .collect();
+        store.insert(target, &samples).expect("insert works");
+        let buckets = store.buckets(target, 1, 0, 25_000, 1_000).expect("query works");
+        let jitter_at = |second: usize| buckets.get(second).and_then(|bucket| bucket.jitter);
+        // The jump up (at 5 s) and back down (at 6 s) stay in the 10-answer window until 15 s.
+        assert_eq!(jitter_at(4), Some(Duration::ZERO));
+        assert!((5..=15).all(|second| jitter_at(second) > Some(Duration::ZERO)), "plateau while in the window");
+        assert_eq!(jitter_at(16), Some(Duration::ZERO));
     }
 
     #[test]

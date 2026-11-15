@@ -23,6 +23,8 @@ use crate::theme::{self, BAD_ZONE, GOOD_ZONE, WARN_ZONE};
 
 /// Longest time between history queries of a live timeline, however coarse the buckets are.
 const MAX_REFRESH: Duration = Duration::from_secs(60);
+/// Vertical space between the jitter strip and the latency chart.
+const PLOT_GAP: f32 = 8.0;
 /// Height of the jitter strip.
 const JITTER_HEIGHT: f32 = 44.0;
 /// Width of the y axis, equal for both plots so their time axes line up.
@@ -364,6 +366,8 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period) -> (Response, Option<
             add_trace(plot, "Jitter", jitter, JITTER_COLOR);
         });
 
+    // Room between the plots, so the jitter strip's "0" and the latency scale's top label don't overlap.
+    ui.add_space(PLOT_GAP);
     let latency = &shown.series.latency;
     let scale = latency.scale_ms;
     // Leave exactly the slider's row: taking more than the panel has would grow the panel every frame.
