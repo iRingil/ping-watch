@@ -182,7 +182,7 @@ impl TargetEntry {
                 ui.colored_label(theme::palette(ui).bad, error);
             }
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            crate::ui::settings::centered_row(ui, |ui| {
                 let can_save = !draft.address.trim().is_empty();
                 if ui.add_enabled(can_save, primary_button(ui, tr!(ui, "Save"))).clicked() {
                     match targets.update(draft.id, &draft.address, &draft.name) {

@@ -10,7 +10,7 @@ use crate::alerts::{Condition, ConditionKind, Rule, Targets};
 use crate::i18n::{Lang, n, tr, trf};
 use crate::store::alerts::AlertStore;
 use crate::ui::icons::{self, Icon, Style};
-use crate::ui::settings::{close_mark, label_first_row, page_tabs, settings_grid};
+use crate::ui::settings::{centered_row, close_mark, label_first_row, page_tabs, settings_grid};
 use crate::ui::theme;
 
 /// Width of the window's content.
@@ -417,7 +417,10 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
     ui.add_space(10.0);
     let can_save = draft.all_targets || !draft.hosts.is_empty();
     let mut answer = FormAnswer::None;
-    ui.horizontal(|ui| {
+    // The buttons sit at the bottom of the page, wherever the form ends.
+    let row_height = ui.spacing().interact_size.y;
+    ui.add_space((ui.available_height() - row_height).max(0.0));
+    centered_row(ui, |ui| {
         let palette = theme::palette(ui);
         let save = egui::Button::new(RichText::new(tr!(ui, "Save")).color(palette.on_signal)).fill(palette.signal);
         if ui

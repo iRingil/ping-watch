@@ -21,6 +21,7 @@ use crate::i18n::{self, Lang, Language, tr, trf};
 use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, Comment, HopKey};
 use crate::ui::latency_bars::{GOOD_MS, WARN_MS};
+use crate::ui::settings::centered_row;
 use crate::ui::theme;
 
 /// Longest time between history queries of a live timeline, however coarse the buckets are.
@@ -31,6 +32,8 @@ const RETRY_AFTER: Duration = Duration::from_secs(5);
 const FAILURE_SHOWN: Duration = Duration::from_secs(10);
 /// How near (points) to a comment's line a right-click must be to offer editing it.
 const COMMENT_PICK_DISTANCE: f32 = 8.0;
+/// Inner width of the comment dialog; the text field fills it.
+const COMMENT_DIALOG_WIDTH: f32 = 340.0;
 /// Vertical space between the jitter strip and the latency chart.
 const PLOT_GAP: f32 = 8.0;
 /// Height of the jitter strip.
@@ -240,7 +243,7 @@ impl Timeline {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(target_id) = commentable
                     && ui
-                        .small_button(tr!(ui, "Add comment"))
+                        .button(tr!(ui, "Add comment"))
                         .on_hover_text(tr!(ui, "Comments the moment at the right end of the chart"))
                         .clicked()
                 {
@@ -256,7 +259,7 @@ impl Timeline {
                     });
                 let (from, to) = self.visible_range(now_ms);
                 ui.label(format!("({} - {})", clock(from, "%H:%M:%S"), clock(to, "%H:%M:%S")));
-                if self.end_ms.is_some() && ui.small_button(tr!(ui, "Reset focus to current")).clicked() {
+                if self.end_ms.is_some() && ui.button(tr!(ui, "Reset focus to current")).clicked() {
                     self.end_ms = None;
                 }
             });
@@ -409,13 +412,19 @@ impl Timeline {
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                ui.set_width(COMMENT_DIALOG_WIDTH);
                 ui.label(trf!(ui, "Comment at {time}", time = clock(draft.ts_ms, "%d.%m %H:%M:%S")));
-                let field =
-                    ui.add(TextEdit::multiline(&mut draft.text).desired_rows(3).hint_text(tr!(ui, "What happened?")));
+                let field = ui.add(
+                    TextEdit::multiline(&mut draft.text)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(tr!(ui, "What happened?")),
+                );
                 if !field.has_focus() && draft.text.is_empty() {
                     field.request_focus();
                 }
-                ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                centered_row(ui, |ui| {
                     let text = draft.text.trim().to_owned();
                     if ui.add_enabled(!text.is_empty(), Button::new(tr!(ui, "Save"))).clicked() {
                         change = Some(match draft.id {

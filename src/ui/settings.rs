@@ -558,6 +558,26 @@ pub fn settings_grid(ui: &mut Ui, id: &str, rows: impl FnOnce(&mut Ui)) {
     Grid::new(id).num_columns(2).spacing(GRID_SPACING).show(ui, rows);
 }
 
+/// A row of buttons centered in the available width. The row's width is measured in the frame it is drawn and
+/// kept for the next one; when it changes, the frame is discarded and drawn again, so the row never jumps.
+pub fn centered_row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let id = ui.scope_id().with("centered-row");
+    let known = ui.ctx().data(|data| data.get_temp::<f32>(id));
+    let inset = ((ui.available_width() - known.unwrap_or(0.0)) / 2.0).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(inset);
+        let start = ui.cursor().min.x;
+        let inner = add(ui);
+        let width = ui.min_rect().max.x - start;
+        if known.is_none_or(|known| (known - width).abs() > 0.5) {
+            ui.ctx().data_mut(|data| data.insert_temp(id, width));
+            ui.ctx().request_discard("centered row measured");
+        }
+        inner
+    })
+    .inner
+}
+
 /// Combo box choosing one of `options` (labelled by `label`) for `value`.
 pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, id: &str, value: &mut T, options: &[T], label: impl Fn(&T) -> String) {
     egui::ComboBox::from_id_salt(id).selected_text(label(value)).show_ui(ui, |ui| {
