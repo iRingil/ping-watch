@@ -1,6 +1,6 @@
 //! Translations of the interface into English, Russian, German, French and Spanish.
 //!
-//! Texts are written in English in the code and marked with the macro [`tr!`] (a plain text), [`trf!`] (with `{name}`
+//! Texts are written in English in the code and marked with [`i18n::tr!`](tr) (a plain text), [`trf!`] (with `{name}`
 //! placeholders) or [`trn!`] (a count: "1 target|{n} targets"); [`n!`] marks a text that is translated later, where
 //! it is shown (menu labels kept in tables). The English text is the key into each language's table; a text missing
 //! from a table shows in English. The language lives in the egui context ([`set`], [`get`]), so drawing code asks

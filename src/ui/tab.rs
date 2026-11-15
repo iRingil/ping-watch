@@ -86,7 +86,7 @@ pub struct Context<'a> {
 struct Session {
     /// Resolved address being traced.
     target: IpAddr,
-    /// Id of the target in the history, `None` if history is off.
+    /// ID of the target in the history, `None` if history is off.
     target_id: Option<i64>,
     /// Background tracer; dropping the session stops it. Declared before `recorder` so it stops first and the
     /// recorder can flush everything the tracer sent.
@@ -443,7 +443,7 @@ impl Tab {
         &self.host
     }
 
-    /// Id of the target in the history (for timeline marks), once the trace runs with history on.
+    /// ID of the target in the history (for timeline marks), once the trace runs with history on.
     pub fn history_id(&self) -> Option<i64> {
         match &self.state {
             State::Running(session) => session.target_id,
@@ -846,7 +846,7 @@ pub fn clock(ms: i64) -> String {
 
 /// Label of a traced target, "address / description": the description is the `name` from the target list if it
 /// has one, else the `host` as entered if that is a domain name, else (an IP was entered) the `reverse` DNS name of
-/// the address, if any — `9.9.9.9 / Quad9 DNS`, `140.82.121.4 / github.com`, `1.1.1.1 / one.one.one.one`.
+/// the address, if any — `9.9.9.9 / Quad9 DNS`, `93.184.215.14 / example.com`, `1.1.1.1 / one.one.one.one`.
 fn target_label(target: IpAddr, host: &str, name: Option<&str>, reverse: Option<&str>) -> String {
     let entered_ip = host.trim().parse::<IpAddr>().is_ok();
     let description = name.or(if entered_ip { reverse } else { Some(host.trim()) });

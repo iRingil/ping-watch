@@ -206,7 +206,7 @@ impl Store {
         Ok(Self { connection })
     }
 
-    /// Id of the target called `name`, registering it on first use.
+    /// ID of the target called `name`, registering it on first use.
     ///
     /// # Errors
     ///
