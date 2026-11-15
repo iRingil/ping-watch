@@ -66,7 +66,6 @@ impl HopStats {
     }
 
     /// Number of probes answered.
-    #[cfg(test)]
     pub fn received(&self) -> u64 {
         self.received
     }

@@ -9,14 +9,18 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
+use crate::alerts::{Condition, Engine, Event, Observe, Rule, WindowStats};
 use crate::probe::names::NameCache;
+use crate::store::alerts::AlertStore;
 use crate::store::history::{self, Store};
 use crate::store::settings::{AppSettings, SettingsStore};
 use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::{SavedTab, WindowState, WindowStore};
+use crate::ui::alerts_window::AlertsWindow;
 use crate::ui::all_targets::{AllTargets, Request};
 use crate::ui::hop_table::format_ms;
 use crate::ui::icons;
+use crate::ui::notify::Notifier;
 use crate::ui::settings::SettingsWindow;
 use crate::ui::tab::{self, Action, Tab};
 use crate::ui::tab_strip;
@@ -42,6 +46,12 @@ const ARROW_WIDTH: f32 = 22.0;
 const PEEK_MIN_WIDTH: f32 = 16.0;
 /// Width of the fade at the end of a scrolled tab strip.
 const FADE_WIDTH: f32 = 48.0;
+/// Width of the bell (alerts) button left of the gear.
+const BELL_WIDTH: f32 = 28.0;
+/// Room for the red dot of a tab with an alert on.
+const ALERT_DOT_WIDTH: f32 = 14.0;
+/// How often the alert rules are checked.
+const ALERT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Width of the "+" (new target) button.
 const PLUS_WIDTH: f32 = 24.0;
 /// Width of the gear (app menu) button at the right end of the tab bar.
@@ -103,6 +113,18 @@ pub struct PingWatchApp {
     quit: Arc<AtomicBool>,
     /// The theme choice last applied to the context, `None` before the first frame.
     applied_theme: Option<ThemeChoice>,
+    /// Alert rules and journal, `None` if history is off.
+    alert_store: Option<AlertStore>,
+    /// The alert rules as stored.
+    alert_rules: Vec<Rule>,
+    /// Checks the rules and keeps which alerts are on.
+    alert_engine: Engine,
+    /// When the rules were last checked.
+    alerts_checked_at: Instant,
+    /// Windows notifications.
+    notifier: Notifier,
+    /// The Alerts window.
+    alerts_window: AlertsWindow,
 }
 
 impl PingWatchApp {
@@ -125,6 +147,14 @@ impl PingWatchApp {
             .and_then(|store| store.load().inspect_err(|error| log::warn!("{error}")).ok())
             .unwrap_or_default();
         let defaults = settings.defaults;
+        let alert_store = history_path
+            .as_deref()
+            .and_then(|path| AlertStore::open(path).inspect_err(|error| log::warn!("{error}")).ok());
+        let alert_rules = alert_store
+            .as_ref()
+            .and_then(|store| store.rules().inspect_err(|error| log::warn!("{error}")).ok())
+            .unwrap_or_default();
+        let notifier = Notifier::new(history_path.as_deref().and_then(std::path::Path::parent), crate::ICON_PNG);
         let reader = history_path
             .as_deref()
             .and_then(|path| Store::open(path).inspect_err(|error| log::warn!("{error}")).ok());
@@ -190,7 +220,108 @@ impl PingWatchApp {
             settings_window: SettingsWindow::default(),
             quit,
             applied_theme: None,
+            alert_store,
+            alert_rules,
+            alert_engine: Engine::default(),
+            alerts_checked_at: Instant::now(),
+            notifier,
+            alerts_window: AlertsWindow::default(),
         }
+    }
+
+    /// Checks the alert rules once a second (also while the window is hidden) and acts on what changed.
+    fn check_alerts(&mut self) {
+        if self.alerts_checked_at.elapsed() < ALERT_CHECK_INTERVAL {
+            return;
+        }
+        self.alerts_checked_at = Instant::now();
+        let now_ms = history::unix_ms(std::time::SystemTime::now());
+        let events = self.alert_engine.check(&self.alert_rules, &Watched(&self.tabs), now_ms);
+        for event in events {
+            self.on_alert(event, now_ms);
+        }
+    }
+
+    /// Acts on one alert event: the journal, a mark on the target's timeline, a notification if the rule asks.
+    fn on_alert(&self, event: Event, now_ms: i64) {
+        let rule_of = |rule_id: i64| self.alert_rules.iter().find(|rule| rule.id == rule_id);
+        let mark = |host: &str, text: &str| {
+            let target_id =
+                self.tabs.iter().find(|tab| tab.host().eq_ignore_ascii_case(host)).and_then(Tab::history_id);
+            if let (Some(reader), Some(target_id)) = (&self.reader, target_id)
+                && let Err(error) = reader.add_comment(target_id, now_ms, text)
+            {
+                log::warn!("cannot mark the alert on the timeline: {error}");
+            }
+        };
+        let journal = self.alert_store.as_ref();
+        match event {
+            Event::Started { rule_id, host, value } => {
+                let Some(rule) = rule_of(rule_id) else {
+                    return;
+                };
+                let (measured, unit) = measured(&rule.condition, value);
+                if let Some(journal) = journal
+                    && let Err(error) = journal.start(rule_id, &host, &rule.condition.describe(), now_ms, value, unit)
+                {
+                    log::warn!("cannot write the alert journal: {error}");
+                }
+                mark(&host, &format!("Alert: {measured} ({})", rule.condition.describe()));
+                if rule.notify {
+                    self.notifier.show(&format!("{host}: {measured}"), &capitalized(&rule.condition.describe()));
+                }
+            }
+            Event::Ended { rule_id, host, started_ms, worst, recovered } => {
+                if let Some(journal) = journal
+                    && let Err(error) = journal.end(rule_id, &host, now_ms, worst)
+                {
+                    log::warn!("cannot write the alert journal: {error}");
+                }
+                let Some(rule) = rule_of(rule_id).filter(|_| recovered) else {
+                    return;
+                };
+                let seconds = u64::try_from(now_ms.saturating_sub(started_ms) / 1_000).unwrap_or(0);
+                let lasted = crate::alerts::span(Duration::from_secs(seconds.max(1)));
+                let (worst_text, _) = measured(&rule.condition, worst);
+                mark(&host, &format!("Back to normal after {lasted} (worst: {worst_text})"));
+                if rule.notify_recovery {
+                    self.notifier
+                        .show(&format!("{host} is back to normal"), &format!("Lasted {lasted}, worst: {worst_text}"));
+                }
+            }
+            Event::RouteChanged { rule_id, host, change } => {
+                let what = change.describe();
+                if let Some(journal) = journal
+                    && let Err(error) = journal.note(rule_id, &host, &format!("Route changed: {what}"), now_ms)
+                {
+                    log::warn!("cannot write the alert journal: {error}");
+                }
+                mark(&host, &format!("Route changed: {what}"));
+                if rule_of(rule_id).is_some_and(|rule| rule.notify) {
+                    self.notifier.show(&format!("{host}: route changed"), &what);
+                }
+            }
+        }
+    }
+
+    /// Reloads the alert rules after the Alerts window changed them.
+    fn reload_alert_rules(&mut self) {
+        if let Some(store) = &self.alert_store {
+            match store.rules() {
+                Ok(rules) => self.alert_rules = rules,
+                Err(error) => log::warn!("cannot read the alert rules: {error}"),
+            }
+        }
+    }
+
+    /// Hosts with an alert on now.
+    fn alerting_hosts(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .map(Tab::host)
+            .filter(|host| !host.is_empty() && self.alert_engine.is_alerting(host))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Stores the settings whenever they changed.
@@ -297,16 +428,22 @@ impl PingWatchApp {
         self.tab_bar_page = self.page;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = TAB_GAP;
-            if tab_widget(ui, self.page == Page::AllTargets, "All targets", false).0.clicked() {
+            if tab_widget(ui, self.page == Page::AllTargets, "All targets", false, false).0.clicked() {
                 self.page = Page::AllTargets;
             }
             // A tracing tab is labelled like its headings ("address / description"), others by the host entered.
             let titles: Vec<String> = self.tabs.iter().map(|tab| tab.label().unwrap_or_else(|| tab.title())).collect();
-            let widths: Vec<f32> = titles.iter().map(|title| tab_width(ui, title, true)).collect();
+            let alerting: Vec<bool> = self
+                .tabs
+                .iter()
+                .map(|tab| !tab.host().is_empty() && self.alert_engine.is_alerting(tab.host()))
+                .collect();
+            let widths: Vec<f32> =
+                titles.iter().zip(&alerting).map(|(title, alert)| tab_width(ui, title, true, *alert)).collect();
             let all_width: f32 = widths.iter().map(|width| width + TAB_GAP).sum();
             let available = ui.available_width();
             // The gear keeps its place at the right end whatever the tabs do.
-            let available = available - GEAR_WIDTH - TAB_GAP;
+            let available = available - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 2.0;
             let (first, count, strip) = if all_width + PLUS_WIDTH <= available {
                 (0, titles.len(), None)
             } else {
@@ -341,7 +478,8 @@ impl PingWatchApp {
             }
             let mut used = 0.0;
             for (index, title) in titles.iter().enumerate().skip(first).take(count) {
-                let (response, close_clicked) = tab_widget(ui, self.page == Page::Target(index), title, true);
+                let alert = alerting.get(index).copied().unwrap_or(false);
+                let (response, close_clicked) = tab_widget(ui, self.page == Page::Target(index), title, true, alert);
                 used += response.rect.width() + TAB_GAP;
                 if close_clicked {
                     close = Some(index);
@@ -361,7 +499,8 @@ impl PingWatchApp {
                         egui::UiBuilder::new().max_rect(peek).layout(egui::Layout::left_to_right(egui::Align::Min)),
                     );
                     child.set_clip_rect(peek.intersect(ui.clip_rect()));
-                    if tab_widget(&mut child, self.page == Page::Target(last), title, false).0.clicked() {
+                    let alert = alerting.get(last).copied().unwrap_or(false);
+                    if tab_widget(&mut child, self.page == Page::Target(last), title, false, alert).0.clicked() {
                         self.page = Page::Target(last);
                     }
                     let fade_width = peek.width().min(FADE_WIDTH);
@@ -380,7 +519,10 @@ impl PingWatchApp {
             if ui.add_sized([PLUS_WIDTH, TAB_HEIGHT], plus).on_hover_text("New target (Ctrl+N)").clicked() {
                 new_target = true;
             }
-            ui.add_space((ui.available_width() - GEAR_WIDTH - TAB_GAP).max(0.0));
+            ui.add_space((ui.available_width() - BELL_WIDTH - GEAR_WIDTH - TAB_GAP * 2.0).max(0.0));
+            if bell_button(ui, self.alert_engine.active_count()).clicked() {
+                self.alerts_window.open();
+            }
             if gear_button(ui).clicked() {
                 self.settings_window.open();
             }
@@ -422,10 +564,42 @@ fn gear_button(ui: &mut Ui) -> egui::Response {
     response.on_hover_text("Settings and more")
 }
 
-/// Width of a tab titled `title`, with a close mark if `closable`.
-fn tab_width(ui: &Ui, title: &str, closable: bool) -> f32 {
+/// Width of a tab titled `title`, with a close mark if `closable` and the alert dot if `alert`.
+fn tab_width(ui: &Ui, title: &str, closable: bool, alert: bool) -> f32 {
     let galley = ui.painter().layout_no_wrap(title.to_owned(), theme::heading_font(14.5), theme::palette(ui).ink);
-    galley.size().x + TAB_PADDING * 2.0 + if closable { TAB_CLOSE_WIDTH } else { 0.0 }
+    galley.size().x
+        + TAB_PADDING * 2.0
+        + if closable { TAB_CLOSE_WIDTH } else { 0.0 }
+        + if alert { ALERT_DOT_WIDTH } else { 0.0 }
+}
+
+/// The bell left of the gear: opens the Alerts window; a red badge counts the alerts that are on.
+fn bell_button(ui: &mut Ui, active: usize) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(BELL_WIDTH, TAB_HEIGHT), Sense::click());
+    let palette = theme::palette(ui);
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect.shrink2(Vec2::new(0.0, 3.0)), CornerRadius::same(3), palette.pane_header);
+    }
+    let color = if response.hovered() { palette.ink } else { palette.ink_muted };
+    icons::paint(ui, rect.center(), icons::Icon::Bell, color);
+    if active > 0 {
+        let badge = egui::pos2(rect.right() - 7.0, rect.top() + 9.0);
+        ui.painter().circle_filled(badge, 7.0, palette.bad);
+        ui.painter().text(
+            badge,
+            egui::Align2::CENTER_CENTER,
+            active.min(9).to_string(),
+            theme::heading_font(11.0),
+            palette.on_signal,
+        );
+    }
+    let tooltip = match active {
+        0 => "Alerts".to_owned(),
+        1 => "Alerts: 1 is on now".to_owned(),
+        count => format!("Alerts: {count} are on now"),
+    };
+    response.on_hover_text(tooltip)
 }
 
 /// A scroll arrow of the tab bar pointing `left` or right. Its place is always kept; it is drawn and clickable only
@@ -456,12 +630,13 @@ fn scroll_arrow(ui: &mut Ui, left: bool, active: bool) -> bool {
 /// A tab of the tab bar: a box with rounded top corners. Every tab keeps its outline; the open one is filled with
 /// the toolbar color (so it joins the toolbar below) and has a signal-blue line along its bottom. Returns the tab's response
 /// and whether its close mark was clicked.
-fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool) -> (egui::Response, bool) {
+fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool, alert: bool) -> (egui::Response, bool) {
     let font = theme::heading_font(14.5);
     let text_color = if open { theme::palette(ui).ink } else { theme::palette(ui).ink_muted };
     let galley = ui.painter().layout_no_wrap(title.to_owned(), font, text_color);
     let close_width = if closable { TAB_CLOSE_WIDTH } else { 0.0 };
-    let size = Vec2::new(galley.size().x + TAB_PADDING * 2.0 + close_width, TAB_HEIGHT);
+    let dot_width = if alert { ALERT_DOT_WIDTH } else { 0.0 };
+    let size = Vec2::new(galley.size().x + TAB_PADDING * 2.0 + close_width + dot_width, TAB_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
     let fill = if open {
@@ -579,6 +754,11 @@ impl PingWatchApp {
                 tab_status(ui, tab);
                 return;
             }
+            let active = self.alert_engine.active_count();
+            if active > 0 {
+                status_problem(ui, &if active == 1 { "1 alert on".to_owned() } else { format!("{active} alerts on") });
+                ui.separator();
+            }
             status_segment(ui, "Targets", self.tabs.len().to_string());
             let problems: Vec<(String, String)> =
                 self.tabs.iter().filter_map(|tab| tab.problem().map(|problem| (tab.title(), problem))).collect();
@@ -691,6 +871,7 @@ impl eframe::App for PingWatchApp {
         self.track_tabs();
         self.all_targets.save(self.window_store.as_ref());
         self.save_settings();
+        self.check_alerts();
         let Some(tray) = &self.tray else {
             return;
         };
@@ -745,7 +926,14 @@ impl eframe::App for PingWatchApp {
         let action = match self.page {
             Page::AllTargets => {
                 let request = page(ui, |ui| {
-                    self.all_targets.ui(ui, &mut self.tabs, self.targets.as_ref(), self.history_path.as_deref())
+                    let alerting = self.alerting_hosts();
+                    self.all_targets.ui(
+                        ui,
+                        &mut self.tabs,
+                        self.targets.as_ref(),
+                        self.history_path.as_deref(),
+                        &alerting,
+                    )
                 });
                 match request {
                     Some(Request::Open(index)) => self.page = Page::Target(index),
@@ -768,6 +956,45 @@ impl eframe::App for PingWatchApp {
         }
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
         self.settings_window.show(ui.ctx(), &mut self.settings, data_folder);
+        let hosts: Vec<String> =
+            self.tabs.iter().map(Tab::host).filter(|host| !host.is_empty()).map(str::to_owned).collect();
+        if self.alerts_window.show(ui.ctx(), self.alert_store.as_ref(), &self.alert_rules, &hosts) {
+            self.reload_alert_rules();
+        }
         ui.ctx().request_repaint_after(REFRESH);
     }
+}
+
+/// The tabs as the alert engine sees them: the targets that trace and aren't paused.
+struct Watched<'a>(&'a [Tab]);
+
+impl Observe for Watched<'_> {
+    fn hosts(&self) -> Vec<String> {
+        self.0.iter().filter(|tab| tab.is_watched()).map(|tab| tab.host().to_owned()).collect()
+    }
+
+    fn window(&self, host: &str, window: Duration) -> Option<WindowStats> {
+        self.0.iter().find(|tab| tab.host() == host).and_then(|tab| tab.window_stats(window))
+    }
+
+    fn path(&self, host: &str) -> Vec<(u8, IpAddr)> {
+        self.0.iter().find(|tab| tab.host() == host).map(Tab::answering_path).unwrap_or_default()
+    }
+}
+
+/// A measured value of `condition` for people, with its unit: "loss 23 %", "average latency 180 ms",
+/// "no answer for 30 seconds".
+fn measured(condition: &Condition, value: f64) -> (String, &'static str) {
+    match condition {
+        Condition::Loss { .. } => (format!("loss {value:.0} %"), "%"),
+        Condition::Latency { .. } => (format!("average latency {value:.0} ms"), "ms"),
+        Condition::Unreachable { .. } => (format!("no answer for {value:.0} s"), "s"),
+        Condition::RouteChanged => (String::new(), ""),
+    }
+}
+
+/// `text` with a capital first letter.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }

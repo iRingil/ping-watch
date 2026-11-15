@@ -106,6 +106,7 @@ impl AllTargets {
         tabs: &mut [Tab],
         targets: Option<&TargetList>,
         history_path: Option<&Path>,
+        alerting: &[String],
     ) -> Option<Request> {
         let toolbar_frame = Frame::new().fill(theme::palette(ui).chassis).inner_margin(Margin::symmetric(10, 8));
         let mut request = egui::Panel::top("all-targets-toolbar")
@@ -121,12 +122,12 @@ impl AllTargets {
             let (table_rect, splitter_rect, charts_rect) = tab::split(area, self.settings.table_share);
             tab::splitter(ui, splitter_rect, area, &mut self.settings.table_share);
             tab::pane(ui, table_rect, Margin::same(1), |ui| {
-                request = request.take().or(self.table(ui, tabs, visible, now_ms));
+                request = request.take().or(self.table(ui, tabs, visible, now_ms, alerting));
             });
             tab::pane(ui, charts_rect, Margin::same(8), |ui| self.charts(ui, tabs, history_path));
         } else {
             tab::pane(ui, area, Margin::same(1), |ui| {
-                request = request.take().or(self.table(ui, tabs, visible, now_ms));
+                request = request.take().or(self.table(ui, tabs, visible, now_ms, alerting));
             });
         }
         request
@@ -160,7 +161,14 @@ impl AllTargets {
 
     /// The table: one row per target. A click selects a row, a double click shows or hides its chart, the check box
     /// does the same, and the target's link opens its tab. Returns the tab to open.
-    fn table(&mut self, ui: &mut Ui, tabs: &mut [Tab], visible: (i64, i64), now_ms: i64) -> Option<Request> {
+    fn table(
+        &mut self,
+        ui: &mut Ui,
+        tabs: &mut [Tab],
+        visible: (i64, i64),
+        now_ms: i64,
+        alerting: &[String],
+    ) -> Option<Request> {
         let focus = self.settings.trace.focus;
         let overviews: Vec<Overview> = tabs.iter().map(|tab| tab.overview_with(focus, visible)).collect();
         let scale_ms = latency_bars::scale_ms(
@@ -214,7 +222,11 @@ impl AllTargets {
                             if ui.checkbox(&mut ticked, "").on_hover_text("Show the chart below").changed() {
                                 toggle = Some(index);
                             }
-                            ui.label(RichText::new(&overview.status).color(theme::palette(ui).ink_muted));
+                            if alerting.iter().any(|host| host.eq_ignore_ascii_case(&overview.title)) {
+                                ui.label(RichText::new("alert").color(theme::palette(ui).bad));
+                            } else {
+                                ui.label(RichText::new(&overview.status).color(theme::palette(ui).ink_muted));
+                            }
                         });
                         row.col(|ui| {
                             ui.add_space(4.0);

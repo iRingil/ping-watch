@@ -5,6 +5,7 @@
 // Release builds are GUI-only; debug builds keep the console for `RUST_LOG` output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod alerts;
 mod probe;
 mod store;
 mod sync;

@@ -30,6 +30,8 @@ pub enum Icon {
     Auto,
     /// Flag of the United Kingdom: English.
     FlagGb,
+    /// Bell: alerts.
+    Bell,
 }
 
 /// Look of an icon button.
@@ -110,6 +112,23 @@ pub fn paint(ui: &Ui, center: Pos2, icon: Icon, color: Color32) {
                 })
                 .collect();
             painter.add(egui::Shape::convex_polygon(half, color, Stroke::NONE));
+        }
+        Icon::Bell => {
+            // A dome widening into a rim, a clapper under it.
+            let mut outline: Vec<Pos2> = (0..=12_u8)
+                .map(|step| {
+                    let angle = std::f32::consts::PI + f32::from(step) * std::f32::consts::PI / 12.0;
+                    pos2(c.x + angle.cos() * 4.6, c.y - 1.5 + angle.sin() * 5.0)
+                })
+                .collect();
+            outline.extend([
+                pos2(c.x + 4.8, c.y + 3.0),
+                pos2(c.x + 6.8, c.y + 4.8),
+                pos2(c.x - 6.8, c.y + 4.8),
+                pos2(c.x - 4.8, c.y + 3.0),
+            ]);
+            painter.add(egui::Shape::convex_polygon(outline, color, Stroke::NONE));
+            painter.circle_filled(pos2(c.x, c.y + 6.6), 1.7, color);
         }
         Icon::FlagGb => {
             // The Union Jack, simplified to read at 20 x 12 points: blue field, white and red saltires, white and

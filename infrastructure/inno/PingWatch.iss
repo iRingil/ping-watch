@@ -142,8 +142,12 @@ var
   UserData: String;
 begin
   if CurUninstallStep = usUninstall then
+  begin
     // "Start with Windows" from the settings would otherwise point at a removed program.
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#AppName}');
+    // The program registers itself for notifications on first start.
+    RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, 'Software\Classes\AppUserModelId\iRingil.PingWatch');
+  end;
   if CurUninstallStep = usPostUninstall then
   begin
     UserData := ExpandConstant('{localappdata}\{#AppName}');

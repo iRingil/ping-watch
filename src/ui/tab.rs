@@ -11,6 +11,7 @@ use eframe::egui::{
     self, Align, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup, Rect, RichText, Stroke, Ui, pos2,
 };
 
+use crate::alerts::WindowStats;
 use crate::probe::names::{NameCache, resolve};
 use crate::probe::route::{Hop, Route};
 use crate::probe::tracer::{TraceConfig, Tracer};
@@ -407,6 +408,52 @@ impl Tab {
             State::Running(session) => session.tracer.last_error().or_else(|| self.warning.clone()),
             State::Editing(None) | State::Resolving(_) => self.warning.clone(),
         }
+    }
+
+    /// Host as entered, empty for a tab without a target.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Id of the target in the history (for timeline marks), once the trace runs with history on.
+    pub fn history_id(&self) -> Option<i64> {
+        match &self.state {
+            State::Running(session) => session.target_id,
+            State::Editing(_) | State::Resolving(_) => None,
+        }
+    }
+
+    /// Whether the alerts watch this tab: it traces and isn't paused.
+    pub fn is_watched(&self) -> bool {
+        matches!(&self.state, State::Running(session) if !session.tracer.is_paused())
+    }
+
+    /// The target's own probes (its last hop) over the last `window`, for the alerts; `None` unless watched.
+    pub fn window_stats(&self, window: Duration) -> Option<WindowStats> {
+        let State::Running(session) = &self.state else {
+            return None;
+        };
+        if session.tracer.is_paused() {
+            return None;
+        }
+        let now_ms = history::unix_ms(SystemTime::now());
+        let window_ms = i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
+        let route = session.tracer.snapshot(Some((now_ms.saturating_sub(window_ms), now_ms)));
+        let hop = route.hops().last()?;
+        let covered_ms = now_ms.saturating_sub(route.focus_start_ms()?);
+        Some(WindowStats {
+            sent: hop.stats.sent(),
+            received: hop.stats.received(),
+            average_ms: hop.stats.average().map(latency_bars::millis),
+            covered: Duration::from_millis(u64::try_from(covered_ms).unwrap_or(0)),
+        })
+    }
+
+    /// The answering hops of the route (TTL and the address that answered last), for route change detection.
+    pub fn answering_path(&self) -> Vec<(u8, IpAddr)> {
+        self.route()
+            .map(|route| route.hops().iter().filter_map(|hop| hop.address.map(|address| (hop.ttl, address))).collect())
+            .unwrap_or_default()
     }
 
     /// Whether the trace is paused.

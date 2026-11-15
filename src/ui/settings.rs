@@ -136,7 +136,8 @@ impl SettingsWindow {
                 })
                 .inner;
             ui.add_space(8.0);
-            self.tabs(ui);
+            let pages = Page::ALL.map(|page| (page, page.title()));
+            page_tabs(ui, &pages, &mut self.page);
             ui.add_space(12.0);
             ui.allocate_ui(egui::vec2(WIDTH, PAGE_HEIGHT), |ui| {
                 ui.set_min_height(PAGE_HEIGHT);
@@ -154,37 +155,6 @@ impl SettingsWindow {
         if modal.inner || modal.should_close() {
             self.open = false;
         }
-    }
-
-    /// The page tabs: titles on a rule, the shown one underlined in the signal color.
-    fn tabs(&mut self, ui: &mut Ui) {
-        let row = ui
-            .horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 18.0;
-                for page in Page::ALL {
-                    let shown = self.page == page;
-                    let color = if shown { theme::palette(ui).ink } else { theme::palette(ui).ink_muted };
-                    let text = RichText::new(page.title()).font(theme::heading_font(15.0)).color(color);
-                    let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
-                    if shown {
-                        let rect = response.rect;
-                        ui.painter().hline(
-                            rect.x_range(),
-                            rect.bottom() + 4.0,
-                            egui::Stroke::new(2.0, theme::palette(ui).signal),
-                        );
-                    }
-                    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        self.page = page;
-                    }
-                }
-            })
-            .response;
-        ui.painter().hline(
-            ui.max_rect().x_range(),
-            row.rect.bottom() + 5.5,
-            egui::Stroke::new(1.0, theme::palette(ui).rule),
-        );
     }
 
     /// General: what the close button does, starting with Windows.
@@ -284,7 +254,7 @@ fn language(ui: &mut Ui) {
 
 /// A muted grid label for a cell holding `lines` rows of `line_height` each, drawn level with the first row (grid
 /// rows center their cells, which would put a lone label between the rows).
-fn label_first_row(ui: &mut Ui, label: &str, lines: u8, line_height: f32) {
+pub fn label_first_row(ui: &mut Ui, label: &str, lines: u8, line_height: f32) {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let palette = theme::palette(ui);
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, palette.ink_muted);
@@ -329,7 +299,7 @@ fn icon_option(ui: &mut Ui, icon: Icon, label: &str, selected: bool, enabled: bo
 }
 
 /// The close mark of the title row; returns whether it was clicked.
-fn close_mark(ui: &mut Ui) -> bool {
+pub fn close_mark(ui: &mut Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(rect, egui::CornerRadius::same(3), theme::palette(ui).pane_header);
@@ -424,13 +394,42 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
     });
 }
 
+/// Page tabs of a dialog: titles on a rule, the shown one (`current`) underlined in the signal color; a click
+/// shows another.
+pub fn page_tabs<T: Copy + PartialEq>(ui: &mut Ui, pages: &[(T, &str)], current: &mut T) {
+    let row = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 18.0;
+            for (page, title) in pages {
+                let shown = *current == *page;
+                let palette = theme::palette(ui);
+                let color = if shown { palette.ink } else { palette.ink_muted };
+                let text = RichText::new(*title).font(theme::heading_font(15.0)).color(color);
+                let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+                if shown {
+                    let rect = response.rect;
+                    ui.painter().hline(rect.x_range(), rect.bottom() + 4.0, egui::Stroke::new(2.0, palette.signal));
+                }
+                if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    *current = *page;
+                }
+            }
+        })
+        .response;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        row.rect.bottom() + 5.5,
+        egui::Stroke::new(1.0, theme::palette(ui).rule),
+    );
+}
+
 /// A two-column grid: muted labels on the left, controls on the right.
-fn settings_grid(ui: &mut Ui, id: &str, rows: impl FnOnce(&mut Ui)) {
+pub fn settings_grid(ui: &mut Ui, id: &str, rows: impl FnOnce(&mut Ui)) {
     Grid::new(id).num_columns(2).spacing(GRID_SPACING).show(ui, rows);
 }
 
 /// Combo box choosing one of `options` (labelled by `label`) for `value`.
-fn choice<T: Copy + PartialEq>(ui: &mut Ui, id: &str, value: &mut T, options: &[T], label: impl Fn(&T) -> String) {
+pub fn choice<T: Copy + PartialEq>(ui: &mut Ui, id: &str, value: &mut T, options: &[T], label: impl Fn(&T) -> String) {
     egui::ComboBox::from_id_salt(id).selected_text(label(value)).show_ui(ui, |ui| {
         for option in options {
             ui.selectable_value(value, *option, label(option));
