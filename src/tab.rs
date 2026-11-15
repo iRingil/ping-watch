@@ -665,15 +665,16 @@ fn history_key(host: &str) -> String {
     host.to_lowercase()
 }
 
-/// Timeline title of hop `ttl`: name, address and hop number, as in PingPlotter.
+/// Timeline title of hop `ttl`, in the style of the target labels: "Hop 10: 208.67.222.222 / dns.sse.cisco.com"
+/// (the reverse name only if there is one).
 fn hop_title(route: &Route, ttl: u8, names: &NameCache) -> String {
     let address = route.hops().iter().find(|hop| hop.ttl == ttl).and_then(|hop| hop.address);
     match address {
-        Some(ip) => {
-            let name = names.get(ip).unwrap_or_else(|| ip.to_string());
-            format!("{name} ({ip}) hop {ttl}")
-        }
-        None => format!("hop {ttl} (no response)"),
+        Some(ip) => match names.get(ip).filter(|name| *name != ip.to_string()) {
+            Some(name) => format!("Hop {ttl}: {ip} / {name}"),
+            None => format!("Hop {ttl}: {ip}"),
+        },
+        None => format!("Hop {ttl}: no response"),
     }
 }
 

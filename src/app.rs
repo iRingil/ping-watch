@@ -531,7 +531,12 @@ fn tab_status(ui: &mut Ui, tab: &Tab) {
     status_segment(ui, "Target", label);
     let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
     ui.separator();
-    status_segment(ui, "Avg", format!("{} ms", format_ms(stats.and_then(|stats| stats.average()))));
+    let average = stats.and_then(|stats| stats.average());
+    status_segment(
+        ui,
+        "Avg",
+        average.map_or_else(|| "-".to_owned(), |average| format!("{} ms", format_ms(Some(average)))),
+    );
     ui.separator();
     status_segment(ui, "Loss", stats.map_or_else(|| "-".to_owned(), |stats| format!("{:.1} %", stats.loss_percent())));
     ui.separator();

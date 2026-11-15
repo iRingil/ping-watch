@@ -22,7 +22,7 @@ const SCALE_STEP_MS: f64 = 50.0;
 const SCALE_PER_AVERAGE: f64 = 2.0;
 
 /// Background of a row whose hop doesn't answer.
-const LOST_ROW: Color32 = Color32::from_rgb(0x6e, 0x2f, 0x33);
+const LOST_ROW: Color32 = Color32::from_rgb(0x69, 0x2b, 0x3c);
 /// Color of the min–max range.
 const RANGE_COLOR: Color32 = Color32::from_rgb(0xa9, 0xae, 0xb8);
 /// Color of the average marker.

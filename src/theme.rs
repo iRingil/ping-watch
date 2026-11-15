@@ -30,18 +30,20 @@ pub const SIGNAL: Color32 = Color32::from_rgb(0x6f, 0xb7, 0xd9);
 /// Signal blue under the pointer.
 pub const SIGNAL_HOVER: Color32 = Color32::from_rgb(0x8f, 0xc9, 0xe4);
 
-/// Green zone background (latency below 100 ms).
-pub const GOOD_ZONE: Color32 = Color32::from_rgb(0x2c, 0x4b, 0x3b);
-/// Amber zone background (100–200 ms).
-pub const WARN_ZONE: Color32 = Color32::from_rgb(0x55, 0x47, 0x22);
-/// Red zone background (over 200 ms).
-pub const BAD_ZONE: Color32 = Color32::from_rgb(0x55, 0x2a, 0x2e);
-/// Green marks: hop badge without loss, legend.
-pub const GOOD: Color32 = Color32::from_rgb(0x5f, 0xaf, 0x7f);
-/// Amber marks: occasional loss.
-pub const WARN: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x4a);
-/// Red marks: heavy loss, errors, the current-latency dot.
-pub const BAD: Color32 = Color32::from_rgb(0xe0, 0x6a, 0x63);
+// The zone hues are turned a little off the usual traffic-light set (and PingPlotter's): green leans to jade, amber
+// to ochre, red to rose. They still read as fine / slow / bad at a glance, but as this app's own.
+/// Green zone background (latency below 100 ms): dark jade.
+pub const GOOD_ZONE: Color32 = Color32::from_rgb(0x26, 0x4a, 0x42);
+/// Amber zone background (100–200 ms): dark ochre.
+pub const WARN_ZONE: Color32 = Color32::from_rgb(0x57, 0x42, 0x1f);
+/// Red zone background (over 200 ms): dark rose.
+pub const BAD_ZONE: Color32 = Color32::from_rgb(0x55, 0x28, 0x36);
+/// Green marks: hop badge of a fast hop, legend.
+pub const GOOD: Color32 = Color32::from_rgb(0x52, 0xb0, 0x94);
+/// Amber marks: slow hop, paused.
+pub const WARN: Color32 = Color32::from_rgb(0xe2, 0xa1, 0x3e);
+/// Red marks: very slow hop, loss, errors, the current-latency dot.
+pub const BAD: Color32 = Color32::from_rgb(0xe0, 0x5f, 0x74);
 
 /// Text face, embedded so the app looks the same on any machine (license: `assets/fonts/OFL.txt`).
 const BARLOW_REGULAR: &[u8] = include_bytes!("../assets/fonts/Barlow-Regular.ttf");

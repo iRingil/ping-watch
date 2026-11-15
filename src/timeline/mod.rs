@@ -34,9 +34,10 @@ const LATENCY_COLOR: Color32 = theme::INK;
 /// Color of the jitter line.
 const JITTER_COLOR: Color32 = Color32::from_rgb(0xff, 0x8a, 0x65);
 /// Color of the packet loss bars.
-const LOSS_COLOR: Color32 = Color32::from_rgb(0xe5, 0x39, 0x35);
-/// Grid lines drawn over the latency zones.
-const GRID_OVER_ZONES: Color32 = Color32::from_rgba_premultiplied(22, 22, 22, 22);
+const LOSS_COLOR: Color32 = Color32::from_rgb(0xd6, 0x45, 0x5e);
+/// Grid lines, drawn over everything (zones included) so they look the same on zones and on the bare plot: a faint
+/// muted ink. (egui_plot's own grid lies under the zones and glares on the bare plot.)
+const GRID: Color32 = Color32::from_rgba_premultiplied(0x15, 0x16, 0x19, 0x26);
 /// Color of comment markers.
 const COMMENT_COLOR: Color32 = Color32::from_rgb(0xff, 0xd5, 0x4f);
 
@@ -370,6 +371,15 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
                     .collect()
             })
             .y_axis_formatter(|mark, _| format!("{:.0}", mark.value))
+            .show_grid(false)
+    };
+    let grid = |plot: &mut egui_plot::PlotUi<'_>, scale: f64, height: f32| {
+        for (value, _) in value_marks(scale, height).into_iter().skip(1) {
+            plot.hline(HLine::new("", value).color(GRID).width(1.0).allow_hover(false));
+        }
+        for (value, _) in time_marks(from_s, to_s, utc_offset_s) {
+            plot.vline(VLine::new("", value).color(GRID).width(1.0).allow_hover(false));
+        }
     };
 
     let jitter = &shown.series.jitter;
@@ -378,6 +388,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
             ui,
             |plot| {
                 plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
+                grid(plot, jitter.scale_ms, JITTER_HEIGHT);
                 plot.add(
                     Text::new("", PlotPoint::new(from_s, jitter.scale_ms), "Jitter (ms)")
                         .anchor(Align2::LEFT_TOP)
@@ -412,13 +423,8 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
                     }
                 }
             }
-            // Grid lines again on top of the zones (the plot's own grid lies under them), as in PingPlotter.
-            for (value, _) in value_marks(scale, height).into_iter().skip(1) {
-                plot.hline(HLine::new("", value).color(GRID_OVER_ZONES).width(1.0).allow_hover(false));
-            }
-            for (value, _) in time_marks(from_s, to_s, utc_offset_s) {
-                plot.vline(VLine::new("", value).color(GRID_OVER_ZONES).width(1.0).allow_hover(false));
-            }
+            // Grid lines on top of the zones, as in PingPlotter.
+            grid(plot, scale, height);
             // Titled inside, like the jitter strip, so both charts share one y-axis width and line up.
             plot.add(
                 Text::new("", PlotPoint::new(from_s, scale), "Latency (ms)")
