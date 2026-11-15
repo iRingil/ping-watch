@@ -205,6 +205,19 @@ impl TargetList {
         Ok(())
     }
 
+    /// Name given to `address` in the list, `None` if it isn't listed or has no name.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn name(&self, address: &str) -> Result<Option<String>, HistoryError> {
+        let name: Option<String> = self
+            .connection
+            .query_row("SELECT name FROM saved_targets WHERE address = ?1", [normalize(address)], |row| row.get(0))
+            .optional()?;
+        Ok(name.filter(|name| !name.trim().is_empty()))
+    }
+
     /// Settings last used for tracing `address`, `None` if it was never traced (or the stored values are unknown).
     ///
     /// # Errors
@@ -312,6 +325,17 @@ mod tests {
         list.update(id, "2001:db8::1", "").expect("address changed");
         let changed = find(&list, "2001:db8::1").expect("listed under the new address");
         assert_eq!((changed.name.as_str(), changed.family), ("", Some(Family::V6)));
+    }
+
+    #[test]
+    fn names_are_looked_up_by_address() {
+        let list = list();
+        list.remember("example.org", IpAddr::from([192, 0, 2, 1])).expect("remembered");
+        assert_eq!(list.name("example.org").ok(), Some(None), "no name given");
+        let id = find(&list, "example.org").map(|target| target.id).expect("listed");
+        list.update(id, "example.org", "Example").expect("updated");
+        assert_eq!(list.name(" Example.ORG ").ok(), Some(Some("Example".to_owned())));
+        assert_eq!(list.name("unknown.org").ok(), Some(None));
     }
 
     #[test]

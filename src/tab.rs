@@ -143,6 +143,8 @@ pub struct Tab {
     saved_settings: Option<TraceSettings>,
     /// Pause the trace as soon as it starts (a tab restored from a paused one).
     start_paused: bool,
+    /// Name given to the host in the target list, looked up while the tab is shown.
+    name: Option<String>,
 }
 
 impl Tab {
@@ -160,6 +162,7 @@ impl Tab {
             chart: None,
             saved_settings: None,
             start_paused: false,
+            name: None,
         }
     }
 
@@ -225,10 +228,7 @@ impl Tab {
     /// controls may change).
     pub fn chart(&mut self, ui: &mut Ui, history_path: Option<&Path>, period: &mut Period) {
         let route = self.route();
-        let title = match &route {
-            Some(route) if self.host != route.target().to_string() => format!("{} ({})", self.host, route.target()),
-            _ => self.title(),
-        };
+        let title = self.label().unwrap_or_else(|| self.title());
         let Some(chart) = &mut self.chart else {
             return;
         };
@@ -259,6 +259,19 @@ impl Tab {
         }
         // Marked as handled even after a failure: one attempt per change, not one per frame.
         self.saved_settings = Some(current);
+    }
+
+    /// The traced target as shown in headings: address, the host if it isn't just that address written another way,
+    /// and the name from the target list; `None` until the trace runs.
+    pub fn label(&self) -> Option<String> {
+        self.target().map(|target| target_label(target, &self.host, self.name.as_deref()))
+    }
+
+    /// Looks up the host's name in the target list (it may be edited at any time).
+    fn refresh_name(&mut self, targets: Option<&TargetList>) {
+        if let Some(targets) = targets {
+            self.name = targets.name(&self.host).inspect_err(|error| log::warn!("{error}")).ok().flatten();
+        }
     }
 
     /// Address being traced, `None` until the trace runs.
@@ -318,6 +331,7 @@ impl Tab {
         {
             log::warn!("cannot add {} to the target list: {error}", self.host);
         }
+        self.refresh_name(context.targets);
         // The settings this target was last traced with come back with it.
         self.saved_settings = context
             .targets
@@ -426,6 +440,7 @@ impl Tab {
     /// asked for in the menu.
     pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>, table_share: &mut f32) -> Option<Action> {
         self.save_settings(context.targets);
+        self.refresh_name(context.targets);
         let route = self.route();
         let toolbar_frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::symmetric(10, 8));
         let action = egui::Panel::top("tab-toolbar")
@@ -511,7 +526,8 @@ impl Tab {
             return None;
         };
         let mut action = None;
-        ui.label(RichText::new(format!("{} / {}", session.target, self.host)).font(theme::heading_font(17.0)));
+        let label = target_label(session.target, &self.host, self.name.as_deref());
+        ui.label(RichText::new(label).font(theme::heading_font(17.0)));
         ui.add_space(8.0);
         let paused = session.tracer.is_paused();
         // One split button, as in PingPlotter: the face pauses or resumes, the arrow lists the other actions.
@@ -624,6 +640,17 @@ pub fn clock(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+/// Heading of a traced target: `target`, then `host` unless it is that same address (however written), then the
+/// saved `name` — "2a02:6b8::feed:ff / Yandex DNS", "140.82.121.3 / github.com".
+fn target_label(target: IpAddr, host: &str, name: Option<&str>) -> String {
+    let host = Some(host).filter(|host| host.trim().parse::<IpAddr>().ok() != Some(target));
+    std::iter::once(target.to_string())
+        .chain(host.map(str::to_owned))
+        .chain(name.map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 /// Name under which a host's history is stored.
 fn history_key(host: &str) -> String {
     host.to_lowercase()
@@ -638,5 +665,20 @@ fn hop_title(route: &Route, ttl: u8, names: &NameCache) -> String {
             format!("{name} ({ip}) hop {ttl}")
         }
         None => format!("hop {ttl} (no response)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_label_says_the_address_once() {
+        let yandex: IpAddr = "2a02:6b8::feed:ff".parse().expect("valid address");
+        assert_eq!(target_label(yandex, "2a02:6b8::feed:0ff", Some("Yandex DNS")), "2a02:6b8::feed:ff / Yandex DNS");
+        let quad9 = IpAddr::from([9, 9, 9, 9]);
+        assert_eq!(target_label(quad9, "9.9.9.9", None), "9.9.9.9");
+        let github = IpAddr::from([140, 82, 121, 3]);
+        assert_eq!(target_label(github, "github.com", Some("GitHub")), "140.82.121.3 / github.com / GitHub");
     }
 }

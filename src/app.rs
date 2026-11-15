@@ -522,17 +522,11 @@ fn tab_status(ui: &mut Ui, tab: &Tab) {
         return;
     }
     let overview = tab.overview();
-    let Some(target) = overview.target else {
+    let Some(label) = tab.label() else {
         ui.weak(&overview.status);
         return;
     };
-    // "9.9.9.9 / 9.9.9.9" says nothing twice: the host only when it isn't the address itself.
-    let target_text = if overview.title == target.to_string() {
-        overview.title.clone()
-    } else {
-        format!("{target} / {}", overview.title)
-    };
-    status_segment(ui, "Target", target_text);
+    status_segment(ui, "Target", label);
     let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
     ui.separator();
     status_segment(ui, "Avg", format!("{} ms", format_ms(stats.and_then(|stats| stats.average()))));
