@@ -237,7 +237,7 @@ impl AllTargets {
                         row.col(|ui| hop_table::cell(ui, true, loss));
                         row.col(|ui| {
                             if let Some(stats) = stats {
-                                latency_bars::cell(ui, stats, true, scale_ms);
+                                latency_bars::cell(ui, stats, overview.reached, scale_ms);
                             }
                         });
                         let response = row.response();

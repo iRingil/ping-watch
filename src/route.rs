@@ -116,9 +116,13 @@ impl RouteState {
         Self { target, hops: vec![hop; usize::from(max_hops)], target_ttl: None, started_ms: None }
     }
 
-    /// Whether `ttl` is the route length, i.e. probes with it reach the target itself.
+    /// Whether probes with `ttl` are the ones meant for the target: the route length, or, while the target hasn't
+    /// answered (unreachable), the farthest TTL, so the target's history records its losses.
     pub fn is_target_ttl(&self, ttl: u8) -> bool {
-        self.target_ttl == Some(ttl)
+        match self.target_ttl {
+            Some(target_ttl) => target_ttl == ttl,
+            None => u8::try_from(self.hops.len()).ok() == Some(ttl),
+        }
     }
 
     /// Whether probes with `ttl` are still useful: TTLs beyond the target are not.
@@ -255,6 +259,16 @@ mod tests {
         route.record(5, 0, reply(ROUTER));
         assert_eq!(all(&route).hops().len(), 30);
         assert!(route.should_probe(30));
+    }
+
+    #[test]
+    fn the_target_ttl_is_the_farthest_until_the_target_answers() {
+        let mut route = RouteState::new(TARGET, 30);
+        assert!(route.is_target_ttl(30));
+        assert!(!route.is_target_ttl(5));
+        route.record(5, 0, reply(TARGET));
+        assert!(route.is_target_ttl(5));
+        assert!(!route.is_target_ttl(30));
     }
 
     #[test]

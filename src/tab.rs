@@ -111,8 +111,11 @@ pub struct Overview {
     pub status: String,
     /// Number of hops to the target, once it answered.
     pub hops: Option<usize>,
-    /// The target hop, once it answered.
+    /// The hop standing for the target while tracing: the target itself once it answered, else the farthest probe
+    /// (all lost while the target is unreachable).
     pub target_hop: Option<Hop>,
+    /// Whether the target itself answers at the end of the route.
+    pub reached: bool,
 }
 
 /// One target tab.
@@ -395,9 +398,12 @@ impl Tab {
     /// which has its own focus.
     pub fn overview_with(&self, focus: Focus, visible: (i64, i64)) -> Overview {
         let route = self.route_with(focus, visible);
-        let target_hop = route
+        // The last hop stands for the target: the target itself once it answered, otherwise the farthest probe,
+        // whose losses are the target's (an unreachable target is shown as lost, not as "no data").
+        let target_hop = route.as_ref().and_then(|route| route.hops().last());
+        let reached = route
             .as_ref()
-            .and_then(|route| route.hops().last().filter(|hop| hop.address == Some(route.target())));
+            .is_some_and(|route| target_hop.is_some_and(|hop| hop.address == Some(route.target())));
         let status = match &self.state {
             State::Editing(Some(error)) => error.clone(),
             State::Editing(None) => "no target".to_owned(),
@@ -409,8 +415,9 @@ impl Tab {
             title: self.title(),
             target: route.as_ref().map(Route::target),
             status,
-            hops: target_hop.map(|hop| usize::from(hop.ttl)),
+            hops: target_hop.filter(|_| reached).map(|hop| usize::from(hop.ttl)),
             target_hop: target_hop.cloned(),
+            reached,
         }
     }
 
