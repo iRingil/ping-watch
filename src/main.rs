@@ -76,7 +76,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(state) = saved_window {
         viewport = viewport
             .with_position([state.x, state.y])
-            .with_inner_size([state.width, state.height])
+            // A size saved before the minimum existed (or under it) comes back at least as large: Windows applies
+            // the minimum only while the user resizes, not to the size the window is created with.
+            .with_inner_size([state.width.max(MIN_WINDOW_SIZE[0]), state.height.max(MIN_WINDOW_SIZE[1])])
             .with_maximized(state.maximized);
     }
     let options = eframe::NativeOptions { viewport: window_icon(viewport), ..Default::default() };
