@@ -16,10 +16,11 @@ use crate::ui::theme::{self, ThemeChoice};
 use crate::ui::timeline::Period;
 use crate::update::{Check, Outcome, REPOSITORY, UpdateError};
 
-/// Width of the window's content.
-const WIDTH: f32 = 520.0;
-/// Least height of a page, so switching pages doesn't make the window jump.
-const PAGE_HEIGHT: f32 = 290.0;
+/// Width of the window's content: the widest page in any language (About in Spanish, 604 points, measured
+/// 2026-11-15), so the window is the same size on every page.
+const WIDTH: f32 = 610.0;
+/// Height of a page: the tallest one (About, 305 points), so switching pages doesn't make the window jump.
+const PAGE_HEIGHT: f32 = 310.0;
 /// Side of the logo on the About page.
 const LOGO_SIZE: f32 = 96.0;
 /// The project's source code.
