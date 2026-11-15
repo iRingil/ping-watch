@@ -30,7 +30,8 @@ DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; A portable copy leaves nothing in the registry: no uninstaller entry.
+; A portable copy has no uninstaller entry; the app itself still writes its Run value (when turned on) and its
+; notification registration, as the README says.
 Uninstallable=not IsPortable
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}

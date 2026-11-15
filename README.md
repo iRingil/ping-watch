@@ -92,22 +92,29 @@ Download the latest version from [Releases](https://github.com/iRingil/ping-watc
 - `PingWatch-<version>-setup.exe` is the installer. It needs no administrator rights and offers two types:
   - **Normal**: installs into `%LOCALAPPDATA%\Programs\Ping Watch` for the current Windows user, with a Start menu
     shortcut and an entry in Installed apps to uninstall it.
-  - **Portable**: copies the app into any folder, without shortcuts, registry entries or an uninstaller.
+  - **Portable**: copies the app into any folder, without shortcuts or an uninstaller.
 - `PingWatch-<version>-portable.zip` is the portable copy: unpack it anywhere and run `PingWatch.exe`.
 
 The app is not code-signed yet, so Windows SmartScreen may warn about it: click **More info → Run anyway**.
 
 ### Where the app keeps its files
 
-|                                                       | Normal installation                                  | Portable copy                                 |
-|-------------------------------------------------------|------------------------------------------------------|-----------------------------------------------|
-| Probe history, settings, targets, window and tabs     | `%LOCALAPPDATA%\Ping Watch\history.sqlite`           | `userdata\history.sqlite` in the app's folder |
-| Start with Windows, when turned on in the settings    | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | the same                                      |
+|                                                    | Normal installation                                          | Portable copy                                 |
+|----------------------------------------------------|--------------------------------------------------------------|-----------------------------------------------|
+| Probe history, settings, targets, window and tabs  | `%LOCALAPPDATA%\Ping Watch\history.sqlite`                   | `userdata\history.sqlite` in the app's folder |
+| Start with Windows, when turned on in the settings | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`         | the same                                      |
+| Name and icon of the app's notifications           | `HKCU\Software\Classes\AppUserModelId\iRingil.PingWatch`     | the same                                      |
 
 The history keeps the last seven days by default (Settings → Tracing → Keep history for). A portable copy is a folder
 with `portable.txt` next to `PingWatch.exe`: delete that file, and the copy keeps its data in the user profile
-instead. To remove a portable copy, delete its folder. Uninstalling a normal installation removes the "start with
-Windows" entry and asks whether to delete the history and the settings as well.
+instead.
+
+A portable copy writes the same two registry entries as a normal installation, both for the current user only:
+starting with Windows is a value under `Run` (not a shortcut in the Startup folder), and Windows shows notifications
+under the app's name and icon only when they are registered under `AppUserModelId`. To remove a portable copy, turn
+off "Start with Windows" in the settings, delete the folder and, if you like, the `AppUserModelId\iRingil.PingWatch`
+key. Uninstalling a normal installation removes both entries and asks whether to delete the history and the settings
+as well.
 
 ## Privacy
 
