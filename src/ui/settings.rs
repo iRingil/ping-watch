@@ -26,6 +26,12 @@ const SITE_URL: &str = "https://iringil.github.io/ping-watch/";
 const REPO_URL: &str = "https://github.com/iRingil/ping-watch";
 /// The license's text.
 const LICENSE_URL: &str = "https://polyformproject.org/licenses/noncommercial/1.0.0/";
+/// Width of the label column of the choice lists.
+const LABEL_WIDTH: f32 = 110.0;
+/// Most columns of the language list.
+const LANGUAGE_COLUMNS: usize = 3;
+/// Width of a column of the language list.
+const LANGUAGE_COLUMN_WIDTH: f32 = 120.0;
 /// Width of the drop-down lists, the same for all.
 const COMBO_WIDTH: f32 = 150.0;
 /// Space between the label column and the controls.
@@ -234,10 +240,9 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
 
 /// Appearance: the theme — follow Windows, dark or light (only dark so far).
 fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
-    settings_grid(ui, "settings-appearance", |ui| {
-        ui.weak("Theme");
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 18.0;
+    // One choice under another, the label level with the first.
+    label_on_top(ui, "Theme", |ui| {
+        ui.vertical(|ui| {
             let themes = [
                 (ThemeChoice::Auto, Icon::Auto, "Auto", "Follows the Windows app theme"),
                 (ThemeChoice::Dark, Icon::Moon, "Dark", "Graphite panel, light text"),
@@ -250,17 +255,43 @@ fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
                 }
             }
         });
-        ui.end_row();
     });
 }
 
-/// Language: the interface language (only English so far).
+/// Language: the interface language (only English so far). The choices run top to bottom, then left to right, in
+/// up to [`LANGUAGE_COLUMNS`] columns.
 fn language(ui: &mut Ui) {
-    settings_grid(ui, "settings-language", |ui| {
-        ui.weak("Interface");
-        icon_option(ui, Icon::FlagGb, "English", true, false)
-            .on_disabled_hover_text("Other languages aren't ready yet");
-        ui.end_row();
+    let languages = [(Icon::FlagGb, "English")];
+    let rows = languages.len().div_ceil(LANGUAGE_COLUMNS).max(1);
+    label_on_top(ui, "Interface", |ui| {
+        ui.horizontal_top(|ui| {
+            for column in languages.chunks(rows) {
+                ui.vertical(|ui| {
+                    ui.set_width(LANGUAGE_COLUMN_WIDTH);
+                    for (icon, label) in column {
+                        icon_option(ui, *icon, label, true, false)
+                            .on_disabled_hover_text("Other languages aren't ready yet");
+                    }
+                });
+            }
+        });
+    });
+}
+
+/// A muted `label` on the left, level with the top of `content` (a list of choices) on the right.
+fn label_on_top(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
+    ui.horizontal_top(|ui| {
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(LABEL_WIDTH, ui.spacing().interact_size.y), egui::Sense::hover());
+        let palette = theme::palette(ui);
+        ui.painter().text(
+            egui::pos2(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            palette.ink_muted,
+        );
+        content(ui);
     });
 }
 
