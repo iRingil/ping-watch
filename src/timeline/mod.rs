@@ -17,7 +17,7 @@ use egui_plot::{
 use self::fetch::{Fetched, Fetcher, Request};
 pub use self::series::Period;
 use self::series::{Series, Trace, Window, clock, millis_of, seconds, time_marks, value_marks};
-use crate::history::{self, Comment};
+use crate::history::{self, Comment, HopKey};
 use crate::latency_bars::{GOOD_MS, WARN_MS};
 use crate::theme::{self, BAD_ZONE, GOOD_ZONE, WARN_ZONE};
 
@@ -138,14 +138,14 @@ impl Timeline {
         (end.saturating_sub(self.period.millis()), end)
     }
 
-    /// Draws the pane for hop `ttl` (described by `title`) of target `target_id`, from the history at
+    /// Draws the pane for hop `hop` (described by `title`) of target `target_id`, from the history at
     /// `history_path`.
     pub fn show(
         &mut self,
         ui: &mut Ui,
         history_path: Option<&Path>,
         target_id: Option<i64>,
-        ttl: u8,
+        hop: HopKey,
         title: &str,
         interval: Duration,
     ) {
@@ -156,7 +156,7 @@ impl Timeline {
             return;
         };
         let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
-        if let Some(error) = self.sync(path, target_id, ttl, now_ms, interval_ms) {
+        if let Some(error) = self.sync(path, target_id, hop, now_ms, interval_ms) {
             ui.colored_label(theme::BAD, error);
             return;
         }
@@ -205,7 +205,7 @@ impl Timeline {
 
     /// Takes arrived answers and queries again when the data on screen no longer fits. Returns an error to show
     /// instead of the chart.
-    fn sync(&mut self, path: &Path, target_id: i64, ttl: u8, now_ms: i64, interval_ms: i64) -> Option<String> {
+    fn sync(&mut self, path: &Path, target_id: i64, hop: HopKey, now_ms: i64, interval_ms: i64) -> Option<String> {
         if self.fetcher.is_none() && self.fetcher_error.is_none() {
             match Fetcher::start(path) {
                 Ok(fetcher) => self.fetcher = Some(fetcher),
@@ -223,12 +223,12 @@ impl Timeline {
             }
         }
         let window = Window::ending_at(self.end_ms.unwrap_or(now_ms), self.period, interval_ms);
-        let request = Request { target_id, ttl, period: self.period, window };
+        let request = Request { target_id, hop, period: self.period, window };
         let stale = self.refresh_now
             || self.shown.as_ref().is_none_or(|shown| {
                 let old = shown.request;
                 let moved = old.target_id != target_id
-                    || old.ttl != ttl
+                    || old.hop != hop
                     || old.period != self.period
                     || old.window.bucket_ms != window.bucket_ms;
                 let live_due = self.end_ms.is_none() && {

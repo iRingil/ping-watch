@@ -43,8 +43,11 @@ const SCHEMA: &str = "
         ts_ms     INTEGER NOT NULL, -- Unix time, milliseconds
         address   BLOB,             -- 4 (IPv4) or 16 (IPv6) bytes
         rtt_us    INTEGER,          -- round trip, microseconds
+        at_target INTEGER NOT NULL, -- 1 if the TTL was the route length: the probe was meant for the target
         PRIMARY KEY (target_id, ttl, ts_ms)
     ) WITHOUT ROWID;
+    -- The target's own history, whatever its hop number was at the time.
+    CREATE INDEX IF NOT EXISTS samples_at_target ON samples (target_id, ts_ms) WHERE at_target = 1;
     -- Notes the user pinned to a moment of a target's timeline.
     CREATE TABLE IF NOT EXISTS comments (
         id        INTEGER PRIMARY KEY,
@@ -54,6 +57,26 @@ const SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS comments_by_time ON comments (target_id, ts_ms);
 ";
+
+/// Which samples of a target make up one line of history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HopKey {
+    /// The hop with this TTL.
+    Ttl(u8),
+    /// The target itself, at whatever TTL it was reached (the route may have grown or shrunk).
+    Target,
+}
+
+impl HopKey {
+    /// SQL condition selecting the samples, and the value bound to its `?2`. Both forms take `?2`, so the queries
+    /// keep the same parameters.
+    fn condition(self) -> (&'static str, u8) {
+        match self {
+            Self::Ttl(ttl) => ("ttl = ?2", ttl),
+            Self::Target => ("at_target = 1 AND ?2 = 0", 0),
+        }
+    }
+}
 
 /// Error of the history database.
 #[derive(Debug, thiserror::Error)]
@@ -171,7 +194,8 @@ impl Store {
         let transaction = self.connection.transaction()?;
         {
             let mut statement = transaction.prepare_cached(
-                "INSERT OR REPLACE INTO samples (target_id, ttl, ts_ms, address, rtt_us) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO samples (target_id, ttl, ts_ms, address, rtt_us, at_target)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for sample in samples {
                 let (address, rtt_us) = match sample.outcome {
@@ -184,7 +208,7 @@ impl Store {
                     }
                     ProbeOutcome::Lost => (None, None),
                 };
-                statement.execute(params![target_id, sample.ttl, sample.at_ms, address, rtt_us])?;
+                statement.execute(params![target_id, sample.ttl, sample.at_ms, address, rtt_us, sample.at_target])?;
             }
         }
         transaction.commit()?;
@@ -200,7 +224,7 @@ impl Store {
         Ok(self.connection.execute("DELETE FROM samples WHERE ts_ms < ?1", [before_ms])?)
     }
 
-    /// Statistics of hop `ttl` of target `target_id` in `[from_ms, to_ms)`, grouped into buckets of
+    /// Statistics of hop `hop` of target `target_id` in `[from_ms, to_ms)`, grouped into buckets of
     /// `bucket_ms` aligned to `from_ms`. Buckets without samples are omitted.
     ///
     /// # Errors
@@ -209,7 +233,7 @@ impl Store {
     pub fn buckets(
         &self,
         target_id: i64,
-        ttl: u8,
+        hop: HopKey,
         from_ms: i64,
         to_ms: i64,
         bucket_ms: i64,
@@ -217,26 +241,30 @@ impl Store {
         // Jitter, as in PingPlotter's graph: the mean absolute difference between consecutive *answered* samples
         // over the last JITTER_WINDOW answers, so a spike shows as a plateau rather than two needles. Computed over
         // answered samples only and joined back by timestamp (unique per target and hop).
-        let mut statement = self.connection.prepare_cached(concat!(
-            "SELECT ?3 + (s.ts_ms - ?3) / ?5 * ?5 AS start,
+        let (condition, key) = hop.condition();
+        let mut statement = self.connection.prepare_cached(&format!(
+            concat!(
+                "SELECT ?3 + (s.ts_ms - ?3) / ?5 * ?5 AS start,
                     COUNT(*), COUNT(s.rtt_us), MIN(s.rtt_us), CAST(ROUND(AVG(s.rtt_us)) AS INTEGER), MAX(s.rtt_us),
                     CAST(ROUND(AVG(j.jitter)) AS INTEGER)
              FROM samples AS s
              LEFT JOIN (
                  SELECT ts_ms, AVG(step) OVER (ORDER BY ts_ms ROWS BETWEEN ",
-            jitter_window_preceding!(),
-            " PRECEDING AND CURRENT ROW) AS jitter
+                jitter_window_preceding!(),
+                " PRECEDING AND CURRENT ROW) AS jitter
                  FROM (
                      SELECT ts_ms, ABS(rtt_us - LAG(rtt_us) OVER (ORDER BY ts_ms)) AS step
                      FROM samples
-                     WHERE target_id = ?1 AND ttl = ?2 AND ts_ms >= ?3 AND ts_ms < ?4 AND rtt_us IS NOT NULL
+                     WHERE target_id = ?1 AND {condition} AND ts_ms >= ?3 AND ts_ms < ?4 AND rtt_us IS NOT NULL
                  )
              ) AS j ON j.ts_ms = s.ts_ms
-             WHERE s.target_id = ?1 AND s.ttl = ?2 AND s.ts_ms >= ?3 AND s.ts_ms < ?4
+             WHERE s.target_id = ?1 AND {condition} AND s.ts_ms >= ?3 AND s.ts_ms < ?4
              GROUP BY start
              ORDER BY start"
+            ),
+            condition = condition
         ))?;
-        let rows = statement.query_map(params![target_id, ttl, from_ms, to_ms, bucket_ms.max(1)], |row| {
+        let rows = statement.query_map(params![target_id, key, from_ms, to_ms, bucket_ms.max(1)], |row| {
             Ok(Bucket {
                 start_ms: row.get(0)?,
                 sent: u32::try_from(row.get::<_, i64>(1)?).unwrap_or(u32::MAX),
@@ -250,15 +278,16 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Time of the oldest stored sample of hop `ttl` of target `target_id`, `None` if there is none.
+    /// Time of the oldest stored sample of hop `hop` of target `target_id`, `None` if there is none.
     ///
     /// # Errors
     ///
     /// [`HistoryError::Db`] if SQLite fails.
-    pub fn oldest_ms(&self, target_id: i64, ttl: u8) -> Result<Option<i64>, HistoryError> {
+    pub fn oldest_ms(&self, target_id: i64, hop: HopKey) -> Result<Option<i64>, HistoryError> {
+        let (condition, key) = hop.condition();
         Ok(self.connection.query_row(
-            "SELECT MIN(ts_ms) FROM samples WHERE target_id = ?1 AND ttl = ?2",
-            params![target_id, ttl],
+            &format!("SELECT MIN(ts_ms) FROM samples WHERE target_id = ?1 AND {condition}"),
+            params![target_id, key],
             |row| row.get(0),
         )?)
     }
@@ -381,12 +410,13 @@ mod tests {
 
     /// Answered sample of hop `ttl` at `at_ms` with a round trip of `rtt_ms`.
     fn reply(ttl: u8, at_ms: i64, rtt_ms: u64) -> Sample {
-        Sample { at_ms, ttl, outcome: ProbeOutcome::Reply { from: ROUTER, rtt: Duration::from_millis(rtt_ms) } }
+        let outcome = ProbeOutcome::Reply { from: ROUTER, rtt: Duration::from_millis(rtt_ms) };
+        Sample { at_ms, ttl, outcome, at_target: false }
     }
 
     /// Lost sample of hop `ttl` at `at_ms`.
     fn lost(ttl: u8, at_ms: i64) -> Sample {
-        Sample { at_ms, ttl, outcome: ProbeOutcome::Lost }
+        Sample { at_ms, ttl, outcome: ProbeOutcome::Lost, at_target: false }
     }
 
     /// In-memory store with one registered target.
@@ -416,7 +446,7 @@ mod tests {
         ];
         store.insert(target, &samples).expect("insert works");
 
-        let buckets = store.buckets(target, 1, 1_000, 3_000, 1_000).expect("query works");
+        let buckets = store.buckets(target, HopKey::Ttl(1), 1_000, 3_000, 1_000).expect("query works");
         let ms = |value| Some(Duration::from_millis(value));
         assert_eq!(
             buckets,
@@ -430,13 +460,34 @@ mod tests {
     }
 
     #[test]
+    fn target_history_follows_the_route_length() {
+        let (mut store, target) = store_with_target();
+        let at_target = |sample: Sample| Sample { at_target: true, ..sample };
+        // The route grows from 2 to 3 hops at 2 s; hop 2 then is a router.
+        let samples = [
+            at_target(reply(2, 1_000, 10)),
+            at_target(lost(2, 1_500)),
+            reply(2, 2_000, 5),
+            at_target(reply(3, 2_000, 30)),
+        ];
+        store.insert(target, &samples).expect("insert works");
+        let buckets = store.buckets(target, HopKey::Target, 0, 3_000, 1_000).expect("query works");
+        let summary: Vec<(i64, u32, u32)> =
+            buckets.iter().map(|bucket| (bucket.start_ms, bucket.sent, bucket.received)).collect();
+        assert_eq!(summary, [(1_000, 2, 1), (2_000, 1, 1)]);
+        assert_eq!(buckets.last().and_then(|bucket| bucket.avg), Some(Duration::from_millis(30)));
+        assert_eq!(store.oldest_ms(target, HopKey::Target).ok(), Some(Some(1_000)));
+        assert_eq!(store.oldest_ms(target, HopKey::Ttl(3)).ok(), Some(Some(2_000)));
+    }
+
+    #[test]
     fn a_spike_raises_jitter_for_the_whole_window() {
         let (mut store, target) = store_with_target();
         let samples: Vec<Sample> = (0_i64..25)
             .map(|second| reply(1, second.saturating_mul(1_000), if second == 5 { 300 } else { 50 }))
             .collect();
         store.insert(target, &samples).expect("insert works");
-        let buckets = store.buckets(target, 1, 0, 25_000, 1_000).expect("query works");
+        let buckets = store.buckets(target, HopKey::Ttl(1), 0, 25_000, 1_000).expect("query works");
         let jitter_at = |second: usize| buckets.get(second).and_then(|bucket| bucket.jitter);
         // The jump up (at 5 s) and back down (at 6 s) stay in the 10-answer window until 15 s.
         assert_eq!(jitter_at(4), Some(Duration::ZERO));
@@ -448,7 +499,7 @@ mod tests {
     fn bucket_of_only_losses_has_no_times() {
         let (mut store, target) = store_with_target();
         store.insert(target, &[lost(1, 0), lost(1, 10)]).expect("insert works");
-        let buckets = store.buckets(target, 1, 0, 100, 100).expect("query works");
+        let buckets = store.buckets(target, HopKey::Ttl(1), 0, 100, 100).expect("query works");
         assert_eq!(
             buckets,
             [Bucket { start_ms: 0, sent: 2, received: 0, min: None, avg: None, max: None, jitter: None }]
@@ -458,9 +509,9 @@ mod tests {
     #[test]
     fn oldest_sample_per_hop() {
         let (mut store, target) = store_with_target();
-        assert_eq!(store.oldest_ms(target, 1).ok(), Some(None));
+        assert_eq!(store.oldest_ms(target, HopKey::Ttl(1)).ok(), Some(None));
         store.insert(target, &[reply(1, 500, 1), reply(1, 300, 1), reply(2, 100, 1)]).expect("insert works");
-        assert_eq!(store.oldest_ms(target, 1).ok(), Some(Some(300)));
+        assert_eq!(store.oldest_ms(target, HopKey::Ttl(1)).ok(), Some(Some(300)));
     }
 
     #[test]
@@ -485,7 +536,7 @@ mod tests {
         let (mut store, target) = store_with_target();
         store.insert(target, &[reply(1, 100, 1), reply(1, 200, 1), reply(1, 300, 1)]).expect("insert works");
         assert_eq!(store.prune(250).ok(), Some(2));
-        let buckets = store.buckets(target, 1, 0, 1_000, 1_000).expect("query works");
+        let buckets = store.buckets(target, HopKey::Ttl(1), 0, 1_000, 1_000).expect("query works");
         assert_eq!(buckets.first().map(|bucket| bucket.sent), Some(1));
     }
 
@@ -503,7 +554,7 @@ mod tests {
 
         let store = Store::open(&path).expect("database reopens");
         let target = store.target_id("example").expect("target exists");
-        let buckets = store.buckets(target, 1, now, now.saturating_add(1), 1).expect("query works");
+        let buckets = store.buckets(target, HopKey::Ttl(1), now, now.saturating_add(1), 1).expect("query works");
         drop(store);
         std::fs::remove_dir_all(&folder).ok();
         assert_eq!(buckets.first().map(|bucket| bucket.sent), Some(1));

@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use super::series::{Period, Window};
-use crate::history::{Bucket, Comment, HistoryError, Store};
+use crate::history::{Bucket, Comment, HistoryError, HopKey, Store};
 
 /// What the chart needs: one hop of one target over one window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub struct Request {
     /// Target id in the history.
     pub target_id: i64,
     /// Hop.
-    pub ttl: u8,
+    pub hop: HopKey,
     /// Period the window was built from (two periods may share a bucket size).
     pub period: Period,
     /// Time range and bucket size.
@@ -136,11 +136,11 @@ fn work(store: &Store, jobs: &Receiver<Job>, results: &Sender<Result<Fetched, St
 
 /// Runs the chart queries of `request`.
 fn run(store: &Store, request: Request) -> Result<Fetched, HistoryError> {
-    let Request { target_id, ttl, window, .. } = request;
+    let Request { target_id, hop, window, .. } = request;
     Ok(Fetched {
         request,
-        buckets: store.buckets(target_id, ttl, window.from_ms, window.to_ms, window.bucket_ms)?,
+        buckets: store.buckets(target_id, hop, window.from_ms, window.to_ms, window.bucket_ms)?,
         comments: store.comments(target_id, window.from_ms, window.to_ms)?,
-        oldest_ms: store.oldest_ms(target_id, ttl)?,
+        oldest_ms: store.oldest_ms(target_id, hop)?,
     })
 }

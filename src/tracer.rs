@@ -181,42 +181,33 @@ fn probe_loop(
         let started = Instant::now();
         if lock(&shared.route).should_probe(ttl) {
             let at_ms = unix_ms(SystemTime::now());
-            match pinger.probe(target, ttl, config.timeout) {
+            let outcome = match pinger.probe(target, ttl, config.timeout) {
                 Ok(outcome) => {
                     if matches!(outcome, ProbeOutcome::Reply { .. }) {
                         *lock(&shared.last_error) = None;
                     }
-                    let in_route = {
-                        let mut route = lock(&shared.route);
-                        route.record(ttl, at_ms, outcome);
-                        route.should_probe(ttl)
-                    };
-                    // Before the route length is known every TTL is probed once; TTLs that turn out to lie beyond
-                    // the target only add noise to the history.
-                    if in_route
-                        && let Some(history) = history
-                        && history.send(Sample { at_ms, ttl, outcome }).is_err()
-                    {
-                        log::debug!("history recorder is gone; sample of ttl {ttl} dropped");
-                    }
+                    outcome
                 }
                 Err(error) => {
                     // No answer is a lost probe whatever the reason (with the network down Windows fails at once
                     // instead of timing out); the error itself is shown until a probe gets through again.
                     log::debug!("probe {target} ttl {ttl}: {error}");
                     *lock(&shared.last_error) = Some(error.to_string());
-                    let in_route = {
-                        let mut route = lock(&shared.route);
-                        route.record(ttl, at_ms, ProbeOutcome::Lost);
-                        route.should_probe(ttl)
-                    };
-                    if in_route
-                        && let Some(history) = history
-                        && history.send(Sample { at_ms, ttl, outcome: ProbeOutcome::Lost }).is_err()
-                    {
-                        log::debug!("history recorder is gone; sample of ttl {ttl} dropped");
-                    }
+                    ProbeOutcome::Lost
                 }
+            };
+            let (in_route, at_target) = {
+                let mut route = lock(&shared.route);
+                route.record(ttl, at_ms, outcome);
+                (route.should_probe(ttl), route.is_target_ttl(ttl))
+            };
+            // Before the route length is known every TTL is probed once; TTLs that turn out to lie beyond the
+            // target only add noise to the history.
+            if in_route
+                && let Some(history) = history
+                && history.send(Sample { at_ms, ttl, outcome, at_target }).is_err()
+            {
+                log::debug!("history recorder is gone; sample of ttl {ttl} dropped");
             }
         }
         if !shared.wait_turn(started) {

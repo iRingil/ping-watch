@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 
 use crate::focus::Focus;
-use crate::history::{self, Recorder, Store};
+use crate::history::{self, HopKey, Recorder, Store};
 use crate::hop_table;
 use crate::icons::{self, Icon, Style};
 use crate::latency_bars;
@@ -233,8 +233,8 @@ impl Tab {
         };
         chart.set_period(*period);
         match (&self.state, route.as_ref().and_then(|route| route.hops().last())) {
-            (State::Running(session), Some(hop)) => {
-                chart.show(ui, history_path, session.target_id, hop.ttl, &title, self.interval);
+            (State::Running(session), Some(_)) => {
+                chart.show(ui, history_path, session.target_id, HopKey::Target, &title, self.interval);
             }
             _ => {
                 ui.label(RichText::new(title).font(theme::heading_font(15.0)));
@@ -447,7 +447,12 @@ impl Tab {
         pane(ui, timeline_rect, Margin::same(8), |ui| match (&self.state, &route, ttl) {
             (State::Running(session), Some(route), Some(ttl)) => {
                 let title = hop_title(route, ttl, context.names);
-                self.timeline.show(ui, context.history_path, session.target_id, ttl, &title, self.interval);
+                // The target's line is read by target, not hop number, so it keeps its history when the route
+                // length changes.
+                let is_target =
+                    route.hops().last().is_some_and(|hop| hop.ttl == ttl && hop.address == Some(route.target()));
+                let hop = if is_target { HopKey::Target } else { HopKey::Ttl(ttl) };
+                self.timeline.show(ui, context.history_path, session.target_id, hop, &title, self.interval);
             }
             _ => {
                 ui.weak("The history of the selected hop appears here once a trace runs.");

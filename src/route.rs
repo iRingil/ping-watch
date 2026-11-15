@@ -34,6 +34,9 @@ pub struct Sample {
     pub ttl: u8,
     /// What came back.
     pub outcome: ProbeOutcome,
+    /// Whether the probe was meant for the target itself: its TTL was the route length when it was recorded.
+    /// The target's history is read by this flag, so it survives the route getting longer or shorter.
+    pub at_target: bool,
 }
 
 /// One hop of a route snapshot.
@@ -111,6 +114,11 @@ impl RouteState {
     pub fn new(target: IpAddr, max_hops: u8) -> Self {
         let hop = HopState { address: None, total: HopStats::default(), recent: VecDeque::new() };
         Self { target, hops: vec![hop; usize::from(max_hops)], target_ttl: None, started_ms: None }
+    }
+
+    /// Whether `ttl` is the route length, i.e. probes with it reach the target itself.
+    pub fn is_target_ttl(&self, ttl: u8) -> bool {
+        self.target_ttl == Some(ttl)
     }
 
     /// Whether probes with `ttl` are still useful: TTLs beyond the target are not.
