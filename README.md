@@ -109,10 +109,13 @@ Windows" entry and asks whether to delete the history and the settings as well.
 
 ## Privacy
 
-Ping Watch has no accounts, telemetry, ads or analytics. It sends only what tracing needs:
+Ping Watch has no accounts, telemetry, ads or analytics. It sends only what tracing needs, and one request you ask
+for:
 
 - **ICMP echo requests** (pings) to the targets you enter and, with growing hop limits, to the routers on the way.
 - **DNS lookups**: the address of a target given by name, and the names of the routers on the route.
+- **GitHub** (`api.github.com`): only when you click Settings → About → Check for updates, a request for the latest
+  release of this repository. Ping Watch never checks by itself.
 
 The history, the settings and the list of targets stay on this PC, in the file listed above.
 
@@ -148,6 +151,8 @@ for any noncommercial purpose. It is built with these third-party components:
 - [tray-icon](https://github.com/tauri-apps/tray-icon): MIT or Apache-2.0
 - [dns-lookup](https://github.com/keeperofdakeys/dns-lookup), [chrono](https://github.com/chronotope/chrono),
   [ctrlc](https://github.com/Detegr/rust-ctrlc): MIT or Apache-2.0
+- [tauri-winrt-notification](https://github.com/tauri-apps/winrt-notification): MIT or Apache-2.0
+- [ureq](https://github.com/algesten/ureq), [serde_json](https://github.com/serde-rs/json): MIT or Apache-2.0
 - [anyhow, thiserror](https://github.com/dtolnay), [log, env_logger](https://github.com/rust-lang/log):
   MIT or Apache-2.0
 - [Barlow](https://github.com/jpt/barlow) font: SIL Open Font License 1.1

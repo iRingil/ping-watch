@@ -13,6 +13,7 @@ use crate::ui::icons::{self, Icon};
 use crate::ui::tab;
 use crate::ui::theme::{self, ThemeChoice};
 use crate::ui::timeline::Period;
+use crate::update::{Check, Outcome, REPOSITORY, UpdateError};
 
 /// Width of the window's content.
 const WIDTH: f32 = 520.0;
@@ -86,8 +87,20 @@ pub struct SettingsWindow {
     autostart_error: Option<String>,
     /// The app logo for the About page, loaded on first show.
     logo: Option<egui::TextureHandle>,
-    /// The update check was asked for (there is nothing to check against yet).
-    update_asked: bool,
+    /// The update check: running, or its last result.
+    update: UpdateState,
+}
+
+/// Where the update check is.
+#[derive(Debug, Default)]
+enum UpdateState {
+    /// Not asked yet.
+    #[default]
+    Idle,
+    /// Asking GitHub.
+    Checking(Check),
+    /// The answer.
+    Done(Result<Outcome, UpdateError>),
 }
 
 impl std::fmt::Debug for SettingsWindow {
@@ -100,7 +113,7 @@ impl std::fmt::Debug for SettingsWindow {
             .field("autostart", &self.autostart)
             .field("autostart_error", &self.autostart_error)
             .field("logo", &self.logo.is_some())
-            .field("update_asked", &self.update_asked)
+            .field("update", &self.update)
             .finish()
     }
 }
@@ -336,13 +349,12 @@ impl SettingsWindow {
                 ui.label(RichText::new(APP_NAME).font(theme::heading_font(20.0)));
                 ui.horizontal(|ui| {
                     ui.weak(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                    if ui.button("Check for updates").clicked() {
-                        self.update_asked = true;
+                    let checking = matches!(self.update, UpdateState::Checking(_));
+                    if ui.add_enabled(!checking, egui::Button::new("Check for updates")).clicked() {
+                        self.update = UpdateState::Checking(Check::start(REPOSITORY, env!("CARGO_PKG_VERSION")));
                     }
                 });
-                if self.update_asked {
-                    ui.weak("No releases are published yet.");
-                }
+                self.update_result(ui);
                 ui.add_space(6.0);
                 ui.label("Traces the route to your targets, shows each hop's latency and loss, and keeps the history.");
                 ui.add_space(4.0);
@@ -357,6 +369,41 @@ impl SettingsWindow {
         });
         ui.add_space(14.0);
         about_details(ui, data_folder);
+    }
+}
+
+impl SettingsWindow {
+    /// The update check's state under the version: a spinner while asking, then what it found.
+    fn update_result(&mut self, ui: &mut Ui) {
+        if let UpdateState::Checking(check) = &self.update
+            && let Some(result) = check.result()
+        {
+            self.update = UpdateState::Done(result);
+        }
+        match &self.update {
+            UpdateState::Idle => {}
+            UpdateState::Checking(_) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Asking GitHub…");
+                });
+            }
+            UpdateState::Done(Ok(Outcome::UpToDate)) => {
+                ui.colored_label(theme::palette(ui).good, "You have the latest version.");
+            }
+            UpdateState::Done(Ok(Outcome::NoReleases)) => {
+                ui.weak("No releases are published yet.");
+            }
+            UpdateState::Done(Ok(Outcome::Newer { version, url })) => {
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme::palette(ui).warn, format!("Version {version} is available."));
+                    ui.hyperlink_to("Download", url);
+                });
+            }
+            UpdateState::Done(Err(error)) => {
+                ui.colored_label(theme::palette(ui).bad, format!("Couldn't check: {error}"));
+            }
+        }
     }
 }
 

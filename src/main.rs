@@ -10,6 +10,7 @@ mod probe;
 mod store;
 mod sync;
 mod ui;
+mod update;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

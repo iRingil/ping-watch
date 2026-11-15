@@ -15,9 +15,11 @@ egui_plot = { version = "0.38.0", default-features = false }
 env_logger = "0.11.11"
 log = "0.4.35"
 rusqlite = { version = "0.42.0", features = ["bundled"] }
+serde_json = "1.0.154"
 tauri-winrt-notification = "0.8.1"
 thiserror = "2.0.21"
 tray-icon = "0.26.1"
+ureq = "3.5.2"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_IO"] }
 windows-registry = "0.100.0"
 
