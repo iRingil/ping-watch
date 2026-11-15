@@ -220,6 +220,11 @@ impl Tab {
         }
     }
 
+    /// Probe interval.
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
     /// Whether the target is charted on the All targets page.
     pub fn is_charted(&self) -> bool {
         self.chart.is_some()
@@ -513,12 +518,16 @@ impl Tab {
             .buckets(target_id, HopKey::Target, window.from_ms, window.to_ms, window.bucket_ms)
             .inspect_err(|error| log::warn!("cannot read the history for the snapshot: {error}"))
             .ok()?;
-        let marks = reader
+        // The user's comments and the alerts' marks, as the window's timeline draws them.
+        let alerts = reader.alerts(target_id, window.from_ms, window.to_ms).unwrap_or_default();
+        let mut marks: Vec<(i64, String)> = reader
             .comments(target_id, window.from_ms, window.to_ms)
             .unwrap_or_default()
             .into_iter()
             .map(|comment| (comment.ts_ms, comment.text))
+            .chain(alerts.iter().flat_map(|entry| entry.marks(self.language)))
             .collect();
+        marks.sort_by_key(|(at_ms, _)| *at_ms);
         Some(Chart {
             from_ms: window.from_ms,
             to_ms: window.to_ms,
@@ -638,7 +647,11 @@ impl Tab {
     /// Target field and the Trace button (a spinner while resolving).
     fn target_entry(&mut self, ui: &mut Ui, targets: Option<&TargetList>) {
         let resolving = matches!(self.state, State::Resolving(_));
-        let mut start = self.entry.show(ui, targets, !resolving);
+        let problem = match &self.state {
+            State::Editing(Some(error)) => Some(error.as_str()),
+            State::Editing(None) | State::Resolving(_) | State::Running(_) => None,
+        };
+        let mut start = self.entry.show(ui, targets, !resolving, problem);
         if resolving {
             ui.spinner();
             ui.weak(trf!(ui, "Resolving {host}…", host = self.host));
@@ -766,6 +779,27 @@ pub fn interval_choice(ui: &mut Ui, interval: &mut Duration) -> bool {
     *interval != before
 }
 
+/// Combo box setting one interval on all traces: it shows the interval they share, or "different" when they
+/// don't (`fallback` with no traces at all); returns the interval chosen.
+pub fn interval_for_all(ui: &mut Ui, intervals: &[Duration], fallback: Duration) -> Option<Duration> {
+    let language = ui.language();
+    let shared = match intervals.split_first() {
+        None => Some(fallback),
+        Some((first, rest)) => rest.iter().all(|interval| interval == first).then_some(*first),
+    };
+    let shown =
+        shared.map_or_else(|| tr!(language, "different").to_owned(), |interval| interval_label(interval, language));
+    let mut chosen = None;
+    egui::ComboBox::from_id_salt("interval-of-all").selected_text(shown).show_ui(ui, |ui| {
+        for (choice, label) in INTERVALS.into_iter().zip(INTERVAL_LABELS) {
+            if ui.selectable_label(shared == Some(choice), language.translate(label)).clicked() {
+                chosen = Some(choice);
+            }
+        }
+    });
+    chosen
+}
+
 /// Combo box choosing the focus.
 pub fn focus_choice(ui: &mut Ui, focus: &mut Focus) {
     let language = ui.language();
@@ -779,7 +813,7 @@ pub fn focus_choice(ui: &mut Ui, focus: &mut Focus) {
 /// Menu label of a probe interval.
 fn interval_label(interval: Duration, language: Language) -> String {
     INTERVALS.iter().zip(INTERVAL_LABELS).find(|(known, _)| **known == interval).map_or_else(
-        || trf!(language, "{seconds} seconds", seconds = format!("{:.1}", interval.as_secs_f64())),
+        || trf!(language, "{seconds} seconds", seconds = language.decimal(interval.as_secs_f64())),
         |(_, label)| language.translate(label).to_owned(),
     )
 }

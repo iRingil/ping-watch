@@ -8,7 +8,7 @@ use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Stroke
 use crate::ui::theme::{self, Palette};
 use egui_extras::{Column, TableBuilder, TableRow};
 
-use crate::i18n::{Lang, n, tr};
+use crate::i18n::{Lang, Language, n, tr};
 use crate::probe::names::NameCache;
 use crate::probe::route::{Hop, Route};
 use crate::probe::stats::HopStats;
@@ -145,9 +145,12 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
     row.col(|ui| cell(ui, true, hop.stats.sent().to_string()));
     match hop.address {
         Some(ip) => {
-            row.col(|ui| cell(ui, false, ip.to_string()));
+            // The column fits an IPv4 address; a longer IPv6 one is clipped, so the whole address is on hover.
+            let (_, address) = row.col(|ui| cell(ui, false, ip.to_string()));
+            address.on_hover_text(ip.to_string());
             let name = names.get(ip).unwrap_or_else(|| ip.to_string());
-            row.col(|ui| cell(ui, false, name));
+            let (_, name_cell) = row.col(|ui| cell(ui, false, name.clone()));
+            name_cell.on_hover_text(name);
         }
         None => {
             row.col(|ui| cell(ui, false, "*"));
@@ -230,26 +233,26 @@ fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats, summary: bool) {
     for value in [stats.average(), stats.best(), stats.worst()] {
         row.col(|ui| {
             band(ui);
-            cell(ui, true, format_ms(value));
+            cell(ui, true, format_ms(value, ui.language()));
         });
     }
-    let current = match stats.last() {
-        Some(rtt) => format_ms(Some(rtt)),
-        None if stats.sent() > 0 => "*".to_owned(),
-        None => format_ms(None),
-    };
     row.col(|ui| {
         band(ui);
+        let current = match stats.last() {
+            Some(rtt) => format_ms(Some(rtt), ui.language()),
+            None if stats.sent() > 0 => "*".to_owned(),
+            None => format_ms(None, ui.language()),
+        };
         cell(ui, true, current);
     });
     row.col(|ui| {
         band(ui);
-        cell(ui, true, format_ms(stats.jitter()));
+        cell(ui, true, format_ms(stats.jitter(), ui.language()));
     });
     let loss = stats.loss_percent();
     row.col(|ui| {
         band(ui);
-        let loss_text = RichText::new(format!("{loss:.1}"));
+        let loss_text = RichText::new(ui.language().decimal(loss));
         let loss_text =
             if loss > 0.0 { loss_text.color(LossLevel::of(loss).color(theme::palette(ui))) } else { loss_text };
         cell(ui, true, loss_text);
@@ -302,9 +305,9 @@ pub fn cell(ui: &mut Ui, numeric: bool, text: impl Into<RichText>) {
     }
 }
 
-/// Formats a duration as milliseconds with one decimal, `-` for none.
-pub fn format_ms(value: Option<Duration>) -> String {
-    value.map_or_else(|| "-".to_owned(), |duration| format!("{:.1}", duration.as_secs_f64() * 1000.0))
+/// Formats a duration as milliseconds with one decimal in `language`'s way, `-` for none.
+pub fn format_ms(value: Option<Duration>, language: Language) -> String {
+    value.map_or_else(|| "-".to_owned(), |duration| language.decimal(duration.as_secs_f64() * 1000.0))
 }
 
 #[cfg(test)]
@@ -329,7 +332,8 @@ mod tests {
 
     #[test]
     fn milliseconds_with_one_decimal() {
-        assert_eq!(format_ms(Some(Duration::from_micros(51_449))), "51.4");
-        assert_eq!(format_ms(None), "-");
+        assert_eq!(format_ms(Some(Duration::from_micros(51_449)), Language::English), "51.4");
+        assert_eq!(format_ms(Some(Duration::from_micros(51_449)), Language::German), "51,4");
+        assert_eq!(format_ms(None, Language::English), "-");
     }
 }

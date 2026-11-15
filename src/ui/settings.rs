@@ -227,8 +227,18 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
             trn!(language, u64::from(*hops), "{n} hop|{n} hops")
         });
         ui.end_row();
-        ui.weak(tr!(ui, "Keep history for"));
-        choice(ui, "retention", &mut settings.retention, &RETENTIONS, |retention| days(*retention, language));
+        // Said on hover: the page has no room for another line in every language.
+        let applies = tr!(
+            ui,
+            "The history period applies at once: older probes, comments and alert journal entries are deleted."
+        );
+        ui.label(RichText::new(tr!(ui, "Keep history for")).color(theme::palette(ui).ink_muted))
+            .on_hover_text(applies);
+        ui.scope(|ui| {
+            choice(ui, "retention", &mut settings.retention, &RETENTIONS, |retention| days(*retention, language));
+        })
+        .response
+        .on_hover_text(applies);
         ui.end_row();
     });
     ui.add_space(10.0);
@@ -339,6 +349,7 @@ fn icon_option(ui: &mut Ui, icon: Icon, label: &str, selected: bool, enabled: bo
         let (rect, icon_response) = ui.allocate_exact_size(egui::vec2(22.0, 18.0), sense);
         let palette = theme::palette(ui);
         icons::paint(ui, rect.center(), icon, if selected { palette.ink } else { palette.ink_muted });
+        icons::focus_ring(ui, &icon_response, rect.expand(2.0));
         let text = ui.add_enabled(enabled, egui::Label::new(label).sense(sense));
         radio.union(icon_response).union(text)
     })
@@ -357,6 +368,7 @@ pub fn close_mark(ui: &mut Ui) -> bool {
         Icon::Cross,
         if response.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
     );
+    icons::focus_ring(ui, &response, rect);
     let hint = tr!(ui, "Close (Esc)");
     response.on_hover_text(hint).clicked()
 }
@@ -515,6 +527,7 @@ pub fn page_tabs<T: Copy + PartialEq>(ui: &mut Ui, pages: &[(T, &'static str)], 
                     let rect = response.rect;
                     ui.painter().hline(rect.x_range(), rect.bottom() + 4.0, egui::Stroke::new(2.0, palette.signal));
                 }
+                icons::focus_ring(ui, &response, response.rect.expand2(egui::vec2(6.0, 2.0)));
                 if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     *current = *page;
                 }

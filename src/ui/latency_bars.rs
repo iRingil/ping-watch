@@ -117,7 +117,7 @@ pub fn cell(ui: &mut Ui, stats: &HopStats, answering: bool, scale_ms: f64) -> Op
             pos2(rect.left(), rect.center().y - rect.height() * 0.3),
             vec2(width, rect.height() * 0.6),
         );
-        painter.rect_filled(bar, 0.0, palette.lost);
+        painter.rect_filled(bar, 0.0, palette.loss);
         painter.rect_stroke(bar, 0.0, Stroke::new(1.0, palette.bad), egui::StrokeKind::Inside);
     }
     let y = rect.center().y;

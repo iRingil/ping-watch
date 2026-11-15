@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::alerts::{Engine, Event, Observe, Rule, WindowStats};
-use crate::i18n::{self, Language, tr, trf, trn};
+use crate::i18n::{self, Lang, Language, tr, trf, trn};
 use crate::probe::names::NameCache;
 use crate::snapshot::{self, Snapshot};
 use crate::store::alerts::AlertStore;
@@ -798,6 +798,7 @@ fn gear_button(ui: &mut Ui, update_available: bool) -> egui::Response {
         ui.painter()
             .circle_filled(egui::pos2(rect.right() - 6.0, rect.top() + 8.0), 4.0, theme::palette(ui).signal);
     }
+    icons::focus_ring(ui, &response, rect.shrink2(Vec2::new(0.0, 3.0)));
     response.on_hover_text(if update_available {
         tr!(ui, "A new version is available: see About")
     } else {
@@ -858,6 +859,7 @@ fn bell_button(ui: &mut Ui, active: usize) -> egui::Response {
             palette.on_signal,
         );
     }
+    icons::focus_ring(ui, &response, rect.shrink2(Vec2::new(0.0, 3.0)));
     let tooltip = match active {
         0 => tr!(ui, "Alerts").to_owned(),
         count => trn!(ui, u64::try_from(count).unwrap_or(u64::MAX), "Alerts: {n} is on now|Alerts: {n} are on now"),
@@ -886,6 +888,7 @@ fn scroll_arrow(ui: &mut Ui, left: bool, active: bool) -> bool {
         egui::pos2(center.x + back, center.y + 6.0),
     ];
     painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    icons::focus_ring(ui, &response, rect.shrink2(Vec2::new(0.0, 3.0)));
     let tooltip = if left { tr!(ui, "Earlier tabs") } else { tr!(ui, "Later tabs") };
     response.on_hover_text(tooltip).clicked()
 }
@@ -921,6 +924,7 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool, alert: bool)
     }
     let text_pos = egui::pos2(rect.left() + TAB_PADDING, rect.center().y - galley.size().y / 2.0);
     painter.galley(text_pos, galley, text_color);
+    icons::focus_ring(ui, &response, rect.shrink(2.0));
 
     let mut close_clicked = false;
     if closable {
@@ -934,6 +938,7 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool, alert: bool)
         let color = if close.hovered() { theme::palette(ui).bad } else { theme::palette(ui).ink_muted };
         ui.painter()
             .text(close_rect.center(), egui::Align2::CENTER_CENTER, "\u{d7}", theme::heading_font(16.0), color);
+        icons::focus_ring(ui, &close, close_rect.shrink(2.0));
         close_clicked = close.clicked();
     }
     (response, close_clicked)
@@ -1069,13 +1074,16 @@ fn tab_status(ui: &mut Ui, tab: &Tab) {
     status_segment(
         ui,
         tr!(ui, "Avg"),
-        average.map_or_else(|| "-".to_owned(), |average| trf!(ui, "{ms} ms", ms = format_ms(Some(average)))),
+        average.map_or_else(
+            || "-".to_owned(),
+            |average| trf!(ui, "{ms} ms", ms = format_ms(Some(average), ui.language())),
+        ),
     );
     ui.separator();
     status_segment(
         ui,
         tr!(ui, "Loss"),
-        stats.map_or_else(|| "-".to_owned(), |stats| format!("{:.1} %", stats.loss_percent())),
+        stats.map_or_else(|| "-".to_owned(), |stats| format!("{} %", ui.language().decimal(stats.loss_percent()))),
     );
     ui.separator();
     status_segment(ui, tr!(ui, "Hops"), overview.hops.map_or_else(|| "-".to_owned(), |hops| hops.to_string()));

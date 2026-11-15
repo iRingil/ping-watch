@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 
 use crate::i18n::{tr, trf};
+use crate::store::history::HistoryError;
 use crate::store::targets::{Family, SavedTarget, TargetList};
 use crate::ui::icons::{self, Icon};
 use crate::ui::theme;
@@ -31,6 +32,10 @@ pub struct TargetEntry {
     focus: bool,
     /// Saved target being edited.
     editing: Option<Draft>,
+    /// Saved target whose delete cross was clicked once: the list asks before deleting.
+    confirm_delete: Option<i64>,
+    /// Why the last delete failed.
+    problem: Option<String>,
 }
 
 impl TargetEntry {
@@ -54,15 +59,26 @@ impl TargetEntry {
         self.text.clear();
     }
 
-    /// Draws the field (disabled unless `enabled`) with its list arrow. Returns whether the user asked to trace
-    /// the text: pressed Enter in the field or picked a list entry (which replaces the text).
-    pub fn show(&mut self, ui: &mut Ui, targets: Option<&TargetList>, enabled: bool) -> bool {
+    /// Draws the field (disabled unless `enabled`) with its list arrow; with a `problem` (the host couldn't be
+    /// resolved) the field is outlined in red and tells it on hover, next to where the host was typed. Returns
+    /// whether the user asked to trace the text: pressed Enter in the field or picked a list entry (which replaces
+    /// the text).
+    pub fn show(&mut self, ui: &mut Ui, targets: Option<&TargetList>, enabled: bool, problem: Option<&str>) -> bool {
         // Room on the right of the field for the arrow that opens the target list.
         let field = TextEdit::singleline(&mut self.text)
             .hint_text(tr!(ui, "Enter target name or IP"))
             .desired_width(ENTRY_WIDTH)
             .margin(Margin { left: 6, right: ARROW_WIDTH as i8, top: 3, bottom: 3 });
-        let input = ui.add_enabled(enabled, field);
+        let mut input = ui.add_enabled(enabled, field);
+        if let Some(problem) = problem {
+            ui.painter().rect_stroke(
+                input.rect,
+                CornerRadius::same(3),
+                egui::Stroke::new(1.5, theme::palette(ui).bad),
+                egui::StrokeKind::Inside,
+            );
+            input = input.on_hover_text(RichText::new(problem).color(theme::palette(ui).bad));
+        }
         if std::mem::take(&mut self.focus) {
             input.request_focus();
         }
@@ -83,6 +99,7 @@ impl TargetEntry {
             Icon::ArrowDown,
             if arrow.hovered() { theme::palette(ui).ink } else { theme::palette(ui).ink_muted },
         );
+        icons::focus_ring(ui, &arrow, arrow_rect);
         if enabled && let Some(targets) = targets {
             Popup::from_toggle_button_response(&arrow)
                 .anchor(input.rect)
@@ -119,16 +136,25 @@ impl TargetEntry {
             return None;
         }
         let mut picked = None;
+        if let Some(problem) = &self.problem {
+            ui.colored_label(theme::palette(ui).bad, problem);
+        }
         ScrollArea::vertical().max_height(TARGET_LIST_HEIGHT).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for target in all {
-                match target_row(ui, &target) {
+                let confirming = self.confirm_delete == Some(target.id);
+                match target_row(ui, &target, confirming) {
                     RowAction::Pick => picked = Some(target.address.clone()),
                     RowAction::Edit => self.editing = Some(Draft::of(&target)),
+                    // The first click on the cross asks; the second deletes.
+                    RowAction::Delete if !confirming => self.confirm_delete = Some(target.id),
                     RowAction::Delete => {
-                        if let Err(error) = targets.delete(target.id) {
-                            log::error!("cannot delete {}: {error}", target.address);
-                        }
+                        self.confirm_delete = None;
+                        self.problem = targets
+                            .delete(target.id)
+                            .inspect_err(|error| log::error!("cannot delete {}: {error}", target.address))
+                            .err()
+                            .map(|error| trf!(ui, "Not deleted: {error}", error = error));
                     }
                     RowAction::None => {}
                 }
@@ -166,6 +192,9 @@ impl TargetEntry {
                 if ui.add_enabled(can_save, primary_button(ui, tr!(ui, "Save"))).clicked() {
                     match targets.update(draft.id, &draft.address, &draft.name) {
                         Ok(()) => close = true,
+                        Err(error) if is_duplicate(&error) => {
+                            draft.error = Some(tr!(ui, "This address is already in the list").to_owned());
+                        }
                         Err(error) => draft.error = Some(trf!(ui, "Not saved: {error}", error = error)),
                     }
                 }
@@ -213,16 +242,27 @@ enum RowAction {
     Delete,
 }
 
+/// Whether `error` is the list refusing a second entry with the same address.
+fn is_duplicate(error: &HistoryError) -> bool {
+    matches!(
+        error,
+        HistoryError::Db(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
 /// One row of the target list: the whole row highlights under the pointer and picks the address when clicked;
-/// the pencil and cross icons on the right sit on top of it, so clicking them edits or deletes instead.
-fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
+/// the pencil and cross icons on the right sit on top of it, so clicking them edits or deletes instead. While
+/// `confirming`, the row asks whether to delete, and the cross deletes.
+fn target_row(ui: &mut Ui, target: &SavedTarget, confirming: bool) -> RowAction {
     let size = egui::vec2(ui.available_width(), TARGET_ROW_HEIGHT);
     let (rect, row) = ui.allocate_exact_size(size, Sense::click());
     let icon = egui::Vec2::splat(TARGET_ROW_HEIGHT);
     let delete_rect = Rect::from_min_size(pos2(rect.right() - icon.x, rect.top()), icon);
     let edit_rect = delete_rect.translate(egui::vec2(-icon.x, 0.0));
     let edit = ui.interact(edit_rect, row.id.with("edit"), Sense::click()).on_hover_text(tr!(ui, "Edit"));
-    let delete = ui.interact(delete_rect, row.id.with("delete"), Sense::click()).on_hover_text(tr!(ui, "Delete"));
+    let delete_hint = if confirming { tr!(ui, "Click again to delete") } else { tr!(ui, "Delete") };
+    let delete = ui.interact(delete_rect, row.id.with("delete"), Sense::click()).on_hover_text(delete_hint);
 
     let painter = ui.painter();
     if row.hovered() || edit.hovered() || delete.hovered() {
@@ -238,13 +278,12 @@ fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
         theme::palette(ui).ink,
     );
     let description_right = edit_rect.left() - 8.0;
-    painter.text(
-        pos2(description_right, text_y),
-        egui::Align2::RIGHT_CENTER,
-        target_description(target),
-        font,
-        theme::palette(ui).ink_muted,
-    );
+    let (description, description_color) = if confirming {
+        (tr!(ui, "Delete it? Click the cross again").to_owned(), theme::palette(ui).bad)
+    } else {
+        (target_description(target), theme::palette(ui).ink_muted)
+    };
+    painter.text(pos2(description_right, text_y), egui::Align2::RIGHT_CENTER, description, font, description_color);
     icons::paint(
         ui,
         edit_rect.center(),
@@ -255,8 +294,11 @@ fn target_row(ui: &mut Ui, target: &SavedTarget) -> RowAction {
         ui,
         delete_rect.center(),
         Icon::Cross,
-        if delete.hovered() { theme::palette(ui).bad } else { theme::palette(ui).ink_muted },
+        if delete.hovered() || confirming { theme::palette(ui).bad } else { theme::palette(ui).ink_muted },
     );
+    icons::focus_ring(ui, &row, rect);
+    icons::focus_ring(ui, &edit, edit_rect.shrink(2.0));
+    icons::focus_ring(ui, &delete, delete_rect.shrink(2.0));
 
     if delete.clicked() {
         RowAction::Delete

@@ -136,8 +136,10 @@ impl Snapshot {
             Self::Target(report) => report.label.rsplit(" / ").next().unwrap_or(&report.label).to_owned(),
             Self::AllTargets { .. } => tr!(language, "All targets").to_owned(),
         };
-        let safe: String = what.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '-' } else { c }).collect();
-        format!("{APP_NAME} {stamp} {safe}.html")
+        // No characters Windows refuses in file names, no control characters, no dot or space at the end.
+        let safe: String =
+            what.chars().map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        format!("{APP_NAME} {stamp} {}.html", safe.trim_end_matches(['.', ' ']))
     }
 }
 
@@ -202,16 +204,16 @@ fn write_target(page: &mut String, header: &str, report: &TargetReport, language
     let _ = write!(
         page,
         "<div class=\"top\"><div><h2>{}</h2><p class=\"muted\">{}</p></div>{header}</div>",
-        tr!(language, "Route"),
+        escape(tr!(language, "Route")),
         escape(&trf!(language, "Focus {range}", range = report.focus))
     );
     let scale = bar_scale(report.hops.iter().filter_map(|hop| hop.avg));
     let _ = write!(
         page,
         "<table><tr><th class=\"num\">{}</th><th class=\"num\">{}</th><th>IP</th><th>{}</th>",
-        tr!(language, "Hop"),
-        tr!(language, "Count"),
-        tr!(language, "Name")
+        escape(tr!(language, "Hop")),
+        escape(tr!(language, "Count")),
+        escape(tr!(language, "Name"))
     );
     write_number_titles(page, scale, language);
     for hop in &report.hops {
@@ -225,25 +227,29 @@ fn write_target(page: &mut String, header: &str, report: &TargetReport, language
             escape(hop.address.as_deref().unwrap_or("*")),
             escape(hop.name.as_deref().unwrap_or(if lost { tr!(language, "No response") } else { "" })),
         );
-        write_numbers(page, hop);
+        write_numbers(page, hop, language);
         let _ = write!(page, "<td>{}</td></tr>", latency_bar(hop, scale));
     }
     page.push_str("</table>");
     if let Some(chart) = &report.chart {
-        let _ =
-            write!(page, "<h3>{}</h3>{}", tr!(language, "Latency and loss of the target"), chart_svg(chart, language));
+        let _ = write!(
+            page,
+            "<h3>{}</h3>{}",
+            escape(tr!(language, "Latency and loss of the target")),
+            chart_svg(chart, language)
+        );
     }
-    let _ = write!(page, "<h2>{}</h2>", tr!(language, "Alerts in this period"));
+    let _ = write!(page, "<h2>{}</h2>", escape(tr!(language, "Alerts in this period")));
     if report.alerts.is_empty() {
-        let _ = write!(page, "<p class=\"muted\">{}</p>", tr!(language, "None."));
+        let _ = write!(page, "<p class=\"muted\">{}</p>", escape(tr!(language, "None.")));
     } else {
         let _ = write!(
             page,
             "<table><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>",
-            tr!(language, "Started"),
-            tr!(language, "What"),
-            tr!(language, "Lasted"),
-            tr!(language, "Worst")
+            escape(tr!(language, "Started")),
+            escape(tr!(language, "What")),
+            escape(tr!(language, "Lasted")),
+            escape(tr!(language, "Worst"))
         );
         for alert in &report.alerts {
             let _ = write!(
@@ -271,16 +277,16 @@ fn write_all(
     let _ = write!(
         page,
         "<div class=\"top\"><div><h2>{}</h2><p class=\"muted\">{}</p></div>{header}</div>",
-        tr!(language, "Targets"),
+        escape(tr!(language, "Targets")),
         escape(&trf!(language, "Focus {range}", range = focus))
     );
     let scale = bar_scale(rows.iter().filter_map(|row| row.numbers.as_ref().and_then(|hop| hop.avg)));
     let _ = write!(
         page,
         "<table><tr><th>{}</th><th>{}</th><th>IP</th><th class=\"num\">{}</th>",
-        tr!(language, "Status"),
-        tr!(language, "Target"),
-        tr!(language, "Hops")
+        escape(tr!(language, "Status")),
+        escape(tr!(language, "Target")),
+        escape(tr!(language, "Hops"))
     );
     write_number_titles(page, scale, language);
     for row in rows {
@@ -295,7 +301,7 @@ fn write_all(
         );
         match &row.numbers {
             Some(hop) => {
-                write_numbers(page, hop);
+                write_numbers(page, hop, language);
                 let _ = write!(page, "<td>{}</td>", latency_bar(hop, scale));
             }
             None => page.push_str(&"<td></td>".repeat(7)),
@@ -311,30 +317,26 @@ fn write_all(
 /// The titles of the number columns and the latency bar column (its scale `0–scale ms`), closing the header row.
 fn write_number_titles(page: &mut String, scale: f64, language: Language) {
     for title in [n!("Avg"), n!("Min"), n!("Max"), n!("Cur"), n!("Jitter"), n!("PL%")] {
-        let _ = write!(page, "<th class=\"num\">{}</th>", language.translate(title));
+        let _ = write!(page, "<th class=\"num\">{}</th>", escape(language.translate(title)));
     }
     let latency = trf!(language, "Latency (0\u{2013}{scale} ms)", scale = format!("{scale:.0}"));
     let _ = write!(page, "<th>{}</th></tr>", escape(&latency));
 }
 
 /// The Avg, Min, Max, Cur, Jitter and PL% cells of a hop.
-fn write_numbers(page: &mut String, hop: &HopRow) {
+fn write_numbers(page: &mut String, hop: &HopRow, language: Language) {
+    let ms = |value: Option<f64>| value.map_or_else(|| "-".to_owned(), |value| language.decimal(value));
     for value in [hop.avg, hop.min, hop.max] {
         let _ = write!(page, "<td class=\"num\">{}</td>", ms(value));
     }
     let current = match hop.cur {
-        Some(value) => format!("{value:.1}"),
+        Some(value) => language.decimal(value),
         None if hop.sent > 0 => "*".to_owned(),
         None => "-".to_owned(),
     };
     let _ = write!(page, "<td class=\"num\">{current}</td><td class=\"num\">{}</td>", ms(hop.jitter));
     let loss_class = if hop.loss > 0.0 { "num bad" } else { "num" };
-    let _ = write!(page, "<td class=\"{loss_class}\">{:.1}</td>", hop.loss);
-}
-
-/// A latency as shown in the table: one decimal, "-" for none.
-fn ms(value: Option<f64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |value| format!("{value:.1}"))
+    let _ = write!(page, "<td class=\"{loss_class}\">{}</td>", language.decimal(hop.loss));
 }
 
 /// The scale of the latency bars: twice the highest average, rounded up to 50 ms, at least 250 ms (as the app).
@@ -417,7 +419,10 @@ fn chart_svg(chart: &Chart, language: Language) -> String {
     let latency_top = jitter_top + JITTER_HEIGHT + PLOT_GAP;
     let latency_h = CHART.1 - latency_top - CHART.3;
     let height = CHART.1;
-    let mut svg = format!("<svg class=\"chart\" viewBox=\"0 0 {width} {height}\" width=\"100%\" role=\"img\">");
+    let mut svg = format!(
+        "<svg class=\"chart\" viewBox=\"0 0 {width} {height}\" width=\"100%\" role=\"img\" aria-label=\"{}\">",
+        escape(tr!(language, "Latency and loss of the target"))
+    );
     let series = &chart.series;
     plot(&mut svg, &series.jitter, jitter_top, JITTER_HEIGHT, false, &x, chart, utc_offset_s);
     let _ = write!(
@@ -425,8 +430,8 @@ fn chart_svg(chart: &Chart, language: Language) -> String {
         "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">{}</text>",
         left + 4.0,
         jitter_top + 11.0,
-        hex(p.jitter),
-        tr!(language, "Jitter (ms)")
+        hex(p.ink),
+        escape(tr!(language, "Jitter (ms)"))
     );
     plot(&mut svg, &series.latency, latency_top, latency_h, true, &x, chart, utc_offset_s);
     let _ = write!(
@@ -434,8 +439,8 @@ fn chart_svg(chart: &Chart, language: Language) -> String {
         "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">{}</text>",
         left + 4.0,
         latency_top + 11.0,
-        hex(p.ink_muted),
-        tr!(language, "Latency (ms)")
+        hex(p.ink),
+        escape(tr!(language, "Latency (ms)"))
     );
     for (value, step) in time_marks(from_s, to_s, utc_offset_s) {
         let label = clock(timeline_millis(value), chart.period.axis_format(step));
@@ -452,6 +457,21 @@ fn chart_svg(chart: &Chart, language: Language) -> String {
         );
     }
     svg.push_str("</svg>");
+    // The marks' texts are only tooltips on the chart: listed below it too, for print and touch screens.
+    let marks: Vec<&(i64, String)> =
+        chart.marks.iter().filter(|(at_ms, _)| (chart.from_ms..=chart.to_ms).contains(at_ms)).collect();
+    if !marks.is_empty() {
+        svg.push_str("<ul class=\"marks\">");
+        for (at_ms, text) in marks {
+            let _ = write!(
+                svg,
+                "<li><span class=\"muted\">{}</span> {}</li>",
+                clock(*at_ms, "%d.%m %H:%M:%S"),
+                escape(text)
+            );
+        }
+        svg.push_str("</ul>");
+    }
     svg
 }
 

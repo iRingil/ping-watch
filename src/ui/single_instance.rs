@@ -95,6 +95,15 @@ impl Event {
     }
 }
 
+impl Drop for Event {
+    fn drop(&mut self) {
+        // SAFETY: the handle was opened by `CreateEventW` and is closed only here.
+        if let Err(error) = unsafe { CloseHandle(self.0) } {
+            log::debug!("cannot close the event: {error}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,14 +116,5 @@ mod tests {
         assert!(matches!(claim_named(name), Claim::Other));
         drop(first);
         assert!(matches!(claim_named(name), Claim::First(_)), "the event is gone with the first instance");
-    }
-}
-
-impl Drop for Event {
-    fn drop(&mut self) {
-        // SAFETY: the handle was opened by `CreateEventW` and is closed only here.
-        if let Err(error) = unsafe { CloseHandle(self.0) } {
-            log::debug!("cannot close the event: {error}");
-        }
     }
 }

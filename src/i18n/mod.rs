@@ -89,6 +89,15 @@ impl Language {
         table.get(text).copied().unwrap_or(text)
     }
 
+    /// `value` with one decimal, with this language's decimal separator: "50.3" in English, "50,3" in the others.
+    pub fn decimal(self, value: f64) -> String {
+        let text = format!("{value:.1}");
+        match self {
+            Self::English => text,
+            Self::Russian | Self::German | Self::French | Self::Spanish => text.replace('.', ","),
+        }
+    }
+
     /// The form of `forms` (separated by `|`, in this language's order) for the count `n`.
     pub fn plural_form(self, forms: &str, n: u64) -> String {
         let forms: Vec<&str> = forms.split('|').collect();
@@ -336,6 +345,13 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn decimals_use_the_language_separator() {
+        assert_eq!(Language::English.decimal(50.34), "50.3");
+        assert_eq!(Language::Russian.decimal(50.34), "50,3");
+        assert_eq!(Language::French.decimal(10.0), "10,0");
     }
 
     #[test]

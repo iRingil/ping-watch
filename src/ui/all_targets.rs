@@ -184,7 +184,7 @@ impl AllTargets {
     fn toolbar(&mut self, ui: &mut Ui, tabs: &mut [Tab], targets: Option<&TargetList>) -> Option<Request> {
         let mut request = None;
         ui.horizontal(|ui| {
-            let mut start = self.entry.show(ui, targets, true);
+            let mut start = self.entry.show(ui, targets, true, None);
             start |= icons::button(ui, Icon::Play, Style::Primary, tr!(ui, "Trace in a new tab (Enter)")).clicked();
             let host = self.entry.text().trim().to_owned();
             if start && !host.is_empty() {
@@ -192,10 +192,15 @@ impl AllTargets {
                 request = Some(Request::Add(host));
             }
             ui.add_space(12.0);
-            ui.weak(tr!(ui, "Interval"));
-            if tab::interval_choice(ui, &mut self.settings.trace.interval) {
+            // Shows what the traces really use ("different" when they differ); a choice sets it on all of them and
+            // on targets added here.
+            ui.weak(tr!(ui, "Interval of all"));
+            let intervals: Vec<Duration> =
+                tabs.iter().filter(|tab| !tab.host().is_empty()).map(Tab::interval).collect();
+            if let Some(interval) = tab::interval_for_all(ui, &intervals, self.settings.trace.interval) {
+                self.settings.trace.interval = interval;
                 for tab in tabs.iter_mut() {
-                    tab.set_interval(self.settings.trace.interval);
+                    tab.set_interval(interval);
                 }
             }
             ui.weak(tr!(ui, "Focus"));
@@ -301,10 +306,12 @@ impl AllTargets {
                             stats.and_then(|stats| stats.worst()),
                             stats.and_then(|stats| stats.last()),
                         ] {
-                            row.col(|ui| hop_table::cell(ui, true, format_ms(value)));
+                            row.col(|ui| hop_table::cell(ui, true, format_ms(value, ui.language())));
                         }
-                        let loss = stats.map(|stats| format!("{:.1}", stats.loss_percent())).unwrap_or_default();
-                        row.col(|ui| hop_table::cell(ui, true, loss));
+                        row.col(|ui| {
+                            let loss = stats.map(|stats| ui.language().decimal(stats.loss_percent()));
+                            hop_table::cell(ui, true, loss.unwrap_or_default());
+                        });
                         row.col(|ui| {
                             if let Some(stats) = stats {
                                 latency_bars::cell(ui, stats, overview.reached, scale_ms);

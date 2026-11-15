@@ -228,9 +228,15 @@ fn colors(ui: &Ui, style: Style, hovered: bool) -> (Color32, Color32) {
 pub fn button(ui: &mut Ui, icon: Icon, style: Style, tooltip: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(button_size(ui), Sense::click());
     let (fill, icon_color) = colors(ui, style, response.hovered());
-    ui.painter()
-        .rect(rect, CornerRadius::same(3), fill, Stroke::new(1.0, theme::palette(ui).rule), StrokeKind::Inside);
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(3),
+        fill,
+        Stroke::new(1.0, theme::palette(ui).field),
+        StrokeKind::Inside,
+    );
     paint(ui, rect.center(), icon, icon_color);
+    focus_ring(ui, &response, rect);
     response.on_hover_text(tooltip)
 }
 
@@ -262,7 +268,9 @@ pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str)
     let (menu_fill, _) = colors(ui, Style::Normal, menu.hovered());
     painter.rect_filled(main_rect, CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, main_fill);
     painter.rect_filled(menu_rect, CornerRadius { nw: 0, sw: 0, ne: 3, se: 3 }, menu_fill);
-    painter.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, theme::palette(ui).rule), StrokeKind::Inside);
+    painter.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, theme::palette(ui).field), StrokeKind::Inside);
+    focus_ring(ui, &main, main_rect);
+    focus_ring(ui, &menu, menu_rect);
     painter.vline(main_rect.right(), rect.y_range().shrink(4.0), Stroke::new(1.0, theme::palette(ui).rule));
     paint(ui, main_rect.center(), icon, icon_color);
     paint(
