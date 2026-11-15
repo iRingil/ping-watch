@@ -143,8 +143,10 @@ pub struct Tab {
     saved_settings: Option<TraceSettings>,
     /// Pause the trace as soon as it starts (a tab restored from a paused one).
     start_paused: bool,
-    /// Name given to the host in the target list, looked up while the tab is shown.
+    /// Name given to the host in the target list.
     name: Option<String>,
+    /// Reverse-DNS name of the traced address, once known.
+    reverse: Option<String>,
 }
 
 impl Tab {
@@ -163,6 +165,7 @@ impl Tab {
             saved_settings: None,
             start_paused: false,
             name: None,
+            reverse: None,
         }
     }
 
@@ -261,17 +264,23 @@ impl Tab {
         self.saved_settings = Some(current);
     }
 
-    /// The traced target as shown in headings: address, the host if it isn't just that address written another way,
-    /// and the name from the target list; `None` until the trace runs.
+    /// The traced target as shown on its tab and in headings (see [`target_label`]); `None` until the trace runs.
     pub fn label(&self) -> Option<String> {
-        self.target().map(|target| target_label(target, &self.host, self.name.as_deref()))
+        self.target()
+            .map(|target| target_label(target, &self.host, self.name.as_deref(), self.reverse.as_deref()))
     }
 
-    /// Looks up the host's name in the target list (it may be edited at any time).
-    fn refresh_name(&mut self, targets: Option<&TargetList>) {
-        if let Some(targets) = targets {
+    /// Looks up the names of the traced target: its name in the target list (it may be edited at any time) and
+    /// the reverse-DNS name of its address.
+    fn refresh_names(&mut self, context: Context<'_>) {
+        let Some(target) = self.target() else {
+            return;
+        };
+        if let Some(targets) = context.targets {
             self.name = targets.name(&self.host).inspect_err(|error| log::warn!("{error}")).ok().flatten();
         }
+        // Without a PTR record the lookup gives back the address itself, which names nothing.
+        self.reverse = context.names.get(target).filter(|name| *name != target.to_string());
     }
 
     /// Address being traced, `None` until the trace runs.
@@ -317,6 +326,7 @@ impl Tab {
     /// Moves a resolving tab on once the address is known: starts the history recorder and the tracer.
     /// Called every frame for every tab, shown or not.
     pub fn poll(&mut self, context: Context<'_>) {
+        self.refresh_names(context);
         let State::Resolving(receiver) = &self.state else {
             return;
         };
@@ -331,7 +341,6 @@ impl Tab {
         {
             log::warn!("cannot add {} to the target list: {error}", self.host);
         }
-        self.refresh_name(context.targets);
         // The settings this target was last traced with come back with it.
         self.saved_settings = context
             .targets
@@ -440,7 +449,6 @@ impl Tab {
     /// asked for in the menu.
     pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>, table_share: &mut f32) -> Option<Action> {
         self.save_settings(context.targets);
-        self.refresh_name(context.targets);
         let route = self.route();
         let toolbar_frame = Frame::new().fill(theme::CHASSIS).inner_margin(Margin::symmetric(10, 8));
         let action = egui::Panel::top("tab-toolbar")
@@ -526,7 +534,7 @@ impl Tab {
             return None;
         };
         let mut action = None;
-        let label = target_label(session.target, &self.host, self.name.as_deref());
+        let label = target_label(session.target, &self.host, self.name.as_deref(), self.reverse.as_deref());
         ui.label(RichText::new(label).font(theme::heading_font(17.0)));
         ui.add_space(8.0);
         let paused = session.tracer.is_paused();
@@ -640,15 +648,16 @@ pub fn clock(ms: i64) -> String {
         .unwrap_or_default()
 }
 
-/// Heading of a traced target: `target`, then `host` unless it is that same address (however written), then the
-/// saved `name` — "2a02:6b8::feed:ff / Yandex DNS", "140.82.121.3 / github.com".
-fn target_label(target: IpAddr, host: &str, name: Option<&str>) -> String {
-    let host = Some(host).filter(|host| host.trim().parse::<IpAddr>().ok() != Some(target));
-    std::iter::once(target.to_string())
-        .chain(host.map(str::to_owned))
-        .chain(name.map(str::to_owned))
-        .collect::<Vec<_>>()
-        .join(" / ")
+/// Label of a traced target, "address / description": the description is the `name` from the target list if it
+/// has one, else the `host` as entered if that is a domain name, else (an IP was entered) the `reverse` DNS name of
+/// the address, if any — "9.9.9.9 / Quad9 DNS", "140.82.121.4 / github.com", "1.1.1.1 / one.one.one.one".
+fn target_label(target: IpAddr, host: &str, name: Option<&str>, reverse: Option<&str>) -> String {
+    let entered_ip = host.trim().parse::<IpAddr>().is_ok();
+    let description = name.or(if entered_ip { reverse } else { Some(host.trim()) });
+    match description {
+        Some(description) => format!("{target} / {description}"),
+        None => target.to_string(),
+    }
 }
 
 /// Name under which a host's history is stored.
@@ -673,12 +682,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_label_says_the_address_once() {
+    fn target_label_is_address_and_one_description() {
         let yandex: IpAddr = "2a02:6b8::feed:ff".parse().expect("valid address");
-        assert_eq!(target_label(yandex, "2a02:6b8::feed:0ff", Some("Yandex DNS")), "2a02:6b8::feed:ff / Yandex DNS");
-        let quad9 = IpAddr::from([9, 9, 9, 9]);
-        assert_eq!(target_label(quad9, "9.9.9.9", None), "9.9.9.9");
-        let github = IpAddr::from([140, 82, 121, 3]);
-        assert_eq!(target_label(github, "github.com", Some("GitHub")), "140.82.121.3 / github.com / GitHub");
+        let cloudflare = IpAddr::from([1, 1, 1, 1]);
+        let github = IpAddr::from([140, 82, 121, 4]);
+        // A name wins over everything.
+        assert_eq!(
+            target_label(yandex, "2a02:6b8::feed:0ff", Some("Yandex DNS"), None),
+            "2a02:6b8::feed:ff / Yandex DNS"
+        );
+        assert_eq!(target_label(github, "github.com", Some("GitHub"), Some("lb.github.net")), "140.82.121.4 / GitHub");
+        // An entered domain name.
+        assert_eq!(target_label(github, "github.com", None, Some("lb.github.net")), "140.82.121.4 / github.com");
+        // An entered IP: its reverse name, or nothing.
+        assert_eq!(target_label(cloudflare, "1.1.1.1", None, Some("one.one.one.one")), "1.1.1.1 / one.one.one.one");
+        assert_eq!(target_label(cloudflare, "1.1.1.1", None, None), "1.1.1.1");
     }
 }

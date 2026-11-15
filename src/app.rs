@@ -241,7 +241,8 @@ impl PingWatchApp {
             if tab_widget(ui, self.page == Page::AllTargets, "All targets", false).0.clicked() {
                 self.page = Page::AllTargets;
             }
-            let titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
+            // A tracing tab is labelled like its headings ("address / description"), others by the host entered.
+            let titles: Vec<String> = self.tabs.iter().map(|tab| tab.label().unwrap_or_else(|| tab.title())).collect();
             let widths: Vec<f32> = titles.iter().map(|title| tab_width(ui, title, true)).collect();
             let all_width: f32 = widths.iter().map(|width| width + TAB_GAP).sum();
             let available = ui.available_width();
