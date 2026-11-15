@@ -119,7 +119,7 @@ impl AllTargets {
         let charts = tabs
             .iter()
             .filter(|tab| tab.is_charted())
-            .filter_map(|tab| Some((tab.label()?, tab.chart_over(reader, visible.0, visible.1)?)))
+            .filter_map(|tab| Some((tab.label()?, tab.chart_over(reader, self.settings.trace.period, now_ms)?)))
             .collect();
         Snapshot::AllTargets { focus, rows, charts }
     }

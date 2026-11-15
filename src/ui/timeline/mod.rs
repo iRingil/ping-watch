@@ -15,8 +15,8 @@ use egui_plot::{
 };
 
 use self::fetch::{Fetched, Fetcher, Request};
-pub use self::series::Period;
-use self::series::{Series, Trace, Window, clock, millis_of, seconds, time_marks, value_marks};
+use self::series::millis_of;
+pub use self::series::{Period, Series, Trace, Window, clock, seconds, time_marks, value_marks};
 use crate::store::history::{self, Comment, HopKey};
 use crate::ui::latency_bars::{GOOD_MS, WARN_MS};
 use crate::ui::theme;

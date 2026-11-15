@@ -388,17 +388,12 @@ impl PingWatchApp {
                     log::info!("nothing to snapshot: the tab doesn't trace");
                     return;
                 };
-                Snapshot::Target(report)
+                Snapshot::Target(Box::new(report))
             }
             Page::AllTargets => self.all_targets.snapshot(&self.tabs, self.reader.as_ref(), &self.alerting_hosts()),
         };
         let now = chrono::Local::now();
-        let html =
-            snapshot::html(&snapshot, &now.format("%d.%m.%Y %H:%M:%S").to_string(), env!("CARGO_PKG_VERSION"), &|ms| {
-                chrono::DateTime::from_timestamp_millis(ms)
-                    .map(|time| time.with_timezone(&chrono::Local).format("%H:%M").to_string())
-                    .unwrap_or_default()
-            });
+        let html = snapshot::html(&snapshot, &now.format("%d.%m.%Y %H:%M:%S").to_string(), env!("CARGO_PKG_VERSION"));
         let file_name = snapshot.file_name(&now.format("%Y-%m-%d %H-%M").to_string());
         let spawned = std::thread::Builder::new().name("snapshot".to_owned()).spawn(move || {
             let mut dialog = rfd::FileDialog::new()

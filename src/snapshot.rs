@@ -8,6 +8,7 @@ use eframe::egui::Color32;
 
 use crate::APP_NAME;
 use crate::ui::theme::LIGHT;
+use crate::ui::timeline::{Period, Series, Trace, clock, seconds, time_marks, value_marks};
 
 /// Latency below which a value is fine (green zone), ms.
 const GOOD_MS: f64 = 100.0;
@@ -16,11 +17,11 @@ const WARN_MS: f64 = 200.0;
 /// Size of a latency bar in the table.
 const BAR: (f64, f64) = (220.0, 14.0);
 /// Size of a chart, and its left and bottom margins for the axis labels.
-const CHART: (f64, f64, f64, f64) = (1000.0, 230.0, 44.0, 22.0);
-/// Room above a chart's plot, so the top latency label isn't cut off.
-const CHART_TOP: f64 = 12.0;
-/// Labels on a chart's time axis.
-const TIME_LABELS: i64 = 6;
+const CHART: (f64, f64, f64, f64) = (1000.0, 300.0, 44.0, 22.0);
+/// Height of a chart's jitter strip.
+const JITTER_HEIGHT: f64 = 50.0;
+/// Space between the jitter strip and the latency plot.
+const PLOT_GAP: f64 = 10.0;
 
 /// One hop of the table.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,18 +48,7 @@ pub struct HopRow {
     pub loss: f64,
 }
 
-/// One time bucket of a chart.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ChartPoint {
-    /// Start of the bucket, Unix ms.
-    pub start_ms: i64,
-    /// Average latency, ms; `None` if nothing answered.
-    pub avg: Option<f64>,
-    /// Packet loss, percent.
-    pub loss: f64,
-}
-
-/// A latency and loss chart.
+/// A latency and loss chart: the same series the window's timeline draws.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chart {
     /// Period shown, Unix ms.
@@ -67,8 +57,10 @@ pub struct Chart {
     pub to_ms: i64,
     /// Length of a bucket, ms.
     pub bucket_ms: i64,
-    /// The buckets.
-    pub points: Vec<ChartPoint>,
+    /// The period's length, for the time labels' format.
+    pub period: Period,
+    /// Latency, jitter and loss.
+    pub series: Series,
     /// Comments and alert marks: time and text.
     pub marks: Vec<(i64, String)>,
 }
@@ -120,7 +112,7 @@ pub struct SummaryRow {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Snapshot {
     /// One target.
-    Target(TargetReport),
+    Target(Box<TargetReport>),
     /// All targets: the table and the charts that are ticked.
     AllTargets {
         /// Period of the table, as shown.
@@ -144,9 +136,8 @@ impl Snapshot {
     }
 }
 
-/// The page of `snapshot`, taken at `taken` (local time as shown), with `clock` turning Unix ms into local times for
-/// the chart axes ("15:04").
-pub fn html(snapshot: &Snapshot, taken: &str, version: &str, clock: &dyn Fn(i64) -> String) -> String {
+/// The page of `snapshot`, taken at `taken` (local time as shown).
+pub fn html(snapshot: &Snapshot, taken: &str, version: &str) -> String {
     let title = match snapshot {
         Snapshot::Target(report) => report.label.clone(),
         Snapshot::AllTargets { .. } => "All targets".to_owned(),
@@ -162,8 +153,8 @@ pub fn html(snapshot: &Snapshot, taken: &str, version: &str, clock: &dyn Fn(i64)
         escape(taken)
     );
     match snapshot {
-        Snapshot::Target(report) => write_target(&mut page, report, clock),
-        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, focus, rows, charts, clock),
+        Snapshot::Target(report) => write_target(&mut page, report),
+        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, focus, rows, charts),
     }
     page.push_str("</body></html>\n");
     page
@@ -200,7 +191,7 @@ svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top
 }
 
 /// The page of a target: table, chart, alerts.
-fn write_target(page: &mut String, report: &TargetReport, clock: &dyn Fn(i64) -> String) {
+fn write_target(page: &mut String, report: &TargetReport) {
     let _ = write!(page, "<h2>Route</h2><p class=\"muted\">Focus {}</p>", escape(&report.focus));
     let scale = bar_scale(report.hops.iter().filter_map(|hop| hop.avg));
     page.push_str("<table><tr><th class=\"num\">Hop</th><th class=\"num\">Count</th><th>IP</th><th>Name</th>");
@@ -224,7 +215,7 @@ fn write_target(page: &mut String, report: &TargetReport, clock: &dyn Fn(i64) ->
     }
     page.push_str("</table>");
     if let Some(chart) = &report.chart {
-        let _ = write!(page, "<h2>Latency and loss of the target</h2>{}", chart_svg(chart, clock));
+        let _ = write!(page, "<h2>Latency and loss of the target</h2>{}", chart_svg(chart));
     }
     page.push_str("<h2>Alerts in this period</h2>");
     if report.alerts.is_empty() {
@@ -246,13 +237,7 @@ fn write_target(page: &mut String, report: &TargetReport, clock: &dyn Fn(i64) ->
 }
 
 /// The page of All targets: table and the ticked charts.
-fn write_all(
-    page: &mut String,
-    focus: &str,
-    rows: &[SummaryRow],
-    charts: &[(String, Chart)],
-    clock: &dyn Fn(i64) -> String,
-) {
+fn write_all(page: &mut String, focus: &str, rows: &[SummaryRow], charts: &[(String, Chart)]) {
     let _ = write!(page, "<h2>Targets</h2><p class=\"muted\">Focus {}</p>", escape(focus));
     let scale = bar_scale(rows.iter().filter_map(|row| row.numbers.as_ref().and_then(|hop| hop.avg)));
     page.push_str("<table><tr><th>Status</th><th>Target</th><th>IP</th><th class=\"num\">Hops</th>");
@@ -281,7 +266,7 @@ fn write_all(
     }
     page.push_str("</table>");
     for (label, chart) in charts {
-        let _ = write!(page, "<h2>{}</h2>{}", escape(label), chart_svg(chart, clock));
+        let _ = write!(page, "<h2>{}</h2>{}", escape(label), chart_svg(chart));
     }
 }
 
@@ -370,116 +355,179 @@ fn latency_bar(hop: &HopRow, scale: f64) -> String {
     svg
 }
 
-/// A chart: zones up to a scale of 1.2 × the highest average (rounded, at least 100 ms), the average latency as a
-/// line, loss hanging from the top, marks as dashed lines with their text on hover, time and latency labels.
-fn chart_svg(chart: &Chart, clock: &dyn Fn(i64) -> String) -> String {
+/// A chart as the window draws it: the jitter strip, then the latency steps over the zones (from the first sample
+/// on), loss hanging from the top, a grid over everything on round values and local times, marks as dashed lines
+/// with their text on hover.
+fn chart_svg(chart: &Chart) -> String {
     let p = &LIGHT;
-    let (width, height, left, bottom) = CHART;
-    let (plot_w, plot_h) = (width - left, height - bottom - CHART_TOP);
-    let highest = chart.points.iter().filter_map(|point| point.avg).fold(0.0_f64, f64::max);
-    let scale = ((highest * 1.2 / 50.0).ceil() * 50.0).max(100.0);
-    #[expect(clippy::cast_precision_loss, reason = "times in ms fit an f64 exactly enough for drawing")]
-    let span = (chart.to_ms.saturating_sub(chart.from_ms)).max(1) as f64;
-    #[expect(clippy::cast_precision_loss, reason = "times in ms fit an f64 exactly enough for drawing")]
-    let x = |ms: i64| left + (ms.saturating_sub(chart.from_ms) as f64 / span).clamp(0.0, 1.0) * plot_w;
-    let y = |value: f64| CHART_TOP + plot_h - (value / scale).clamp(0.0, 1.0) * plot_h;
+    let (width, left) = (CHART.0, CHART.2);
+    let plot_w = width - left;
+    let (from_s, to_s) = (seconds(chart.from_ms), seconds(chart.to_ms));
+    let span = (to_s - from_s).max(1.0);
+    let x = |s: f64| left + ((s - from_s) / span).clamp(0.0, 1.0) * plot_w;
+    let utc_offset_s = i64::from(chrono::Local::now().offset().local_minus_utc());
+    let jitter_top = 6.0;
+    let latency_top = jitter_top + JITTER_HEIGHT + PLOT_GAP;
+    let latency_h = CHART.1 - latency_top - CHART.3;
+    let height = CHART.1;
     let mut svg = format!("<svg class=\"chart\" viewBox=\"0 0 {width} {height}\" width=\"100%\" role=\"img\">");
-    if let Some(first) = chart.points.first() {
-        let data_x = x(first.start_ms);
+    let series = &chart.series;
+    plot(&mut svg, &series.jitter, jitter_top, JITTER_HEIGHT, false, &x, chart, utc_offset_s);
+    let _ = write!(
+        svg,
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">Jitter (ms)</text>",
+        left + 4.0,
+        jitter_top + 11.0,
+        hex(p.jitter)
+    );
+    plot(&mut svg, &series.latency, latency_top, latency_h, true, &x, chart, utc_offset_s);
+    let _ = write!(
+        svg,
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">Latency (ms)</text>",
+        left + 4.0,
+        latency_top + 11.0,
+        hex(p.ink_muted)
+    );
+    for (value, step) in time_marks(from_s, to_s, utc_offset_s) {
+        let label = clock(timeline_millis(value), chart.period.axis_format(step));
+        let _ = write!(
+            svg,
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" text-anchor=\"middle\" fill=\"{}\">{}</text>",
+            x(value),
+            height - 6.0,
+            hex(p.ink_muted),
+            escape(&label)
+        );
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+/// One plot of a chart, `height` tall from `top`: the latency plot (`latency`) gets zones, loss bars and marks,
+/// the jitter strip only its line. Both get the grid and their value labels.
+#[expect(clippy::too_many_arguments, reason = "the plot's place and what to draw in it")]
+fn plot(
+    svg: &mut String,
+    trace: &Trace,
+    top: f64,
+    height: f64,
+    latency: bool,
+    x: &dyn Fn(f64) -> f64,
+    chart: &Chart,
+    utc_offset_s: i64,
+) {
+    let p = &LIGHT;
+    let (width, left) = (CHART.0, CHART.2);
+    let scale = trace.scale_ms.max(f64::EPSILON);
+    let y = |value: f64| top + height - (value / scale).clamp(0.0, 1.0) * height;
+    let _ = write!(
+        svg,
+        "<rect x=\"{left}\" y=\"{top}\" width=\"{:.1}\" height=\"{height}\" fill=\"{}\"/>",
+        width - left,
+        hex(p.well)
+    );
+    let series = &chart.series;
+    if latency && let Some(first_s) = series.first_s {
+        let data_x = x(first_s);
         for (low, high, color) in
             [(0.0, GOOD_MS, p.good_zone), (GOOD_MS, WARN_MS, p.warn_zone), (WARN_MS, scale, p.bad_zone)]
         {
             if low < scale {
-                let top = y(high.min(scale));
+                let band_top = y(high.min(scale));
                 let _ = write!(
                     svg,
-                    "<rect x=\"{data_x:.1}\" y=\"{top:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\"/>",
-                    (left + plot_w - data_x).max(0.0),
-                    y(low) - top,
+                    "<rect x=\"{data_x:.1}\" y=\"{band_top:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\"/>",
+                    (width - data_x).max(0.0),
+                    y(low) - band_top,
                     hex(color)
                 );
             }
         }
     }
-    for step in 0..=2_u8 {
-        let value = scale * f64::from(step) / 2.0;
+    if latency {
+        let bucket_w = (seconds(chart.bucket_ms) / (seconds(chart.to_ms) - seconds(chart.from_ms)).max(1.0)
+            * (width - left))
+            .max(1.0);
+        for &(at_s, percent) in &series.loss {
+            let _ = write!(
+                svg,
+                "<rect x=\"{:.1}\" y=\"{top:.1}\" width=\"{bucket_w:.1}\" height=\"{:.1}\" fill=\"{}\"/>",
+                x(at_s) - bucket_w / 2.0,
+                percent / 100.0 * height,
+                hex(p.loss)
+            );
+        }
+    }
+    // The grid over everything, on round values and local times, as in the window.
+    #[expect(clippy::cast_possible_truncation, reason = "a plot is a few hundred points tall")]
+    let marks = value_marks(scale, height as f32);
+    for (value, _) in &marks {
+        if *value > 0.0 {
+            let _ = write!(
+                svg,
+                "<line x1=\"{left}\" x2=\"{width}\" y1=\"{0:.1}\" y2=\"{0:.1}\" stroke=\"#0000001c\"/>",
+                y(*value)
+            );
+        }
         let _ = write!(
             svg,
-            "<line x1=\"{left}\" x2=\"{width}\" y1=\"{0:.1}\" y2=\"{0:.1}\" stroke=\"#00000018\"/><text x=\"{1}\" y=\"{2:.1}\" font-size=\"11\" text-anchor=\"end\" fill=\"{3}\">{value:.0}</text>",
-            y(value),
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" text-anchor=\"end\" fill=\"{}\">{value:.0}</text>",
             left - 6.0,
-            y(value) + 4.0,
+            (y(*value) + 4.0).max(top + 9.0),
             hex(p.ink_muted)
         );
     }
-    #[expect(clippy::cast_precision_loss, reason = "a bucket length in ms")]
-    let bucket_w = (chart.bucket_ms as f64 / span * plot_w).max(1.0);
-    for point in chart.points.iter().filter(|point| point.loss > 0.0) {
+    for (value, _) in time_marks(seconds(chart.from_ms), seconds(chart.to_ms), utc_offset_s) {
         let _ = write!(
             svg,
-            "<rect x=\"{:.1}\" y=\"{CHART_TOP}\" width=\"{bucket_w:.1}\" height=\"{:.1}\" fill=\"{}\"/>",
-            x(point.start_ms),
-            point.loss / 100.0 * plot_h,
-            hex(p.loss)
+            "<line x1=\"{0:.1}\" x2=\"{0:.1}\" y1=\"{top:.1}\" y2=\"{1:.1}\" stroke=\"#0000001c\"/>",
+            x(value),
+            top + height
         );
     }
-    // The average as a line, broken where nothing answered.
-    let mut segment = Vec::new();
-    let flush = |segment: &mut Vec<String>, svg: &mut String| {
-        if segment.len() > 1 {
+    let color = if latency { p.ink } else { p.jitter };
+    for segment in &trace.segments {
+        let points: Vec<String> =
+            segment.iter().map(|[at_s, value]| format!("{:.1},{:.1}", x(*at_s), y(*value))).collect();
+        let _ = write!(
+            svg,
+            "<polyline fill=\"none\" stroke=\"{}\" stroke-width=\"1.1\" points=\"{}\"/>",
+            hex(color),
+            points.join(" ")
+        );
+    }
+    for [at_s, _] in &trace.clipped {
+        let (cx, cy) = (x(*at_s), top + 1.0);
+        let _ = write!(
+            svg,
+            "<polygon points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" fill=\"{}\"/>",
+            cx - 4.0,
+            cy + 7.0,
+            cx + 4.0,
+            cy + 7.0,
+            cx,
+            cy,
+            hex(color)
+        );
+    }
+    if latency {
+        for (at_ms, text) in &chart.marks {
             let _ = write!(
                 svg,
-                "<polyline fill=\"none\" stroke=\"{}\" stroke-width=\"1.2\" points=\"{}\"/>",
-                hex(p.ink),
-                segment.join(" ")
+                "<line x1=\"{0:.1}\" x2=\"{0:.1}\" y1=\"{top:.1}\" y2=\"{1:.1}\" stroke=\"{2}\" stroke-dasharray=\"4 3\"><title>{3}</title></line>",
+                x(seconds(*at_ms)),
+                top + height,
+                hex(p.comment),
+                escape(text)
             );
         }
-        segment.clear();
-    };
-    for point in &chart.points {
-        match point.avg {
-            Some(avg) => segment.push(format!("{:.1},{:.1}", x(point.start_ms), y(avg))),
-            None => flush(&mut segment, &mut svg),
-        }
     }
-    flush(&mut segment, &mut svg);
-    for (at_ms, text) in &chart.marks {
-        let _ = write!(
-            svg,
-            "<line x1=\"{0:.1}\" x2=\"{0:.1}\" y1=\"{CHART_TOP}\" y2=\"{1}\" stroke=\"{2}\" stroke-dasharray=\"4 3\"><title>{3}</title></line>",
-            x(*at_ms),
-            CHART_TOP + plot_h,
-            hex(p.comment),
-            escape(text)
-        );
-    }
-    for step in 0..TIME_LABELS {
-        let at = chart.from_ms.saturating_add(
-            chart
-                .to_ms
-                .saturating_sub(chart.from_ms)
-                .saturating_mul(step)
-                .checked_div(TIME_LABELS - 1)
-                .unwrap_or(0),
-        );
-        let anchor = if step == 0 {
-            "start"
-        } else if step == TIME_LABELS - 1 {
-            "end"
-        } else {
-            "middle"
-        };
-        let _ = write!(
-            svg,
-            "<text x=\"{:.1}\" y=\"{}\" font-size=\"11\" text-anchor=\"{anchor}\" fill=\"{}\">{}</text>",
-            x(at),
-            height - 6.0,
-            hex(p.ink_muted),
-            escape(&clock(at))
-        );
-    }
-    svg.push_str("</svg>");
-    svg
+}
+
+/// A chart x value (seconds) as Unix ms.
+#[expect(clippy::cast_possible_truncation, reason = "chart x values are Unix seconds, far inside i64")]
+fn timeline_millis(seconds: f64) -> i64 {
+    (seconds * 1_000.0).round() as i64
 }
 
 /// `#rrggbb` of a color.
@@ -505,7 +553,10 @@ fn escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::store::history::Bucket;
 
     /// A hop answering from 10.0.0.`last` in `avg` ms.
     fn hop(ttl: u8, avg: f64, loss: f64) -> HopRow {
@@ -537,21 +588,33 @@ mod tests {
             chart: None,
             alerts: Vec::new(),
         };
-        assert_eq!(Snapshot::Target(report).file_name("2026-11-15 15-30"), "Ping Watch 2026-11-15 15-30 a-b-c.html");
+        assert_eq!(
+            Snapshot::Target(Box::new(report)).file_name("2026-11-15 15-30"),
+            "Ping Watch 2026-11-15 15-30 a-b-c.html"
+        );
         let all = Snapshot::AllTargets { focus: String::new(), rows: Vec::new(), charts: Vec::new() };
         assert_eq!(all.file_name("2026-11-15 15-30"), "Ping Watch 2026-11-15 15-30 All targets.html");
     }
 
     #[test]
     fn a_target_page_has_its_parts() {
+        let buckets: Vec<Bucket> = (0..60_i64)
+            .map(|second| Bucket {
+                start_ms: second.saturating_mul(1_000),
+                sent: 1,
+                received: u32::from(second != 30),
+                min: None,
+                avg: (second != 30).then(|| Duration::from_millis(20)),
+                max: None,
+                jitter: Some(Duration::from_millis(1)),
+            })
+            .collect();
         let chart = Chart {
             from_ms: 0,
             to_ms: 60_000,
             bucket_ms: 1_000,
-            points: vec![
-                ChartPoint { start_ms: 0, avg: Some(20.0), loss: 0.0 },
-                ChartPoint { start_ms: 1_000, avg: Some(25.0), loss: 50.0 },
-            ],
+            period: Period::Minute,
+            series: Series::from_buckets(&buckets, 1_000),
             marks: vec![(30_000, "Route changed <here>".to_owned())],
         };
         let report = TargetReport {
@@ -566,11 +629,12 @@ mod tests {
                 worst: "23 %".to_owned(),
             }],
         };
-        let page = html(&Snapshot::Target(report), "15.11.2026 15:10", "1.0.0", &|ms| format!("t{ms}"));
+        let page = html(&Snapshot::Target(Box::new(report)), "15.11.2026 15:10", "1.0.0");
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("1.1.1.1 / Cloudflare"));
         assert!(page.contains("10.0.0.2"));
-        assert!(page.contains("<polyline"), "the latency line");
+        assert!(page.contains("<polyline"), "the latency steps");
+        assert!(page.contains("Jitter (ms)"), "the jitter strip");
         assert!(page.contains("Route changed &lt;here&gt;"), "marks are escaped");
         assert!(page.contains("loss above 10 %"));
         assert!(!page.contains("http"), "nothing is loaded from outside");

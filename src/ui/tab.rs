@@ -15,7 +15,7 @@ use crate::alerts::WindowStats;
 use crate::probe::names::{NameCache, resolve};
 use crate::probe::route::{Hop, Route};
 use crate::probe::tracer::{TraceConfig, Tracer};
-use crate::snapshot::{AlertRow, Chart, ChartPoint, HopRow, TargetReport};
+use crate::snapshot::{AlertRow, Chart, HopRow, TargetReport};
 use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, HopKey, Recorder, Store};
 use crate::store::settings::AppSettings;
@@ -27,7 +27,7 @@ use crate::ui::icons::{self, Icon, Style};
 use crate::ui::latency_bars;
 use crate::ui::target_entry::TargetEntry;
 use crate::ui::theme;
-use crate::ui::timeline::{Period, Timeline};
+use crate::ui::timeline::{Period, Series, Timeline, Window};
 
 /// Probe intervals offered in the toolbar.
 const INTERVALS: [(Duration, &str); 7] = [
@@ -41,8 +41,6 @@ const INTERVALS: [(Duration, &str); 7] = [
 ];
 /// Width of the running trace's menu.
 const TRACE_MENU_WIDTH: f32 = 230.0;
-/// Buckets of a snapshot chart (fewer when the probe interval is longer).
-const SNAPSHOT_BUCKETS: i64 = 300;
 /// Share of the pane area the hop table gets at first; the timeline gets the rest.
 pub const TABLE_SHARE: f32 = 0.66;
 /// Limits of the table's share when the splitter is dragged, so neither pane disappears.
@@ -482,36 +480,34 @@ impl Tab {
             .filter(|entry| entry.started_ms <= to_ms && entry.ended_ms.is_none_or(|ended| ended >= from_ms))
             .map(alert_row)
             .collect();
-        Some(TargetReport { label, focus, hops, chart: self.chart_over(reader, from_ms, to_ms), alerts })
+        let chart = self.chart_over(reader, self.timeline.period(), to_ms);
+        Some(TargetReport { label, focus, hops, chart, alerts })
     }
 
-    /// The target's latency and loss over `from_ms`..`to_ms` from the history, with the comments of that period.
-    pub fn chart_over(&self, reader: Option<&Store>, from_ms: i64, to_ms: i64) -> Option<Chart> {
+    /// The target's chart over `period` ending at `end_ms`, built as the window's timeline builds it (same buckets,
+    /// steps, bridged gaps, scale and jitter), with the comments of that period.
+    pub fn chart_over(&self, reader: Option<&Store>, period: Period, end_ms: i64) -> Option<Chart> {
         let (target_id, reader) = (self.history_id()?, reader?);
         let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
-        let bucket_ms = (to_ms.saturating_sub(from_ms) / SNAPSHOT_BUCKETS).max(interval_ms).max(1);
+        let window = Window::ending_at(end_ms, period, interval_ms);
         let buckets = reader
-            .buckets(target_id, HopKey::Target, from_ms, to_ms, bucket_ms)
+            .buckets(target_id, HopKey::Target, window.from_ms, window.to_ms, window.bucket_ms)
             .inspect_err(|error| log::warn!("cannot read the history for the snapshot: {error}"))
             .ok()?;
-        let points = buckets
-            .iter()
-            .map(|bucket| {
-                let loss = if bucket.sent == 0 {
-                    0.0
-                } else {
-                    f64::from(bucket.sent.saturating_sub(bucket.received)) / f64::from(bucket.sent) * 100.0
-                };
-                ChartPoint { start_ms: bucket.start_ms, avg: bucket.avg.map(latency_bars::millis), loss }
-            })
-            .collect();
         let marks = reader
-            .comments(target_id, from_ms, to_ms)
+            .comments(target_id, window.from_ms, window.to_ms)
             .unwrap_or_default()
             .into_iter()
             .map(|comment| (comment.ts_ms, comment.text))
             .collect();
-        Some(Chart { from_ms, to_ms, bucket_ms, points, marks })
+        Some(Chart {
+            from_ms: window.from_ms,
+            to_ms: window.to_ms,
+            bucket_ms: window.bucket_ms,
+            period,
+            series: Series::from_buckets(&buckets, window.bucket_ms),
+            marks,
+        })
     }
 
     /// Whether the trace is paused.
