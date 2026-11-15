@@ -95,7 +95,9 @@ Download the latest version from [Releases](https://github.com/iRingil/ping-watc
   - **Portable**: copies the app into any folder, without shortcuts or an uninstaller.
 - `PingWatch-<version>-portable.zip` is the portable copy: unpack it anywhere and run `PingWatch.exe`.
 
-The app is not code-signed yet, so Windows SmartScreen may warn about it: click **More info → Run anyway**.
+The app is not code-signed yet, so Windows SmartScreen may warn about it: click **More info → Run anyway**. To be
+sure the file is the one GitHub built, compare its SHA-256 with the one in the release notes (`SHA256SUMS.txt`), or
+check its build provenance with `gh attestation verify PingWatch-<version>-setup.exe -R iRingil/ping-watch`.
 
 ### Where the app keeps its files
 

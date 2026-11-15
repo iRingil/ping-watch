@@ -1,31 +1,57 @@
 name: Build
 
 # Builds the installer and the portable zip on demand; the Release workflow publishes the latest successful run.
+# Actions are pinned to commit SHAs (Dependabot keeps them current), and Inno Setup is a fixed release checked by its
+# SHA-256: a re-pointed tag can't put foreign code into the build of the installer.
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  # The Inno Setup release used locally too; its hash is the one GitHub lists for the release asset.
+  INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe
+  INNO_SHA256: 8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0
+
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      # Signed build provenance of the files (GitHub artifact attestations).
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test
         run: cargo test --locked
       - name: Install Inno Setup
         shell: pwsh
-        run: if (-not (Test-Path "${env:ProgramFiles}\Inno Setup\ISCC.exe") -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup.exe"
+          Invoke-WebRequest -Uri $env:INNO_URL -OutFile $installer
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup installer hash $hash, expected $env:INNO_SHA256" }
+          Start-Process -Wait -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/ALLUSERS"
+          if (-not (Test-Path "${env:ProgramFiles}\Inno Setup\ISCC.exe")) { throw "ISCC.exe was not installed" }
       # cargo build --release, the installer and the portable zip.
       - name: Build the installer and the portable zip
         shell: cmd
         run: infrastructure\inno\build.cmd
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            build/PingWatch-*-setup.exe
+            build/PingWatch-*-portable.zip
       - name: Upload the installer and the portable zip
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: PingWatch
           path: |

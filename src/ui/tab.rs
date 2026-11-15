@@ -588,11 +588,30 @@ impl Tab {
             .show(ui, |ui| self.toolbar(ui, context.targets))
             .inner;
         // The clicked hop while it's still on the route, otherwise the target (last) hop.
-        let ttl = route.as_ref().and_then(|route| {
+        let mut ttl = route.as_ref().and_then(|route| {
             self.selected_ttl
                 .filter(|ttl| route.hops().iter().any(|hop| hop.ttl == *ttl))
                 .or_else(|| route.hops().last().map(|hop| hop.ttl))
         });
+        // Up and down arrows choose the hop too, unless a field or list has the keyboard.
+        let typing = ui.ctx().memory(|memory| memory.focused().is_some());
+        if let (Some(route), Some(current), false) = (&route, ttl, typing) {
+            let (up, down) = ui.input(|input| (input.key_pressed(Key::ArrowUp), input.key_pressed(Key::ArrowDown)));
+            let ttls: Vec<u8> = route.hops().iter().map(|hop| hop.ttl).collect();
+            if let Some(position) = ttls.iter().position(|hop| *hop == current) {
+                let moved = if up {
+                    position.checked_sub(1)
+                } else if down {
+                    position.checked_add(1)
+                } else {
+                    None
+                };
+                if let Some(next) = moved.and_then(|index| ttls.get(index)) {
+                    self.selected_ttl = Some(*next);
+                    ttl = Some(*next);
+                }
+            }
+        }
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, egui::Sense::hover());
         let (table_rect, splitter_rect, timeline_rect) = split(area, *table_share);

@@ -23,7 +23,7 @@ jobs:
           echo "id=$(jq -r .databaseId <<< "$run")" >> "$GITHUB_OUTPUT"
           echo "sha=$(jq -r .headSha <<< "$run")" >> "$GITHUB_OUTPUT"
       # The full history: the tags and the commits since the previous release.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.build.outputs.sha }}
           fetch-depth: 0
@@ -75,6 +75,21 @@ jobs:
           else
             echo "::error::The first release needs .github/release-notes/$VERSION.md"; exit 1
           fi
+          # How to check a download: its SHA-256 here and in SHA256SUMS.txt, and the build's signed provenance.
+          (cd dist && sha256sum "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip") > SHA256SUMS.txt
+          {
+            echo
+            echo '## Checking the download'
+            echo
+            echo 'SHA-256:'
+            echo
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Built by GitHub Actions from commit $SHA; the build provenance can be checked with"
+            echo "\`gh attestation verify PingWatch-$VERSION-setup.exe -R $GITHUB_REPOSITORY\`."
+          } >> notes.md
           cat notes.md
       - name: Publish the release
         env:
@@ -84,4 +99,4 @@ jobs:
         run: |
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$SHA" --title "Ping Watch $VERSION" \
             --notes-file notes.md --latest \
-            "dist/PingWatch-$VERSION-setup.exe" "dist/PingWatch-$VERSION-portable.zip"
+            "dist/PingWatch-$VERSION-setup.exe" "dist/PingWatch-$VERSION-portable.zip" SHA256SUMS.txt
