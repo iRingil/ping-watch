@@ -30,9 +30,14 @@ pub enum IcmpError {
     /// `IcmpCreateFile` / `Icmp6CreateFile` failed.
     #[error("cannot open ICMP handle: {0}")]
     Open(windows::core::Error),
-    /// The send call failed with a non-`IP_STATUS` error code.
-    #[error("ICMP send failed with error {0}")]
-    Send(u32),
+    /// The send call failed with a non-`IP_STATUS` error code (e.g. 1232 when the network is down).
+    #[error("ICMP error {code}: {message}")]
+    Send {
+        /// Windows error code.
+        code: u32,
+        /// Windows' description of it.
+        message: String,
+    },
     /// The target's address family doesn't match the handle's.
     #[error("{0} doesn't match the ICMP handle's address family")]
     Family(IpAddr),
@@ -100,7 +105,10 @@ impl Pinger {
                     }
                     return Ok(ProbeOutcome::Lost);
                 }
-                code => return Err(IcmpError::Send(code)),
+                code => {
+                    let message = windows::core::HRESULT::from_win32(code).message().trim().to_owned();
+                    return Err(IcmpError::Send { code, message });
+                }
             }
         }
 

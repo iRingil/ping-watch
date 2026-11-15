@@ -91,6 +91,10 @@ pub fn show(
     let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats));
     let mut averages: Vec<Pos2> = Vec::new();
     let mut clicked = None;
+    // No gaps between columns: cells keep their own inset, and row bands (summary, header) can then be painted
+    // cell by cell without holes — striped rows repaint each cell's background, so a band drawn once across the row
+    // gets covered.
+    ui.spacing_mut().item_spacing.x = 0.0;
     // Explicit widths: the latency bars get their share, Name gets whatever the fixed columns leave.
     let available = ui.available_width();
     let latency_width = (available * LATENCY_SHARE).max(200.0);
@@ -124,7 +128,7 @@ pub fn show(
                 });
             }
             if let Some(hop) = target_hop {
-                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus, available));
+                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus));
             }
         });
     latency_bars::connect(ui, &averages);
@@ -146,7 +150,7 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
             row.col(|ui| cell(ui, false, "No response"));
         }
     }
-    stat_cols(row, &hop.stats);
+    stat_cols(row, &hop.stats, false);
     let mut average = None;
     row.col(|ui| average = latency_bars::cell(ui, &hop.stats, hop.address.is_some(), scale_ms));
     average
@@ -154,14 +158,21 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
 
 /// Fills the summary row of the whole round trip (the target hop), with the focus period under the bars.
 /// The row reads as a summary, not another hop: a header-colored band with a rule above it.
-fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&str>, row_width: f32) {
+fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&str>) {
     let emphasis = |text: String| RichText::new(text).font(theme::heading_font(14.5));
-    row.col(|ui| summary_band(ui, row_width));
-    row.col(|ui| cell(ui, true, emphasis(stats.sent().to_string())));
-    row.col(|_| {});
-    row.col(|ui| cell(ui, true, emphasis("Round trip (ms)".to_owned())));
-    stat_cols(row, stats);
+    row.col(summary_band);
     row.col(|ui| {
+        summary_band(ui);
+        cell(ui, true, emphasis(stats.sent().to_string()));
+    });
+    row.col(summary_band);
+    row.col(|ui| {
+        summary_band(ui);
+        cell(ui, true, emphasis("Round trip (ms)".to_owned()));
+    });
+    stat_cols(row, stats, true);
+    row.col(|ui| {
+        summary_band(ui);
         if let Some(focus) = focus {
             cell(ui, true, RichText::new(focus).small().color(theme::INK_MUTED));
         }
@@ -194,33 +205,47 @@ pub fn header_cell(ui: &mut Ui, first: bool, numeric: bool, title: &str, row_wid
     }
 }
 
-/// Paints the summary row's band and the rule above it once, across the whole row of width `row_width` starting
-/// at the first cell (cells clip their painting, so it is done with a painter clipped to the row instead).
-fn summary_band(ui: &mut Ui, row_width: f32) {
-    let cell = ui.max_rect();
-    let row = eframe::egui::Rect::from_min_size(cell.min, Vec2::new(row_width, cell.height()));
-    let mut painter = ui.painter().clone();
-    painter.set_clip_rect(row.expand(1.0));
-    painter.rect_filled(row, 0.0, theme::PANE_HEADER);
-    painter.hline(row.x_range(), row.top() + 0.5, Stroke::new(1.5, theme::INK_MUTED));
+/// Paints the summary row's band and the rule above it over the cell of `ui`; with no gaps between columns the
+/// cells join into one unbroken band.
+fn summary_band(ui: &mut Ui) {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, theme::PANE_HEADER);
+    ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.5, theme::INK_MUTED));
 }
 
-/// Fills the Avg, Min, Max, Cur, Jitter and PL% columns.
-fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats) {
+/// Fills the Avg, Min, Max, Cur, Jitter and PL% columns; `summary` gives them the summary row's band.
+fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats, summary: bool) {
+    let band = |ui: &mut Ui| {
+        if summary {
+            summary_band(ui);
+        }
+    };
     for value in [stats.average(), stats.best(), stats.worst()] {
-        row.col(|ui| cell(ui, true, format_ms(value)));
+        row.col(|ui| {
+            band(ui);
+            cell(ui, true, format_ms(value));
+        });
     }
     let current = match stats.last() {
         Some(rtt) => format_ms(Some(rtt)),
         None if stats.sent() > 0 => "*".to_owned(),
         None => format_ms(None),
     };
-    row.col(|ui| cell(ui, true, current));
-    row.col(|ui| cell(ui, true, format_ms(stats.jitter())));
+    row.col(|ui| {
+        band(ui);
+        cell(ui, true, current);
+    });
+    row.col(|ui| {
+        band(ui);
+        cell(ui, true, format_ms(stats.jitter()));
+    });
     let loss = stats.loss_percent();
     let loss_text = RichText::new(format!("{loss:.1}"));
     let loss_text = if loss > 0.0 { loss_text.color(LossLevel::of(loss).color()) } else { loss_text };
-    row.col(|ui| cell(ui, true, loss_text));
+    row.col(|ui| {
+        band(ui);
+        cell(ui, true, loss_text);
+    });
 }
 
 /// Hop number in a circle colored by the hop's average latency zone, as in PingPlotter (loss shows in the PL%

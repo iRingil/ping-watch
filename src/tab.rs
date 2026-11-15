@@ -396,8 +396,10 @@ impl Tab {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 latency_bars::legend(ui);
                 let problem = match &self.state {
-                    State::Editing(Some(error)) => Some(error.as_str()),
-                    _ => self.warning.as_deref(),
+                    State::Editing(Some(error)) => Some(error.clone()),
+                    // A probing failure (network down) matters more than the history warning.
+                    State::Running(session) => session.tracer.last_error().or_else(|| self.warning.clone()),
+                    _ => self.warning.clone(),
                 };
                 if let Some(problem) = problem {
                     ui.colored_label(theme::BAD, problem);

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::history::unix_ms;
 use crate::icmp::{IcmpError, Pinger};
-use crate::route::{Route, RouteState, Sample};
+use crate::route::{ProbeOutcome, Route, RouteState, Sample};
 use crate::sync::lock;
 
 /// Tracing parameters.
@@ -61,6 +61,8 @@ struct Shared {
     control: Mutex<Control>,
     /// Wakes waiting workers when `control` changes.
     wake: Condvar,
+    /// Error of the latest failed probe, cleared by the next answer.
+    last_error: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -113,6 +115,7 @@ impl Tracer {
             route: Mutex::new(RouteState::new(target, config.max_hops)),
             control: Mutex::new(Control { stop: false, paused: false, interval: config.interval }),
             wake: Condvar::new(),
+            last_error: Mutex::new(None),
         });
         // Assigned before spawning, so that an early error drops (and stops) the already started workers.
         let mut tracer = Self { shared, workers: Vec::new() };
@@ -131,6 +134,11 @@ impl Tracer {
     /// Current route with statistics over `focus` = `(from, to)` Unix ms, or since the start if `None`.
     pub fn snapshot(&self, focus: Option<(i64, i64)>) -> Route {
         lock(&self.shared.route).snapshot(focus)
+    }
+
+    /// Error of the latest failed probe (network down, ...), `None` once probes get answers again.
+    pub fn last_error(&self) -> Option<String> {
+        lock(&self.shared.last_error).clone()
     }
 
     /// Pauses or resumes probing; statistics are kept.
@@ -175,6 +183,9 @@ fn probe_loop(
             let at_ms = unix_ms(SystemTime::now());
             match pinger.probe(target, ttl, config.timeout) {
                 Ok(outcome) => {
+                    if matches!(outcome, ProbeOutcome::Reply { .. }) {
+                        *lock(&shared.last_error) = None;
+                    }
                     let in_route = {
                         let mut route = lock(&shared.route);
                         route.record(ttl, at_ms, outcome);
@@ -189,7 +200,23 @@ fn probe_loop(
                         log::debug!("history recorder is gone; sample of ttl {ttl} dropped");
                     }
                 }
-                Err(error) => log::warn!("probe {target} ttl {ttl}: {error}"),
+                Err(error) => {
+                    // No answer is a lost probe whatever the reason (with the network down Windows fails at once
+                    // instead of timing out); the error itself is shown until a probe gets through again.
+                    log::debug!("probe {target} ttl {ttl}: {error}");
+                    *lock(&shared.last_error) = Some(error.to_string());
+                    let in_route = {
+                        let mut route = lock(&shared.route);
+                        route.record(ttl, at_ms, ProbeOutcome::Lost);
+                        route.should_probe(ttl)
+                    };
+                    if in_route
+                        && let Some(history) = history
+                        && history.send(Sample { at_ms, ttl, outcome: ProbeOutcome::Lost }).is_err()
+                    {
+                        log::debug!("history recorder is gone; sample of ttl {ttl} dropped");
+                    }
+                }
             }
         }
         if !shared.wait_turn(started) {
