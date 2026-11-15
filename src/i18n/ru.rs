@@ -231,6 +231,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("The snapshot wasn't saved: {error}", "Снимок не сохранён: {error}"),
     ("The whole history fits on the chart", "Вся история помещается на графике"),
     ("Theme", "Тема"),
+    ("Third-party licenses", "Лицензии компонентов"),
     ("This address is already in the list", "Этот адрес уже есть в списке"),
     ("This is not a host name or an IP address", "Это не имя хоста и не IP-адрес"),
     ("Trace (Enter)", "Трассировать (Enter)"),

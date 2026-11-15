@@ -147,7 +147,8 @@ cargo fmt                                             # format
 cargo clippy --all-targets                            # lint
 cargo test                                            # tests
 cargo audit                                           # advisories (cargo install cargo-audit)
-infrastructure\inno\build.cmd                         # release build, installer and portable zip (needs Inno Setup 6.6 or 7)
+infrastructure\inno\build.cmd                         # release build, installer and portable zip (needs Inno Setup 6.6 or 7
+                                                      # and cargo install cargo-about --locked --features cli)
 ```
 
 ## License
@@ -168,3 +169,7 @@ for any noncommercial purpose. It is built with these third-party components:
   MIT or Apache-2.0
 - [Roboto Condensed](https://github.com/googlefonts/roboto-classic) font: SIL Open Font License 1.1
 - [Rust](https://www.rust-lang.org) standard library: MIT or Apache-2.0
+
+These are the main ones. The complete list, every crate in the build with its license text, is in `THIRD-PARTY.html`
+next to `PingWatch.exe` (Settings → About → Third-party licenses), written at build time by
+[cargo-about](https://github.com/EmbarkStudios/cargo-about) from `about.toml`.

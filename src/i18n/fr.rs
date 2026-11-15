@@ -231,6 +231,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("The snapshot wasn't saved: {error}", "L’instantané n’a pas été enregistré : {error}"),
     ("The whole history fits on the chart", "Tout l’historique tient sur le graphique"),
     ("Theme", "Thème"),
+    ("Third-party licenses", "Licences des composants"),
     ("This address is already in the list", "Cette adresse est déjà dans la liste"),
     ("This is not a host name or an IP address", "Ce n’est ni un nom d’hôte ni une adresse IP"),
     ("Trace (Enter)", "Tracer (Entrée)"),

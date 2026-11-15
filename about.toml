@@ -1,0 +1,25 @@
+# cargo-about: the license notices of the crates built into Ping Watch, written to THIRD-PARTY.html by
+# infrastructure/inno/build.cmd and shipped next to the exe (the permissive licenses ask for their text to travel
+# with the binary). Only the Windows build counts, build and dev dependencies don't ship.
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# The app itself (publish = false) is under its own license, LICENSE.md.
+private = { ignore = true }
+# The licenses accepted in the build: permissive ones, MPL-2.0 (file-level copyleft, met by shipping its text and
+# naming the source) and the font licenses of egui's embedded fonts.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]

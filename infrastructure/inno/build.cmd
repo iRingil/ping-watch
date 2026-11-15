@@ -14,6 +14,14 @@ if %errorlevel% neq 0 (
 )
 set "BUILT_EXE=target\release\ping-watch.exe"
 
+:: The license notices of the crates in the build (cargo install cargo-about --locked --features cli).
+if not exist "build" mkdir "build"
+cargo about generate about.hbs -o "build\THIRD-PARTY.html"
+if %errorlevel% neq 0 (
+    echo ERROR: cargo about failed with error code %errorlevel% - is cargo-about installed?
+    exit /b %errorlevel%
+)
+
 :: Inno Setup 7 (Program Files\Inno Setup), or 6 for all users (CI runners) or the current user (winget --scope user).
 set "ISCC_EXE=%ProgramFiles%\Inno Setup\ISCC.exe"
 if not exist "%ISCC_EXE%" set "ISCC_EXE=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
@@ -43,6 +51,8 @@ if exist "build\portable" rmdir /s /q "build\portable"
 mkdir "%PORTABLE_DIR%"
 copy /y "%BUILT_EXE%" "%PORTABLE_DIR%\PingWatch.exe" >nul
 copy /y "LICENSE.md" "%PORTABLE_DIR%\" >nul
+copy /y "build\THIRD-PARTY.html" "%PORTABLE_DIR%\" >nul
+copy /y "assets\fonts\OFL.txt" "%PORTABLE_DIR%\Roboto-Condensed-OFL.txt" >nul
 copy /y "infrastructure\inno\portable.txt" "%PORTABLE_DIR%\" >nul
 if exist "%PORTABLE_ZIP%" del "%PORTABLE_ZIP%"
 :: Windows' own tar, not Git's GNU tar from PATH: zip paths with forward slashes (Compress-Archive writes backslashes).

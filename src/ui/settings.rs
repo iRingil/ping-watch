@@ -476,6 +476,12 @@ fn explorer() -> std::path::PathBuf {
         .join("explorer.exe")
 }
 
+/// `THIRD-PARTY.html` next to the exe, if it is there.
+fn third_party_notices() -> Option<std::path::PathBuf> {
+    let path = std::env::current_exe().ok()?.parent()?.join("THIRD-PARTY.html");
+    path.is_file().then_some(path)
+}
+
 /// Data folder and font license rows of the About page.
 fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
     settings_grid(ui, "settings-about", |ui| {
@@ -503,7 +509,18 @@ fn about_details(ui: &mut Ui, data_folder: Option<&Path>) {
         });
         ui.end_row();
         ui.weak(tr!(ui, "License"));
-        ui.hyperlink_to("PolyForm Noncommercial 1.0.0", LICENSE_URL);
+        ui.horizontal(|ui| {
+            ui.hyperlink_to("PolyForm Noncommercial 1.0.0", LICENSE_URL);
+            // The notices of the components ship next to the exe (not in a development build).
+            if let Some(notices) = third_party_notices() {
+                ui.weak("\u{b7}");
+                if ui.link(tr!(ui, "Third-party licenses")).clicked()
+                    && let Err(error) = std::process::Command::new(explorer()).arg(&notices).spawn()
+                {
+                    log::warn!("cannot open {}: {error}", notices.display());
+                }
+            }
+        });
         ui.end_row();
         ui.weak(tr!(ui, "Font"));
         ui.label("Roboto Condensed, © The Roboto Project Authors, SIL Open Font License 1.1");

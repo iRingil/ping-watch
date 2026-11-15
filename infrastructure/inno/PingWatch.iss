@@ -93,6 +93,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#BuiltExe}"; DestDir: "{app}"; DestName: "{#AppExeName}"; Flags: ignoreversion
 Source: "..\..\LICENSE.md"; DestDir: "{app}"; Flags: ignoreversion
+; License notices of the components (build.cmd generates THIRD-PARTY.html with cargo-about).
+Source: "..\..\build\THIRD-PARTY.html"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\assets\fonts\OFL.txt"; DestDir: "{app}"; DestName: "Roboto-Condensed-OFL.txt"; Flags: ignoreversion
 Source: "portable.txt"; DestDir: "{app}"; Flags: ignoreversion; Check: IsPortable
 
 [Icons]

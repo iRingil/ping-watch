@@ -31,6 +31,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Test
         run: cargo test --locked
+      # Writes the third-party license notices shipped with the app (build.cmd runs it).
+      - name: Install cargo-about
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-about@0.9.3
       - name: Install Inno Setup
         shell: pwsh
         run: |
