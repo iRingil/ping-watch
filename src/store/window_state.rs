@@ -1,7 +1,7 @@
 //! The window's state kept between runs: position and size (of the normal, not maximized window), whether it was
-//! maximized or minimized, the split between the hop table and the timeline, and the open tabs (their targets, which
-//! one was shown, whether each was tracing or charted on the overview page), and the overview page's own
-//! settings. Stored in the history database.
+//! maximized or minimized, the split between the hop table and the timeline, the open tabs (their targets, which
+//! one was shown, whether each was tracing or charted on the overview page), the overview page's own settings and
+//! the column widths the user set. Stored in the history database.
 
 use std::path::Path;
 
@@ -13,7 +13,8 @@ use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
 use crate::ui::timeline::Period;
 
-/// Schema: window geometry as key/value rows, the open tabs in order, and the overview page's settings (one row).
+/// Schema: window geometry as key/value rows, the open tabs in order, the overview page's settings (one row) and
+/// the column widths of each table.
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS window_state (
         key   TEXT PRIMARY KEY,
@@ -33,6 +34,12 @@ const SCHEMA: &str = "
         period_s    INTEGER NOT NULL,
         table_share REAL    NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS column_widths (
+        table_name TEXT    NOT NULL,
+        position   INTEGER NOT NULL,
+        width      REAL    NOT NULL,
+        PRIMARY KEY (table_name, position)
+    ) WITHOUT ROWID;
 ";
 /// Stored keys, in the order of [`WindowState::values`].
 const KEYS: [&str; 7] = ["x", "y", "width", "height", "maximized", "minimized", "table_share"];
@@ -245,6 +252,38 @@ impl WindowStore {
         Ok(())
     }
 
+    /// Column widths of table `name` in column order, empty before the first save.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn load_columns(&self, name: &str) -> Result<Vec<f32>, HistoryError> {
+        let mut statement =
+            self.connection.prepare("SELECT width FROM column_widths WHERE table_name = ?1 ORDER BY position")?;
+        let widths = statement.query_map([name], |row| row.get::<_, f64>(0))?.collect::<Result<Vec<_>, _>>()?;
+        #[expect(clippy::cast_possible_truncation, reason = "stored from an f32")]
+        Ok(widths.into_iter().map(|width| width as f32).collect())
+    }
+
+    /// Stores `widths` as the column widths of table `name`, replacing the previous ones.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails; then nothing is stored.
+    pub fn save_columns(&mut self, name: &str, widths: &[f32]) -> Result<(), HistoryError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM column_widths WHERE table_name = ?1", [name])?;
+        for (position, width) in widths.iter().enumerate() {
+            let position = i64::try_from(position).unwrap_or(i64::MAX);
+            transaction.execute(
+                "INSERT INTO column_widths (table_name, position, width) VALUES (?1, ?2, ?3)",
+                params![name, position, f64::from(*width)],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Stores `state`.
     ///
     /// # Errors
@@ -328,6 +367,17 @@ mod tests {
         let changed = AllTargetsSettings { table_share: 0.7, ..settings };
         store.save_all_targets(changed).expect("saved again");
         assert_eq!(store.load_all_targets().ok(), Some(Some(changed)));
+    }
+
+    #[test]
+    fn column_widths_round_trip_per_table() {
+        let mut store = WindowStore::open_in_memory().expect("store opens");
+        assert_eq!(store.load_columns("hops").ok(), Some(Vec::new()));
+        store.save_columns("hops", &[40.0, 58.5, 130.0]).expect("saved");
+        store.save_columns("targets", &[120.0]).expect("saved");
+        store.save_columns("hops", &[44.0, 60.0]).expect("saved again");
+        assert_eq!(store.load_columns("hops").ok(), Some(vec![44.0, 60.0]));
+        assert_eq!(store.load_columns("targets").ok(), Some(vec![120.0]));
     }
 
     #[test]

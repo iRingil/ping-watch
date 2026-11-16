@@ -22,6 +22,7 @@ use crate::store::history::{self, HopKey, Recorder, Store};
 use crate::store::settings::{AppSettings, INTERVALS};
 use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::SavedTab;
+use crate::ui::columns::ColumnWidths;
 use crate::ui::focus::Focus;
 use crate::ui::hop_table;
 use crate::ui::icons::{self, Icon, Style};
@@ -578,8 +579,15 @@ impl Tab {
 
     /// Draws the tab: toolbar, the hop table pane and the timeline pane. The panes keep their frames and the table
     /// its header even before a trace runs, so an empty tab shows where everything will appear. Returns the action
-    /// asked for in the menu.
-    pub fn ui(&mut self, ui: &mut Ui, context: Context<'_>, table_share: &mut f32) -> Option<Action> {
+    /// asked for in the menu. `table_share` (the pane split) and `columns` (the hop table's column widths) are
+    /// shared by all tabs.
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        context: Context<'_>,
+        table_share: &mut f32,
+        columns: &mut ColumnWidths,
+    ) -> Option<Action> {
         self.save_settings(context.targets);
         let route = self.route();
         let toolbar_frame = Frame::new().fill(theme::palette(ui).chassis).inner_margin(Margin::symmetric(10, 8));
@@ -619,7 +627,7 @@ impl Tab {
 
         pane(ui, table_rect, Margin::same(1), |ui| {
             let focus = route.as_ref().and_then(focus_range).map(|range| trf!(ui, "Focus {range}", range = range));
-            if let Some(clicked) = hop_table::show(ui, route.as_ref(), context.names, ttl, focus.as_deref()) {
+            if let Some(clicked) = hop_table::show(ui, route.as_ref(), context.names, ttl, focus.as_deref(), columns) {
                 self.selected_ttl = Some(clicked);
             }
         });

@@ -6,18 +6,23 @@ use std::time::Duration;
 use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 
 use crate::ui::theme::{self, Palette};
-use egui_extras::{Column, TableBuilder, TableRow};
+use egui_extras::{TableBuilder, TableRow};
 
 use crate::i18n::{Lang, Language, n, tr};
 use crate::probe::names::NameCache;
 use crate::probe::route::{Hop, Route};
 use crate::probe::stats::HopStats;
+use crate::ui::columns::{self, ColumnWidths};
 use crate::ui::latency_bars;
 
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 22.0;
-/// Share of the table width given to the latency bars (pane 2); the Name column takes what is left.
+/// Share of the table width given to the latency bars (pane 2) by default; the Name column takes what is left.
 const LATENCY_SHARE: f32 = 0.3;
+/// Narrowest the latency bars get.
+const LATENCY_MIN_WIDTH: f32 = 200.0;
+/// Number of columns that can be dragged: all but the latency bars.
+pub const RESIZABLE_COLUMNS: usize = HEADERS.len();
 /// Inset of a header title from its cell's edges.
 const HEADER_INSET: f32 = 4.0;
 /// Height of the header row.
@@ -79,63 +84,63 @@ impl LossLevel {
 
 /// Draws the hop table of `route` (just the header without one) with the latency bars; hop names come from
 /// `names`, the `selected` hop is highlighted, `focus` labels the period under the bars. Returns the TTL of the
-/// hop row clicked in this frame.
+/// hop row clicked in this frame. The columns can be dragged wider or narrower; `columns` keeps their widths.
 pub fn show(
     ui: &mut Ui,
     route: Option<&Route>,
     names: &NameCache,
     selected: Option<u8>,
     focus: Option<&str>,
+    columns: &mut ColumnWidths,
 ) -> Option<u8> {
     let hops = route.map_or(&[][..], Route::hops);
     let target_hop = route.and_then(|route| hops.last().filter(|hop| hop.address == Some(route.target())));
     let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats));
     let mut averages: Vec<Pos2> = Vec::new();
     let mut clicked = None;
-    // No gaps between columns: cells keep their own inset, and row bands (summary, header) can then be painted
-    // cell by cell without holes — striped rows repaint each cell's background, so a band drawn once across the row
-    // gets covered.
-    ui.spacing_mut().item_spacing.x = 0.0;
-    // Explicit widths: the latency bars get their share, Name gets whatever the fixed columns leave.
-    let available = ui.available_width();
-    let latency_width = (available * LATENCY_SHARE).max(200.0);
-    let spacing = ui.spacing().item_spacing.x * 11.0;
-    let fixed = HOP_WIDTH + NUMBER_WIDTH * 7.0 + IP_WIDTH + latency_width + spacing;
-    let name_width = (available - fixed).max(80.0);
-    TableBuilder::new(ui)
-        .striped(true)
-        .sense(Sense::click())
-        .cell_layout(Layout::left_to_right(Align::Center))
-        .column(Column::exact(HOP_WIDTH))
-        .column(Column::exact(NUMBER_WIDTH))
-        .column(Column::exact(IP_WIDTH).clip(true))
-        .column(Column::exact(name_width).clip(true))
-        .columns(Column::exact(NUMBER_WIDTH), 6)
-        .column(Column::exact(latency_width).clip(true))
-        .header(HEADER_HEIGHT, |mut header| {
-            for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
-                header.col(|ui| {
-                    let title = ui.language().translate(title);
-                    header_cell(ui, index == 0, numeric, title, available);
-                });
-            }
-            header.col(|ui| latency_bars::header(ui, scale_ms));
-        })
-        .body(|mut body| {
-            for hop in hops {
-                body.row(ROW_HEIGHT, |mut row| {
-                    row.set_selected(selected == Some(hop.ttl));
-                    averages.extend(hop_row(&mut row, hop, names, scale_ms));
-                    if row.response().clicked() {
-                        clicked = Some(hop.ttl);
-                    }
-                });
-            }
-            if let Some(hop) = target_hop {
-                body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus));
-            }
-        });
-    latency_bars::connect(ui, &averages);
+    // One table state for all tabs: a column dragged in one tab is that wide in the others.
+    columns::scope(ui, "hop-table", |ui| {
+        // Default widths: the latency bars get their share, Name gets whatever the fixed columns leave.
+        let available = ui.available_width();
+        let latency_width = (available * LATENCY_SHARE).max(LATENCY_MIN_WIDTH);
+        let fixed = HOP_WIDTH + NUMBER_WIDTH * 7.0 + IP_WIDTH + latency_width;
+        let name_width = (available - fixed).max(80.0);
+        let mut defaults = vec![HOP_WIDTH, NUMBER_WIDTH, IP_WIDTH, name_width];
+        defaults.extend([NUMBER_WIDTH; 6]);
+        let builder = TableBuilder::new(ui)
+            .striped(true)
+            .sense(Sense::click())
+            .cell_layout(Layout::left_to_right(Align::Center));
+        let mut header_widths = Vec::new();
+        columns
+            .columns(builder, defaults, available, LATENCY_MIN_WIDTH)
+            .header(HEADER_HEIGHT, |mut header| {
+                for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
+                    header.col(|ui| {
+                        header_widths.push(ui.max_rect().width());
+                        let title = ui.language().translate(title);
+                        header_cell(ui, index == 0, numeric, title, available);
+                    });
+                }
+                header.col(|ui| latency_bars::header(ui, scale_ms));
+            })
+            .body(|mut body| {
+                for hop in hops {
+                    body.row(ROW_HEIGHT, |mut row| {
+                        row.set_selected(selected == Some(hop.ttl));
+                        averages.extend(hop_row(&mut row, hop, names, scale_ms));
+                        if row.response().clicked() {
+                            clicked = Some(hop.ttl);
+                        }
+                    });
+                }
+                if let Some(hop) = target_hop {
+                    body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus));
+                }
+            });
+        columns.take_header(&header_widths);
+        latency_bars::connect(ui, &averages);
+    });
     clicked
 }
 

@@ -22,7 +22,8 @@ use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::{SavedTab, WindowState, WindowStore};
 use crate::ui::alerts_window::AlertsWindow;
 use crate::ui::all_targets::{AllTargets, Request};
-use crate::ui::hop_table::format_ms;
+use crate::ui::columns::ColumnWidths;
+use crate::ui::hop_table::{self, format_ms};
 use crate::ui::icons;
 use crate::ui::notify::Notifier;
 use crate::ui::settings::SettingsWindow;
@@ -134,6 +135,8 @@ pub struct PingWatchApp {
     tray: Option<Tray>,
     /// Where the window state is kept between runs, `None` if history is off.
     window_store: Option<WindowStore>,
+    /// Column widths of the hop table, shared by all target tabs.
+    hop_columns: ColumnWidths,
     /// The window state as of the last frame.
     window: WindowState,
     /// The window state as last stored.
@@ -254,12 +257,8 @@ impl PingWatchApp {
             minimized: false,
             table_share: tab::TABLE_SHARE,
         });
-        let all_targets = AllTargets::new(
-            window_store
-                .as_ref()
-                .and_then(|store| store.load_all_targets().inspect_err(|error| log::warn!("{error}")).ok())
-                .flatten(),
-        );
+        let all_targets = AllTargets::new(window_store.as_ref());
+        let hop_columns = ColumnWidths::load("hop-table", hop_table::RESIZABLE_COLUMNS, window_store.as_ref());
         Self {
             all_targets,
             tabs,
@@ -273,6 +272,7 @@ impl PingWatchApp {
             targets,
             tray,
             window_store,
+            hop_columns,
             window,
             window_saved: saved_window,
             window_saved_at: Instant::now(),
@@ -1163,7 +1163,9 @@ impl eframe::App for PingWatchApp {
         self.hide_instead_of_closing(ctx);
         self.track_window(ctx);
         self.track_tabs();
-        self.all_targets.save(self.window_store.as_ref());
+        let dragging = ctx.input(|input| input.pointer.any_down());
+        self.all_targets.save(self.window_store.as_mut(), dragging);
+        self.hop_columns.save(self.window_store.as_mut(), dragging);
         self.save_settings();
         self.check_alerts();
         self.check_updates_daily();
@@ -1243,10 +1245,9 @@ impl eframe::App for PingWatchApp {
                 }
                 None
             }
-            Page::Target(index) => self
-                .tabs
-                .get_mut(index)
-                .and_then(|tab| page(ui, |ui| tab.ui(ui, context, &mut self.window.table_share))),
+            Page::Target(index) => self.tabs.get_mut(index).and_then(|tab| {
+                page(ui, |ui| tab.ui(ui, context, &mut self.window.table_share, &mut self.hop_columns))
+            }),
         };
         if let Some(action) = action {
             self.apply(action);

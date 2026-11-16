@@ -3,6 +3,7 @@
 pub mod alerts_window;
 pub mod all_targets;
 pub mod app;
+pub mod columns;
 pub mod focus;
 pub mod hop_table;
 pub mod icons;

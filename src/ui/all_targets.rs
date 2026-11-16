@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui, vec2};
-use egui_extras::{Column, TableBuilder};
+use egui_extras::TableBuilder;
 
 use crate::i18n::{Lang, Language, n, tr, trf, trn};
 use crate::snapshot::{HopRow, Snapshot, SummaryRow};
@@ -14,6 +14,7 @@ use crate::store::history;
 use crate::store::history::Store;
 use crate::store::targets::{TargetList, TraceSettings};
 use crate::store::window_state::{AllTargetsSettings, WindowStore};
+use crate::ui::columns::{self, ColumnWidths};
 use crate::ui::focus::Focus;
 use crate::ui::hop_table::{self, format_ms};
 use crate::ui::icons::{self, Icon, Style};
@@ -26,15 +27,17 @@ use crate::ui::timeline::Period;
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 24.0;
 /// Width of the Status column (checkbox and state).
-const STATUS_WIDTH: f32 = 120.0;
+const STATUS_WIDTH: f32 = 128.0;
 /// Widest the Target column gets.
-const TARGET_WIDTH: f32 = 200.0;
+const TARGET_WIDTH: f32 = 208.0;
 /// Widest the IP column gets (room for most IPv6 addresses).
-const IP_WIDTH: f32 = 230.0;
+const IP_WIDTH: f32 = 238.0;
 /// Width of a numeric column.
-const NUMBER_WIDTH: f32 = 62.0;
+const NUMBER_WIDTH: f32 = 70.0;
 /// Number of numeric columns (Hops, Avg, Min, Max, Cur, PL%).
 const NUMBER_COLUMNS: usize = 6;
+/// Number of columns that can be dragged: all but the latency bars (Status, Target, IP and the numbers).
+const RESIZABLE_COLUMNS: usize = NUMBER_COLUMNS + 3;
 /// Narrowest the latency column gets.
 const LATENCY_MIN_WIDTH: f32 = 160.0;
 /// Least height of a chart: the charts share the pane equally, and below this the pane scrolls instead.
@@ -62,11 +65,16 @@ pub struct AllTargets {
     saved: Option<AllTargetsSettings>,
     /// Host of the selected row.
     selected: Option<String>,
+    /// Widths of the table's columns.
+    columns: ColumnWidths,
 }
 
 impl AllTargets {
-    /// The page with the settings stored last time, or the defaults.
-    pub fn new(saved: Option<AllTargetsSettings>) -> Self {
+    /// The page with the settings and column widths stored last time in `store`, or the defaults.
+    pub fn new(store: Option<&WindowStore>) -> Self {
+        let saved = store
+            .and_then(|store| store.load_all_targets().inspect_err(|error| log::warn!("{error}")).ok())
+            .flatten();
         let defaults = AllTargetsSettings {
             trace: TraceSettings {
                 interval: Duration::from_secs(1),
@@ -75,7 +83,13 @@ impl AllTargets {
             },
             table_share: TABLE_SHARE,
         };
-        Self { entry: TargetEntry::new(false), settings: saved.unwrap_or(defaults), saved, selected: None }
+        Self {
+            entry: TargetEntry::new(false),
+            settings: saved.unwrap_or(defaults),
+            saved,
+            selected: None,
+            columns: ColumnWidths::load("all-targets", RESIZABLE_COLUMNS, store),
+        }
     }
 
     /// Host of the selected row, if any.
@@ -131,8 +145,10 @@ impl AllTargets {
         self.settings.trace.interval
     }
 
-    /// Stores the settings in `store` whenever they changed.
-    pub fn save(&mut self, store: Option<&WindowStore>) {
+    /// Stores the settings and column widths in `store` whenever they changed (the widths once `dragging`, the
+    /// mouse button held, ends).
+    pub fn save(&mut self, mut store: Option<&mut WindowStore>, dragging: bool) {
+        self.columns.save(store.as_deref_mut(), dragging);
         if self.saved == Some(self.settings) {
             return;
         }
@@ -164,17 +180,20 @@ impl AllTargets {
         ui.allocate_rect(area, Sense::hover());
         let now_ms = history::unix_ms(SystemTime::now());
         let visible = (now_ms.saturating_sub(self.settings.trace.period.millis()), now_ms);
-        if tabs.iter().any(Tab::is_charted) {
+        // With charts shown the table shares the area with them, above a splitter.
+        let (table_rect, charts_rect) = if tabs.iter().any(Tab::is_charted) {
             let (table_rect, splitter_rect, charts_rect) = tab::split(area, self.settings.table_share);
             tab::splitter(ui, splitter_rect, area, &mut self.settings.table_share);
-            tab::pane(ui, table_rect, Margin::same(1), |ui| {
-                request = request.take().or(self.table(ui, tabs, visible, now_ms, alerting));
-            });
-            tab::pane(ui, charts_rect, Margin::same(8), |ui| self.charts(ui, tabs, history_path));
+            (table_rect, Some(charts_rect))
         } else {
-            tab::pane(ui, area, Margin::same(1), |ui| {
-                request = request.take().or(self.table(ui, tabs, visible, now_ms, alerting));
-            });
+            (area, None)
+        };
+        tab::pane(ui, table_rect, Margin::same(1), |ui| {
+            let table = columns::scope(ui, "all-targets-table", |ui| self.table(ui, tabs, visible, now_ms, alerting));
+            request = request.take().or(table);
+        });
+        if let Some(charts_rect) = charts_rect {
+            tab::pane(ui, charts_rect, Margin::same(8), |ui| self.charts(ui, tabs, history_path));
         }
         request
     }
@@ -226,24 +245,22 @@ impl AllTargets {
             overviews.iter().filter_map(|overview| overview.target_hop.as_ref()).map(|hop| &hop.stats),
         );
         let row_width = ui.available_width();
-        // In a narrow window Target and IP give up room (clipped), so the numbers and the bars stay in view.
+        // Default widths: in a narrow window Target and IP give up room (clipped), so the numbers and the bars stay
+        // in view.
         #[expect(clippy::cast_precision_loss, reason = "a handful of columns")]
-        let fixed = STATUS_WIDTH
-            + NUMBER_WIDTH * NUMBER_COLUMNS as f32
-            + LATENCY_MIN_WIDTH
-            + ui.spacing().item_spacing.x * (NUMBER_COLUMNS + 3) as f32;
+        let fixed = STATUS_WIDTH + NUMBER_WIDTH * NUMBER_COLUMNS as f32 + LATENCY_MIN_WIDTH;
         let squeeze = ((row_width - fixed) / (TARGET_WIDTH + IP_WIDTH)).clamp(0.3, 1.0);
+        let mut defaults = vec![STATUS_WIDTH, TARGET_WIDTH * squeeze, IP_WIDTH * squeeze];
+        defaults.extend([NUMBER_WIDTH; NUMBER_COLUMNS]);
         let mut request = None;
         let mut toggle = None;
-        TableBuilder::new(ui)
+        let mut header_widths = Vec::new();
+        let builder = TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::exact(STATUS_WIDTH).clip(true))
-            .column(Column::exact(TARGET_WIDTH * squeeze).clip(true))
-            .column(Column::exact(IP_WIDTH * squeeze).clip(true))
-            .columns(Column::exact(NUMBER_WIDTH), NUMBER_COLUMNS)
-            .column(Column::remainder().at_least(LATENCY_MIN_WIDTH).clip(true))
+            .cell_layout(Layout::left_to_right(Align::Center));
+        self.columns
+            .columns(builder, defaults, row_width, LATENCY_MIN_WIDTH)
             .header(ROW_HEIGHT, |mut header| {
                 // Title and whether the column is numeric (right-aligned).
                 let columns = [
@@ -259,6 +276,7 @@ impl AllTargets {
                 ];
                 for (index, (title, numeric)) in columns.into_iter().enumerate() {
                     header.col(|ui| {
+                        header_widths.push(ui.max_rect().width());
                         let title = ui.language().translate(title);
                         hop_table::header_cell(ui, index == 0, numeric, title, row_width);
                     });
@@ -276,6 +294,7 @@ impl AllTargets {
                             if ui.checkbox(&mut ticked, "").on_hover_text(tr!(ui, "Show the chart below")).changed() {
                                 toggle = Some(index);
                             }
+                            ui.add_space(4.0);
                             if alerting.iter().any(|host| host.eq_ignore_ascii_case(&overview.title)) {
                                 ui.label(RichText::new(tr!(ui, "alert")).color(theme::palette(ui).bad));
                             } else {
@@ -328,6 +347,7 @@ impl AllTargets {
                     });
                 }
             });
+        self.columns.take_header(&header_widths);
         if let Some(tab) = toggle.and_then(|index| tabs.get_mut(index)) {
             tab.set_charted(!tab.is_charted());
         }
