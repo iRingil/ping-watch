@@ -357,6 +357,22 @@ pub(crate) fn entries_of_target(
     Ok(rows.filter_map(Result::transpose).collect::<Result<_, _>>()?)
 }
 
+/// Deletes the journal rows of the host stored as `name` (lowercase) that ended before `before_ms`; none if the
+/// alert tables don't exist yet. Rows still going on stay: the alert engine ends them. Returns how many.
+///
+/// # Errors
+///
+/// [`HistoryError::Db`] if SQLite fails.
+pub(crate) fn forget_target(connection: &Connection, name: &str, before_ms: i64) -> Result<usize, HistoryError> {
+    if !has_tables(connection)? {
+        return Ok(0);
+    }
+    Ok(connection.execute(
+        "DELETE FROM alert_events WHERE lower(host) = ?1 AND ended_ms IS NOT NULL AND ended_ms < ?2",
+        params![name, before_ms],
+    )?)
+}
+
 /// Deletes the journal rows that ended before `before_ms` (with their timeline marks); none if the alert tables
 /// don't exist yet. Returns how many.
 ///
@@ -555,6 +571,17 @@ mod tests {
             ]
         );
         assert_ne!(alert.what(Language::Russian), alert.what(Language::English), "worded in the language shown");
+        store.start(2, "GitHub.com", &loss, 1_000, 20.0).expect("started");
+        store.start(2, "1.1.1.1", &loss, 200_000, 20.0).expect("started");
+        assert_eq!(
+            forget_target(&store.connection, "1.1.1.1", 300_000).ok(),
+            Some(2),
+            "the ended alert and the route change; the ongoing alert and other hosts stay"
+        );
+        assert_eq!(store.journal().map(|journal| journal.len()).ok(), Some(2));
+        store.end(2, "GitHub.com", 250_000, 20.0, true).expect("ended");
+        store.end(2, "1.1.1.1", 250_000, 20.0, true).expect("ended");
+        store.note(1, "1.1.1.1", RouteNote { hop: Some((2, old, new)), hops: None }, 1_500).expect("noted");
         assert_eq!(prune_journal(&store.connection, 2_000).ok(), Some(1), "the route change ended before 2 s");
         store.clear_journal().expect("cleared");
         assert_eq!(store.journal().map(|journal| journal.len()).ok(), Some(0));

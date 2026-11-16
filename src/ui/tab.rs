@@ -49,7 +49,7 @@ pub const TABLE_SHARE: f32 = 0.66;
 const TABLE_SHARE_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.85;
 /// Height of the draggable bar between the panes.
 const SPLITTER_HEIGHT: f32 = 10.0;
-/// Restarts the trace with fresh statistics.
+/// Starts the trace over: fresh statistics, the history deleted (after the user confirms).
 pub const RESTART_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::R);
 /// Opens a tab for a new target.
 pub const NEW_TARGET_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::N);
@@ -59,7 +59,7 @@ pub const CLOSE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CT
 /// What the user asked for in a tab's menu or with a shortcut; carried out by the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Restart the current trace with fresh statistics.
+    /// Start the current trace over: fresh statistics, its history deleted.
     Restart,
     /// Open a tab for a new target.
     NewTarget,
@@ -334,10 +334,20 @@ impl Tab {
         };
     }
 
-    /// Restarts the trace of the current host with fresh statistics.
-    pub fn restart(&mut self) {
+    /// Starts the trace of the current host over: fresh statistics, and the history so far (samples, comments,
+    /// timeline marks) deleted from the database at `history_path` in the background.
+    pub fn reset(&mut self, history_path: Option<&Path>) {
         let host = self.host.clone();
+        // Stopping the trace first lets its recorder write out what it holds, so nothing old comes in after.
         self.begin(host);
+        if let Some(path) = history_path
+            && !self.host.is_empty()
+        {
+            history::forget_in_background(path, &history_key(&self.host));
+        }
+        let period = self.timeline.period();
+        self.timeline = Timeline::default();
+        self.timeline.set_period(period);
     }
 
     /// Moves a resolving tab on once the address is known: starts the history recorder and the tracer.

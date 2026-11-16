@@ -26,7 +26,7 @@ use crate::ui::columns::ColumnWidths;
 use crate::ui::hop_table::{self, format_ms};
 use crate::ui::icons;
 use crate::ui::notify::Notifier;
-use crate::ui::settings::SettingsWindow;
+use crate::ui::settings::{self, SettingsWindow};
 use crate::ui::tab::{self, Action, Tab};
 use crate::ui::tab_strip;
 use crate::ui::theme;
@@ -175,6 +175,8 @@ pub struct PingWatchApp {
     notifier: Notifier,
     /// The Alerts window.
     alerts_window: AlertsWindow,
+    /// Host of the tab whose reset waits for the user's yes (it deletes the target's history).
+    reset_asked: Option<String>,
     /// When the app started (the first daily update check waits a little after it).
     started_at: Instant,
     /// The daily update check while it runs.
@@ -290,6 +292,7 @@ impl PingWatchApp {
             alerts_checked_at: Instant::now(),
             notifier,
             alerts_window: AlertsWindow::default(),
+            reset_asked: None,
             started_at: Instant::now(),
             update_check: None,
             update_retry_at: None,
@@ -581,14 +584,58 @@ impl PingWatchApp {
                 self.page = Page::Target(self.tabs.len().saturating_sub(1));
             }
             Action::Restart => {
+                // With history on, the reset deletes the target's history: the user confirms it first.
+                let history_on = self.history_path.is_some();
                 if let Some(tab) = self.active_tab() {
-                    tab.restart();
+                    if history_on && !tab.host().is_empty() {
+                        self.reset_asked = Some(tab.host().to_owned());
+                    } else {
+                        tab.reset(None);
+                    }
                 }
             }
             Action::Close => {
                 if let Page::Target(index) = self.page {
                     self.close(index);
                 }
+            }
+        }
+    }
+
+    /// Asks whether to reset the tab in [`Self::reset_asked`] (deleting its target's history) and does it on yes.
+    fn reset_dialog(&mut self, ctx: &egui::Context) {
+        let Some(host) = self.reset_asked.clone() else {
+            return;
+        };
+        let mut confirmed = None;
+        let modal = egui::Modal::new(egui::Id::unique("reset-target")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new(trf!(ui, "Reset {host}?", host = host)).font(theme::heading_font(17.0)));
+            ui.add_space(6.0);
+            ui.label(tr!(
+                ui,
+                "The statistics start over and the target's history is deleted: its chart, comments and alert marks."
+            ));
+            ui.add_space(6.0);
+            settings::centered_row(ui, |ui| {
+                if ui.button(RichText::new(tr!(ui, "Reset")).color(theme::palette(ui).bad)).clicked() {
+                    confirmed = Some(true);
+                }
+                if ui.button(tr!(ui, "Cancel")).clicked() {
+                    confirmed = Some(false);
+                }
+            });
+        });
+        if modal.should_close() {
+            confirmed = confirmed.or(Some(false));
+        }
+        if let Some(confirmed) = confirmed {
+            self.reset_asked = None;
+            // Found by host: tabs may have moved meanwhile (one tab per address).
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.host() == host)
+                && confirmed
+            {
+                tab.reset(self.history_path.as_deref());
             }
         }
     }
@@ -1254,6 +1301,7 @@ impl eframe::App for PingWatchApp {
         }
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
         self.settings_window.show(ui.ctx(), &mut self.settings, data_folder);
+        self.reset_dialog(ui.ctx());
         let hosts: Vec<String> =
             self.tabs.iter().map(Tab::host).filter(|host| !host.is_empty()).map(str::to_owned).collect();
         if self.alerts_window.show(ui.ctx(), self.alert_store.as_ref(), &self.alert_rules, &hosts) {

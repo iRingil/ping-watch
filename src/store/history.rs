@@ -261,6 +261,27 @@ impl Store {
         Ok(samples)
     }
 
+    /// Deletes the history of the target called `name` from before `before_ms`: its samples, comments and ended
+    /// alert journal rows (the timeline marks). Returns how many samples.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails; then nothing is deleted.
+    pub fn forget(&self, name: &str, before_ms: i64) -> Result<usize, HistoryError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let samples = transaction.execute(
+            "DELETE FROM samples WHERE target_id = (SELECT id FROM targets WHERE name = ?1) AND ts_ms < ?2",
+            params![name, before_ms],
+        )?;
+        transaction.execute(
+            "DELETE FROM comments WHERE target_id = (SELECT id FROM targets WHERE name = ?1) AND ts_ms < ?2",
+            params![name, before_ms],
+        )?;
+        crate::store::alerts::forget_target(&transaction, name, before_ms)?;
+        transaction.commit()?;
+        Ok(samples)
+    }
+
     /// Statistics of hop `hop` of target `target_id` in `[from_ms, to_ms)`, grouped into buckets of
     /// `bucket_ms` aligned to `from_ms`. Buckets without samples are omitted.
     ///
@@ -473,6 +494,23 @@ pub fn prune_in_background(path: &Path, retention: Duration) {
     }
 }
 
+/// Deletes the history of the target called `name` (see [`Store::forget`]) from before now, from the database at
+/// `path`, on a thread of its own (a long history takes a while). Samples recorded from now on are kept.
+pub fn forget_in_background(path: &Path, name: &str) {
+    let path = path.to_path_buf();
+    let name = name.to_owned();
+    let before_ms = unix_ms(SystemTime::now());
+    let spawned = thread::Builder::new().name("forget".to_owned()).spawn(move || {
+        match Store::open(&path).and_then(|store| store.forget(&name, before_ms)) {
+            Ok(deleted) => log::debug!("deleted {deleted} samples of a reset target"),
+            Err(error) => log::error!("cannot delete the history of a reset target: {error}"),
+        }
+    });
+    if let Err(error) = spawned {
+        log::error!("cannot start deleting the history of a reset target: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -589,6 +627,26 @@ mod tests {
             buckets,
             [Bucket { start_ms: 0, sent: 2, received: 0, min: None, avg: None, max: None, jitter: None }]
         );
+    }
+
+    #[test]
+    fn forget_deletes_one_target_before_the_moment() {
+        let (mut store, target) = store_with_target();
+        let other = store.target_id("other").expect("target registers");
+        store.insert(target, &[reply(1, 100, 1), reply(1, 900, 1)]).expect("insert works");
+        store.insert(other, &[reply(1, 100, 1)]).expect("insert works");
+        store.add_comment(target, 200, "old").expect("comment saved");
+        store.add_comment(target, 950, "new").expect("comment saved");
+        assert_eq!(store.forget("example", 500).ok(), Some(1));
+        assert_eq!(store.oldest_ms(target, HopKey::Ttl(1)).ok(), Some(Some(900)));
+        assert_eq!(store.oldest_ms(other, HopKey::Ttl(1)).ok(), Some(Some(100)));
+        let texts: Vec<String> = store
+            .comments(target, 0, 1_000)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|comment| comment.text)
+            .collect();
+        assert_eq!(texts, ["new"]);
     }
 
     #[test]
