@@ -1,5 +1,5 @@
 //! The app's settings (the Settings window): what the close button does, the values new targets start with, probe
-//! timeout and hop limit, how long history is kept. Stored as key/value rows in the history database; a missing or
+//! timeout and hop limit, how long history is kept, theme, language and latency zones. Stored as key/value rows in the history database; a missing or
 //! unreadable value falls back to its default.
 
 use std::path::Path;
@@ -11,6 +11,7 @@ use crate::i18n::Language;
 use crate::store::history::{self, HistoryError};
 use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
+use crate::ui::latency_bars::Zones;
 use crate::ui::theme::ThemeChoice;
 use crate::ui::timeline::Period;
 
@@ -63,6 +64,8 @@ pub struct AppSettings {
     pub check_updates: bool,
     /// Interface language.
     pub language: Language,
+    /// Boundaries of the latency zones.
+    pub zones: Zones,
 }
 
 /// The interval of `millis` if it is one of the [`INTERVALS`] offered.
@@ -87,6 +90,7 @@ impl Default for AppSettings {
             theme: ThemeChoice::default(),
             check_updates: true,
             language: Language::English,
+            zones: Zones::default(),
         }
     }
 }
@@ -164,6 +168,10 @@ impl SettingsStore {
                 .get("language")?
                 .and_then(|key| Language::from_key(&key))
                 .unwrap_or_else(Language::of_windows),
+            zones: number("zone_fine_ms")?
+                .zip(number("zone_slow_ms")?)
+                .and_then(|(fine, slow)| Zones::new(u32::try_from(fine).ok()?, u32::try_from(slow).ok()?))
+                .unwrap_or(fallback.zones),
         })
     }
 
@@ -208,6 +216,8 @@ impl SettingsStore {
             ("theme", settings.theme.key().to_owned()),
             ("check_updates", if settings.check_updates { "1".to_owned() } else { "0".to_owned() }),
             ("language", settings.language.key().to_owned()),
+            ("zone_fine_ms", settings.zones.fine_ms().to_string()),
+            ("zone_slow_ms", settings.zones.slow_ms().to_string()),
         ];
         let transaction = self.connection.transaction()?;
         for (key, value) in values {
@@ -250,6 +260,7 @@ mod tests {
             theme: ThemeChoice::Light,
             check_updates: false,
             language: Language::German,
+            zones: Zones::new(30, 80).expect("valid zones"),
         };
         store.save(&settings).expect("saved");
         assert_eq!(store.load().ok(), Some(settings));
@@ -267,7 +278,7 @@ mod tests {
     #[test]
     fn unknown_values_fall_back_to_defaults() {
         let store = SettingsStore::open_in_memory().expect("store opens");
-        for (key, value) in [("max_hops", "7"), ("timeout_ms", "abc"), ("focus", "1y")] {
+        for (key, value) in [("max_hops", "7"), ("timeout_ms", "abc"), ("focus", "1y"), ("zone_fine_ms", "300")] {
             store
                 .connection
                 .execute("INSERT INTO app_settings (key, value) VALUES (?1, ?2)", params![key, value])

@@ -7,14 +7,11 @@ use std::fmt::Write as _;
 use eframe::egui::Color32;
 
 use crate::i18n::{Language, n, tr, trf};
+use crate::ui::latency_bars::Zones;
 use crate::ui::theme::LIGHT;
 use crate::ui::timeline::{Period, Series, Trace, clock, seconds, time_marks, value_marks};
 use crate::{APP_NAME, SITE_URL};
 
-/// Latency below which a value is fine (green zone), ms.
-const GOOD_MS: f64 = 100.0;
-/// Latency below which a value is acceptable (amber zone), ms; above it is red.
-const WARN_MS: f64 = 200.0;
 /// Size of a latency bar in the table.
 const BAR: (f64, f64) = (220.0, 14.0);
 /// Size of a chart, and its left and bottom margins for the axis labels.
@@ -144,7 +141,7 @@ impl Snapshot {
 }
 
 /// The page of `snapshot`, taken at `taken` (local time as shown), in `language`.
-pub fn html(snapshot: &Snapshot, taken: &str, version: &str, language: Language) -> String {
+pub fn html(snapshot: &Snapshot, taken: &str, version: &str, language: Language, zones: Zones) -> String {
     let title = match snapshot {
         Snapshot::Target(report) => report.label.clone(),
         Snapshot::AllTargets { .. } => tr!(language, "All targets").to_owned(),
@@ -158,8 +155,10 @@ pub fn html(snapshot: &Snapshot, taken: &str, version: &str, language: Language)
     let meta = crate::i18n::fill(&meta, &[("app", app), ("taken", escape(taken))]);
     let header = format!("<header><h1>{}</h1><p class=\"meta\">{meta}</p></header>", escape(&title));
     match snapshot {
-        Snapshot::Target(report) => write_target(&mut page, &header, report, language),
-        Snapshot::AllTargets { focus, rows, charts } => write_all(&mut page, &header, focus, rows, charts, language),
+        Snapshot::Target(report) => write_target(&mut page, &header, report, language, zones),
+        Snapshot::AllTargets { focus, rows, charts } => {
+            write_all(&mut page, &header, focus, rows, charts, language, zones);
+        }
     }
     page.push_str("</body></html>\n");
     page
@@ -200,14 +199,14 @@ svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top
 }
 
 /// The page of a target: table, chart, alerts.
-fn write_target(page: &mut String, header: &str, report: &TargetReport, language: Language) {
+fn write_target(page: &mut String, header: &str, report: &TargetReport, language: Language, zones: Zones) {
     let _ = write!(
         page,
         "<div class=\"top\"><div><h2>{}</h2><p class=\"muted\">{}</p></div>{header}</div>",
         escape(tr!(language, "Route")),
         escape(&trf!(language, "Focus {range}", range = report.focus))
     );
-    let scale = bar_scale(report.hops.iter().filter_map(|hop| hop.avg));
+    let scale = bar_scale(report.hops.iter().filter_map(|hop| hop.avg), zones);
     let _ = write!(
         page,
         "<table><tr><th class=\"num\">{}</th><th class=\"num\">{}</th><th>IP</th><th>{}</th>",
@@ -228,7 +227,7 @@ fn write_target(page: &mut String, header: &str, report: &TargetReport, language
             escape(hop.name.as_deref().unwrap_or(if lost { tr!(language, "No response") } else { "" })),
         );
         write_numbers(page, hop, language);
-        let _ = write!(page, "<td>{}</td></tr>", latency_bar(hop, scale));
+        let _ = write!(page, "<td>{}</td></tr>", latency_bar(hop, scale, zones));
     }
     page.push_str("</table>");
     if let Some(chart) = &report.chart {
@@ -236,7 +235,7 @@ fn write_target(page: &mut String, header: &str, report: &TargetReport, language
             page,
             "<h3>{}</h3>{}",
             escape(tr!(language, "Latency and loss of the target")),
-            chart_svg(chart, language)
+            chart_svg(chart, language, zones)
         );
     }
     let _ = write!(page, "<h2>{}</h2>", escape(tr!(language, "Alerts in this period")));
@@ -273,6 +272,7 @@ fn write_all(
     rows: &[SummaryRow],
     charts: &[(String, Chart)],
     language: Language,
+    zones: Zones,
 ) {
     let _ = write!(
         page,
@@ -280,7 +280,7 @@ fn write_all(
         escape(tr!(language, "Targets")),
         escape(&trf!(language, "Focus {range}", range = focus))
     );
-    let scale = bar_scale(rows.iter().filter_map(|row| row.numbers.as_ref().and_then(|hop| hop.avg)));
+    let scale = bar_scale(rows.iter().filter_map(|row| row.numbers.as_ref().and_then(|hop| hop.avg)), zones);
     let _ = write!(
         page,
         "<table><tr><th>{}</th><th>{}</th><th>IP</th><th class=\"num\">{}</th>",
@@ -302,7 +302,7 @@ fn write_all(
         match &row.numbers {
             Some(hop) => {
                 write_numbers(page, hop, language);
-                let _ = write!(page, "<td>{}</td>", latency_bar(hop, scale));
+                let _ = write!(page, "<td>{}</td>", latency_bar(hop, scale, zones));
             }
             None => page.push_str(&"<td></td>".repeat(7)),
         }
@@ -310,7 +310,7 @@ fn write_all(
     }
     page.push_str("</table>");
     for (label, chart) in charts {
-        let _ = write!(page, "<h2>{}</h2>{}", escape(label), chart_svg(chart, language));
+        let _ = write!(page, "<h2>{}</h2>{}", escape(label), chart_svg(chart, language, zones));
     }
 }
 
@@ -339,14 +339,13 @@ fn write_numbers(page: &mut String, hop: &HopRow, language: Language) {
     let _ = write!(page, "<td class=\"{loss_class}\">{}</td>", language.decimal(hop.loss));
 }
 
-/// The scale of the latency bars: twice the highest average, rounded up to 50 ms, at least 250 ms (as the app).
-fn bar_scale(averages: impl Iterator<Item = f64>) -> f64 {
-    let highest = averages.fold(0.0_f64, f64::max);
-    ((highest * 2.0 / 50.0).ceil() * 50.0).max(250.0)
+/// The scale of the latency bars for `zones`, as the app sets it (see [`Zones::bar_scale`]).
+fn bar_scale(averages: impl Iterator<Item = f64>, zones: Zones) -> f64 {
+    zones.bar_scale(averages.fold(0.0_f64, f64::max))
 }
 
 /// A hop's latency bar: zones, the loss share, the min–max range, the average and the current value.
-fn latency_bar(hop: &HopRow, scale: f64) -> String {
+fn latency_bar(hop: &HopRow, scale: f64, zones: Zones) -> String {
     let p = &LIGHT;
     let (width, height) = BAR;
     let x = |value: f64| (value / scale).clamp(0.0, 1.0) * width;
@@ -356,9 +355,7 @@ fn latency_bar(hop: &HopRow, scale: f64) -> String {
         svg.push_str("</svg>");
         return svg;
     }
-    for (from, to, color) in
-        [(0.0, GOOD_MS, p.good_zone), (GOOD_MS, WARN_MS, p.warn_zone), (WARN_MS, scale, p.bad_zone)]
-    {
+    for (from, to, color) in zones.bands(scale, p) {
         let _ = write!(
             svg,
             "<rect x=\"{:.1}\" width=\"{:.1}\" height=\"{height}\" fill=\"{}\"/>",
@@ -407,7 +404,7 @@ fn latency_bar(hop: &HopRow, scale: f64) -> String {
 /// A chart as the window draws it: the jitter strip, then the latency steps over the zones (from the first sample
 /// on), loss hanging from the top, a grid over everything on round values and local times, marks as dashed lines
 /// with their text on hover.
-fn chart_svg(chart: &Chart, language: Language) -> String {
+fn chart_svg(chart: &Chart, language: Language, zones: Zones) -> String {
     let p = &LIGHT;
     let (width, left) = (CHART.0, CHART.2);
     let plot_w = width - left;
@@ -424,7 +421,7 @@ fn chart_svg(chart: &Chart, language: Language) -> String {
         escape(tr!(language, "Latency and loss of the target"))
     );
     let series = &chart.series;
-    plot(&mut svg, &series.jitter, jitter_top, JITTER_HEIGHT, false, &x, chart, utc_offset_s);
+    plot(&mut svg, &series.jitter, jitter_top, JITTER_HEIGHT, None, &x, chart, utc_offset_s);
     let _ = write!(
         svg,
         "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">{}</text>",
@@ -433,7 +430,7 @@ fn chart_svg(chart: &Chart, language: Language) -> String {
         hex(p.ink),
         escape(tr!(language, "Jitter (ms)"))
     );
-    plot(&mut svg, &series.latency, latency_top, latency_h, true, &x, chart, utc_offset_s);
+    plot(&mut svg, &series.latency, latency_top, latency_h, Some(zones), &x, chart, utc_offset_s);
     let _ = write!(
         svg,
         "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"{}\">{}</text>",
@@ -475,7 +472,7 @@ fn chart_svg(chart: &Chart, language: Language) -> String {
     svg
 }
 
-/// One plot of a chart, `height` tall from `top`: the latency plot (`latency`) gets zones, loss bars and marks,
+/// One plot of a chart, `height` tall from `top`: the latency plot (with its `zones`) gets zones, loss bars and marks,
 /// the jitter strip only its line. Both get the grid and their value labels.
 #[expect(clippy::too_many_arguments, reason = "the plot's place and what to draw in it")]
 fn plot(
@@ -483,7 +480,7 @@ fn plot(
     trace: &Trace,
     top: f64,
     height: f64,
-    latency: bool,
+    zones: Option<Zones>,
     x: &dyn Fn(f64) -> f64,
     chart: &Chart,
     utc_offset_s: i64,
@@ -499,11 +496,9 @@ fn plot(
         hex(p.well)
     );
     let series = &chart.series;
-    if latency && let Some(first_s) = series.first_s {
+    if let (Some(zones), Some(first_s)) = (zones, series.first_s) {
         let data_x = x(first_s);
-        for (low, high, color) in
-            [(0.0, GOOD_MS, p.good_zone), (GOOD_MS, WARN_MS, p.warn_zone), (WARN_MS, scale, p.bad_zone)]
-        {
+        for (low, high, color) in zones.bands(scale, p) {
             if low < scale {
                 let band_top = y(high.min(scale));
                 let _ = write!(
@@ -516,7 +511,7 @@ fn plot(
             }
         }
     }
-    if latency {
+    if zones.is_some() {
         let bucket_w = (seconds(chart.bucket_ms) / (seconds(chart.to_ms) - seconds(chart.from_ms)).max(1.0)
             * (width - left))
             .max(1.0);
@@ -557,7 +552,7 @@ fn plot(
             top + height
         );
     }
-    let color = if latency { p.ink } else { p.jitter };
+    let color = if zones.is_some() { p.ink } else { p.jitter };
     for segment in &trace.segments {
         let points: Vec<String> =
             segment.iter().map(|[at_s, value]| format!("{:.1},{:.1}", x(*at_s), y(*value))).collect();
@@ -582,7 +577,7 @@ fn plot(
             hex(color)
         );
     }
-    if latency {
+    if zones.is_some() {
         for (at_ms, text) in &chart.marks {
             let _ = write!(
                 svg,
@@ -704,7 +699,8 @@ mod tests {
                 worst: "23 %".to_owned(),
             }],
         };
-        let page = html(&Snapshot::Target(Box::new(report)), "15.11.2026 15:10", "1.0.0", Language::English);
+        let page =
+            html(&Snapshot::Target(Box::new(report)), "15.11.2026 15:10", "1.0.0", Language::English, Zones::default());
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("1.1.1.1 / Cloudflare"));
         assert!(page.contains("10.0.0.2"));

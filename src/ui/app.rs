@@ -490,6 +490,7 @@ impl PingWatchApp {
             &now.format("%d.%m.%Y %H:%M:%S").to_string(),
             env!("CARGO_PKG_VERSION"),
             language,
+            self.settings.zones,
         );
         let file_name = snapshot.file_name(&now.format("%Y-%m-%d %H-%M").to_string(), language);
         let (title, filter) = (tr!(language, "Save snapshot"), tr!(language, "Web page"));
@@ -1207,6 +1208,7 @@ impl eframe::App for PingWatchApp {
             }
             self.applied_language = Some(language);
         }
+        self.settings.zones.apply(ctx);
         self.hide_instead_of_closing(ctx);
         self.track_window(ctx);
         self.track_tabs();

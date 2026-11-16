@@ -47,11 +47,11 @@ pub struct Palette {
     pub widget: [Color32; 3],
     /// Border of a widget under the pointer.
     pub widget_hover_border: Color32,
-    /// Green zone background (latency below 100 ms): jade.
+    /// Fine latency zone background (see `latency_bars::Zones`): jade.
     pub good_zone: Color32,
-    /// Amber zone background (100–200 ms): ochre.
+    /// Slow latency zone background: ochre.
     pub warn_zone: Color32,
-    /// Red zone background (over 200 ms): rose.
+    /// Bad latency zone background: rose.
     pub bad_zone: Color32,
     /// Green marks: hop badge of a fast hop, legend.
     pub good: Color32,

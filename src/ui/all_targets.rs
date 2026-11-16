@@ -243,6 +243,7 @@ impl AllTargets {
         let overviews: Vec<Overview> = tabs.iter().map(|tab| tab.overview_with(focus, visible)).collect();
         let scale_ms = latency_bars::scale_ms(
             overviews.iter().filter_map(|overview| overview.target_hop.as_ref()).map(|hop| &hop.stats),
+            latency_bars::Zones::of(ui.ctx()),
         );
         let row_width = ui.available_width();
         // Default widths: in a narrow window Target and IP give up room (clipped), so the numbers and the bars stay

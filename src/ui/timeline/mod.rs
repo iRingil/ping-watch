@@ -20,7 +20,7 @@ pub use self::series::{Period, Series, Trace, Window, clock, seconds, time_marks
 use crate::i18n::{self, Lang, Language, tr, trf};
 use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, Comment, HopKey};
-use crate::ui::latency_bars::{GOOD_MS, WARN_MS};
+use crate::ui::latency_bars::Zones;
 use crate::ui::settings::centered_row;
 use crate::ui::theme;
 
@@ -525,6 +525,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
     }
     let latency = &shown.series.latency;
     let scale = latency.scale_ms;
+    let zones = Zones::of(ui.ctx());
     // Leave exactly the slider's row: taking more than the panel has would grow the panel every frame.
     let slider_row = if compact { 0.0 } else { ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 };
     let height = (ui.available_height() - slider_row).max(60.0);
@@ -534,11 +535,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
             plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, scale]));
             // Zones are painted only where there is data, as in PingPlotter; time before the first sample stays plain.
             if let Some(data_from_s) = shown.series.first_s {
-                for (low, high, color) in [
-                    (0.0, GOOD_MS, palette.good_zone),
-                    (GOOD_MS, WARN_MS, palette.warn_zone),
-                    (WARN_MS, scale, palette.bad_zone),
-                ] {
+                for (low, high, color) in zones.bands(scale, palette) {
                     if low < scale {
                         let top = high.min(scale);
                         let corners = vec![[data_from_s, low], [to_s, low], [to_s, top], [data_from_s, top]];

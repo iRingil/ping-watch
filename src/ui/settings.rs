@@ -4,13 +4,14 @@
 use std::path::Path;
 use std::time::Duration;
 
-use eframe::egui::{self, Align, Grid, Layout, RichText, Ui};
+use eframe::egui::{self, Align, DragValue, Grid, Layout, RichText, Ui};
 
 use crate::APP_NAME;
 use crate::i18n::{Lang, Language, n, tr, trf, trn};
 use crate::store::autostart;
 use crate::store::settings::{AppSettings, MAX_HOPS, RETENTIONS, TIMEOUTS};
 use crate::ui::icons::{self, Icon};
+use crate::ui::latency_bars::{self, Zones};
 use crate::ui::tab;
 use crate::ui::theme::{self, ThemeChoice};
 use crate::ui::timeline::Period;
@@ -248,7 +249,7 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
     ));
 }
 
-/// Appearance: the theme — follow Windows, dark or light (only dark so far).
+/// Appearance: the theme (follow Windows, dark or light) and the latency zones.
 fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
     // One choice under another, the label level with the first.
     let label = tr!(ui, "Theme");
@@ -266,6 +267,38 @@ fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
                 }
             }
         });
+    });
+    ui.add_space(16.0);
+    label_on_top(ui, tr!(ui, "Latency zones"), |ui| {
+        ui.vertical(|ui| zones_editor(ui, &mut settings.zones));
+    });
+}
+
+/// The two zone boundaries as number fields (each kept on its side of the other), what they mean, a button back
+/// to the defaults and the toolbar legend as a preview.
+fn zones_editor(ui: &mut Ui, zones: &mut Zones) {
+    let (mut fine, mut slow) = (zones.fine_ms(), zones.slow_ms());
+    Grid::new("latency-zones").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        ui.label(tr!(ui, "Fine below"));
+        ui.add(DragValue::new(&mut fine).range(Zones::MIN_MS..=slow.saturating_sub(1)).speed(1.0).suffix(" ms"));
+        ui.end_row();
+        ui.label(tr!(ui, "Slow below"));
+        ui.add(DragValue::new(&mut slow).range(fine.saturating_add(1)..=Zones::MAX_MS).speed(1.0).suffix(" ms"));
+        ui.end_row();
+    });
+    if let Some(changed) = Zones::new(fine, slow) {
+        *zones = changed;
+    }
+    ui.weak(tr!(ui, "Higher is bad. Bars, hop badges and charts are colored by these zones."));
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let default = Zones::default();
+        let label = trf!(ui, "Default: {fine} / {slow} ms", fine = default.fine_ms(), slow = default.slow_ms());
+        if ui.add_enabled(*zones != default, egui::Button::new(label)).clicked() {
+            *zones = default;
+        }
+        ui.add_space(12.0);
+        latency_bars::legend(ui);
     });
 }
 

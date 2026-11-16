@@ -13,7 +13,7 @@ use crate::probe::names::NameCache;
 use crate::probe::route::{Hop, Route};
 use crate::probe::stats::HopStats;
 use crate::ui::columns::{self, ColumnWidths};
-use crate::ui::latency_bars;
+use crate::ui::latency_bars::{self, Zones};
 
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 22.0;
@@ -95,7 +95,7 @@ pub fn show(
 ) -> Option<u8> {
     let hops = route.map_or(&[][..], Route::hops);
     let target_hop = route.and_then(|route| hops.last().filter(|hop| hop.address == Some(route.target())));
-    let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats));
+    let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats), Zones::of(ui.ctx()));
     let mut averages: Vec<Pos2> = Vec::new();
     let mut clicked = None;
     // One table state for all tabs: a column dragged in one tab is that wide in the others.
@@ -274,7 +274,11 @@ fn badge(ui: &mut Ui, hop: &Hop) {
     }
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(BADGE_SIZE), Sense::hover());
     let palette = theme::palette(ui);
-    let color = hop.stats.average().map_or(palette.ink_muted, |average| latency_color(average, palette));
+    let zones = Zones::of(ui.ctx());
+    let color = hop
+        .stats
+        .average()
+        .map_or(palette.ink_muted, |average| zones.color(latency_bars::millis(average), palette));
     ui.painter().circle_filled(rect.center(), BADGE_SIZE / 2.0, color);
     ui.painter().text(
         rect.center(),
@@ -283,18 +287,6 @@ fn badge(ui: &mut Ui, hop: &Hop) {
         theme::heading_font(12.0),
         theme::palette(ui).on_signal,
     );
-}
-
-/// Color of a latency's zone in `palette`: green below 100 ms, amber below 200 ms, red above.
-fn latency_color(latency: Duration, palette: &Palette) -> Color32 {
-    let ms = latency_bars::millis(latency);
-    if ms < latency_bars::GOOD_MS {
-        palette.good
-    } else if ms < latency_bars::WARN_MS {
-        palette.warn
-    } else {
-        palette.bad
-    }
 }
 
 /// Adds a label with the same inset as the header titles, right-aligned if `numeric`.
@@ -325,14 +317,6 @@ mod tests {
         assert_eq!(LossLevel::of(5.0), LossLevel::Some);
         assert_eq!(LossLevel::of(10.0), LossLevel::Heavy);
         assert_eq!(LossLevel::of(100.0), LossLevel::Heavy);
-    }
-
-    #[test]
-    fn badge_color_follows_latency_zones() {
-        let palette = &theme::DARK;
-        assert_eq!(latency_color(Duration::from_millis(52), palette), palette.good);
-        assert_eq!(latency_color(Duration::from_millis(177), palette), palette.warn);
-        assert_eq!(latency_color(Duration::from_millis(260), palette), palette.bad);
     }
 
     #[test]
