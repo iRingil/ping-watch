@@ -67,7 +67,11 @@ stands out at once. It keeps the history, so you can look back at what happened 
 ## Features
 
 - **Hop by hop.** Each router on the route gets a row: its address and name, the average, best, worst and current
-  latency, the jitter and the packet loss, with a bar that shows the spread over green, amber and red zones.
+  latency, the jitter and the packet loss, with a bar that shows the spread over green, amber and red zones (their
+  limits are yours to set). The columns can be made wider or narrower.
+- **ICMP or TCP.** Hops are probed with pings, or, for a server that ignores pings or a network whose firewall drops
+  them, with TCP connection requests to a port of your choice (443 by default). TCP needs no packet driver, only
+  administrator rights: without them it is greyed out, with a button that restarts Ping Watch as administrator.
 - **History.** Every probe is stored on this PC. The timeline shows latency, jitter and loss of any hop over the
   last minute to the last seven days; a slider goes back in time, and comments can be pinned to a moment.
 - **Several targets.** Each target has its own tab. "All targets" shows them side by side, each with its latency bar,
@@ -124,6 +128,8 @@ Ping Watch has no accounts, telemetry, ads or analytics. It sends only what trac
 for:
 
 - **ICMP echo requests** (pings) to the targets you enter and, with growing hop limits, to the routers on the way.
+- **TCP connection requests** (SYN) instead, for the targets you set to TCP probes: to the port you choose, with
+  growing hop limits. Each is closed (reset) once answered; no data is sent.
 - **DNS lookups**: the address of a target given by name, and the names of the routers on the route.
 - **GitHub** (`api.github.com`): once a day, a request for the latest release of this repository, to tell you when a
   new version is out (Settings → General → Updates turns it off), and when you click About → Check for updates.
