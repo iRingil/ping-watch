@@ -7,6 +7,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::probe::tracer::Probe;
 use crate::store::history::{self, HistoryError};
 use crate::store::settings::offered_interval;
 use crate::store::targets::TraceSettings;
@@ -230,7 +231,8 @@ impl WindowStore {
         #[expect(clippy::cast_possible_truncation, reason = "stored from an f32")]
         let table_share = table_share as f32;
         Ok(interval.zip(focus).zip(period).map(|((interval, focus), period)| AllTargetsSettings {
-            trace: TraceSettings { interval, focus, period },
+            // The page traces nothing itself; targets added there get the default probe.
+            trace: TraceSettings { interval, focus, period, probe: Probe::Icmp },
             table_share,
         }))
     }
@@ -360,6 +362,7 @@ mod tests {
                 interval: Duration::from_millis(500),
                 focus: Focus::Minutes5,
                 period: Period::Minutes10,
+                probe: Probe::Icmp,
             },
             table_share: 0.5,
         };

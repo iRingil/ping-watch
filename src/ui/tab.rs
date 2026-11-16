@@ -1,8 +1,9 @@
 //! One target tab: the host is resolved in the background, then traced; the tab draws its toolbar (pause with its
-//! menu, interval, focus) and the three panes.
+//! menu, interval, focus, probe) and the three panes.
 
 use std::net::IpAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -15,7 +16,8 @@ use crate::alerts::WindowStats;
 use crate::i18n::{Lang, Language, n, tr, trf};
 use crate::probe::names::{NameCache, ResolveError, resolve};
 use crate::probe::route::{Hop, Route};
-use crate::probe::tracer::{TraceConfig, Tracer};
+use crate::probe::tcp::TcpProber;
+use crate::probe::tracer::{Probe, TraceConfig, Tracer};
 use crate::snapshot::{AlertRow, Chart, HopRow, TargetReport};
 use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, HopKey, Recorder, Store};
@@ -65,6 +67,8 @@ pub enum Action {
     NewTarget,
     /// Stop the current trace and close its tab.
     Close,
+    /// Start Ping Watch again with administrator rights (for TCP probes).
+    RestartElevated,
 }
 
 /// Resources the tabs share, owned by the app.
@@ -80,6 +84,10 @@ pub struct Context<'a> {
     pub targets: Option<&'a TargetList>,
     /// The app's settings (probe timeout, hop limit, history retention).
     pub settings: &'a AppSettings,
+    /// Whether Ping Watch runs with administrator rights (TCP probes need them).
+    pub elevated: bool,
+    /// The app's TCP prober, shared by all traces.
+    pub tcp: &'a Arc<TcpProber>,
 }
 
 /// A running trace of one target.
@@ -87,6 +95,8 @@ pub struct Context<'a> {
 struct Session {
     /// Resolved address being traced.
     target: IpAddr,
+    /// What the trace probes with (ICMP in place of a TCP probe chosen without administrator rights).
+    probe: Probe,
     /// ID of the target in the history, `None` if history is off.
     target_id: Option<i64>,
     /// Background tracer; dropping the session stops it. Declared before `recorder` so it stops first and the
@@ -147,12 +157,16 @@ pub struct Tab {
     interval: Duration,
     /// Period the hop table summarizes.
     focus: Focus,
+    /// What the hops are probed with, as chosen.
+    probe: Probe,
     /// The target's chart on the overview page, `None` while it isn't charted there.
     chart: Option<Timeline>,
     /// Settings as last stored for this target; compared each frame to store changes.
     saved_settings: Option<TraceSettings>,
     /// Pause the trace as soon as it starts (a tab restored from a paused one).
     start_paused: bool,
+    /// The probe's port is being edited: the trace follows the probe once that ends.
+    probe_editing: bool,
     /// Name given to the host in the target list.
     name: Option<String>,
     /// Reverse-DNS name of the traced address, once known.
@@ -173,9 +187,11 @@ impl Tab {
             timeline,
             interval: defaults.interval,
             focus: defaults.focus,
+            probe: defaults.probe,
             chart: None,
             saved_settings: None,
             start_paused: false,
+            probe_editing: false,
             name: None,
             reverse: None,
             language: Language::English,
@@ -259,12 +275,17 @@ impl Tab {
         *period = chart.period();
     }
 
-    /// Stores the running trace's interval, focus and timeline period for its target whenever they changed.
+    /// Stores the running trace's interval, focus, timeline period and probe for its target whenever they changed.
     fn save_settings(&mut self, targets: Option<&TargetList>) {
         let (State::Running(_), Some(targets)) = (&self.state, targets) else {
             return;
         };
-        let current = TraceSettings { interval: self.interval, focus: self.focus, period: self.timeline.period() };
+        let current = TraceSettings {
+            interval: self.interval,
+            focus: self.focus,
+            period: self.timeline.period(),
+            probe: self.probe,
+        };
         if self.saved_settings == Some(current) {
             return;
         }
@@ -388,6 +409,7 @@ impl Tab {
             self.interval = settings.interval;
             self.focus = settings.focus;
             self.timeline.set_period(settings.period);
+            self.probe = settings.probe;
         }
         let key = history_key(&self.host);
         let target_id = context
@@ -402,20 +424,40 @@ impl Tab {
             log::warn!("{warning}");
         }
         let recorder = recorder.map_err(|warning| self.warning = Some(warning)).ok();
+        let probe = effective_probe(self.probe, context.elevated);
+        if probe != self.probe {
+            self.warning = Some(tr!(self.language, "TCP probes need administrator rights; probing by ICMP").to_owned());
+        }
         let config = TraceConfig {
             interval: self.interval,
             timeout: context.settings.timeout,
             max_hops: context.settings.max_hops,
+            probe,
         };
-        match Tracer::start(target, config, recorder.as_ref().and_then(Recorder::sender)) {
+        match Tracer::start(target, config, recorder.as_ref().and_then(Recorder::sender), context.tcp) {
             Ok(tracer) => {
                 if std::mem::take(&mut self.start_paused) {
                     tracer.set_paused(true);
                 }
-                self.state = State::Running(Session { target, target_id, tracer, recorder });
+                self.state = State::Running(Session { target, probe, target_id, tracer, recorder });
             }
             Err(error) => self.fail(error.to_string()),
         }
+    }
+
+    /// Traces again when the probe chosen differs from the one the trace uses (keeping a pause), unless its port is
+    /// still being edited.
+    fn follow_probe(&mut self, elevated: bool) {
+        let State::Running(session) = &self.state else {
+            return;
+        };
+        if session.probe == effective_probe(self.probe, elevated) || self.probe_editing {
+            return;
+        }
+        let paused = session.tracer.is_paused();
+        let host = self.host.clone();
+        self.begin(host);
+        self.start_paused = paused;
     }
 
     /// Logs a start failure and returns to editing with the error shown.
@@ -599,11 +641,12 @@ impl Tab {
         columns: &mut ColumnWidths,
     ) -> Option<Action> {
         self.save_settings(context.targets);
+        self.follow_probe(context.elevated);
         let route = self.route();
         let toolbar_frame = Frame::new().fill(theme::palette(ui).chassis).inner_margin(Margin::symmetric(10, 8));
         let action = egui::Panel::top("tab-toolbar")
             .frame(toolbar_frame)
-            .show(ui, |ui| self.toolbar(ui, context.targets))
+            .show(ui, |ui| self.toolbar(ui, context.targets, context.elevated))
             .inner;
         // The clicked hop while it's still on the route, otherwise the target (last) hop.
         let mut ttl = route.as_ref().and_then(|route| {
@@ -658,9 +701,9 @@ impl Tab {
         action
     }
 
-    /// Toolbar: the target field (or the traced target with pause and its menu), interval, focus, problems and the
+    /// Toolbar: the target field (or the traced target with pause and its menu), interval, focus, probe and the
     /// latency zone legend. Returns the action asked.
-    fn toolbar(&mut self, ui: &mut Ui, targets: Option<&TargetList>) -> Option<Action> {
+    fn toolbar(&mut self, ui: &mut Ui, targets: Option<&TargetList>, elevated: bool) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
             if matches!(self.state, State::Running(_)) {
@@ -676,6 +719,12 @@ impl Tab {
             }
             ui.weak(tr!(ui, "Focus"));
             focus_choice(ui, &mut self.focus);
+            ui.weak(tr!(ui, "Probe"));
+            let choice = probe_choice(ui, &mut self.probe, elevated);
+            self.probe_editing = choice.editing;
+            if choice.restart_elevated {
+                action = Some(Action::RestartElevated);
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), latency_bars::legend);
         });
         action
@@ -845,6 +894,57 @@ pub fn focus_choice(ui: &mut Ui, focus: &mut Focus) {
             ui.selectable_value(focus, choice, choice.label(language));
         }
     });
+}
+
+/// What the user did with [`probe_choice`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProbeChoice {
+    /// The port is being edited (dragged or typed): apply it once that ends.
+    pub editing: bool,
+    /// Asked to restart Ping Watch with administrator rights.
+    pub restart_elevated: bool,
+}
+
+/// Combo box choosing ICMP or TCP probes for `probe`, and the port of a TCP probe. Without administrator rights
+/// (`elevated` false) TCP can't be chosen; the list then offers to restart Ping Watch with them.
+pub fn probe_choice(ui: &mut Ui, probe: &mut Probe, elevated: bool) -> ProbeChoice {
+    let mut choice = ProbeChoice::default();
+    let label = |probe: Probe| match probe {
+        Probe::Icmp => "ICMP".to_owned(),
+        Probe::Tcp(_) => "TCP".to_owned(),
+    };
+    egui::ComboBox::from_id_salt("probe").selected_text(label(*probe)).width(70.0).show_ui(ui, |ui| {
+        ui.selectable_value(probe, Probe::Icmp, "ICMP")
+            .on_hover_text(tr!(ui, "Ping (ICMP echo), as tracert: works without administrator rights"));
+        let tcp = match *probe {
+            Probe::Tcp(port) => Probe::Tcp(port),
+            Probe::Icmp => Probe::Tcp(Probe::DEFAULT_TCP_PORT),
+        };
+        let hint = tr!(
+            ui,
+            "A TCP SYN to a port, as a connection starts: passes firewalls that drop ping and reaches servers that ignore it"
+        );
+        ui.add_enabled_ui(elevated, |ui| ui.selectable_value(probe, tcp, "TCP").on_hover_text(hint));
+        if !elevated {
+            ui.separator();
+            ui.weak(tr!(ui, "TCP probes need administrator rights."));
+            if ui.button(tr!(ui, "Restart as administrator")).clicked() {
+                choice.restart_elevated = true;
+            }
+        }
+    });
+    if let Probe::Tcp(port) = probe {
+        let response = ui
+            .add(egui::DragValue::new(port).range(1..=u16::MAX).speed(1.0))
+            .on_hover_text(tr!(ui, "Port of the TCP probe: 443 for HTTPS, 80 for HTTP, 22 for SSH"));
+        choice.editing = response.dragged() || response.has_focus();
+    }
+    choice
+}
+
+/// The probe a trace uses for `chosen`: TCP needs administrator rights (`elevated`), ICMP stands in without them.
+fn effective_probe(chosen: Probe, elevated: bool) -> Probe {
+    if elevated { chosen } else { Probe::Icmp }
 }
 
 /// Menu label of a probe interval.

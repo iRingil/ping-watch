@@ -8,6 +8,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::i18n::Language;
+use crate::probe::tracer::Probe;
 use crate::store::history::{self, HistoryError};
 use crate::store::targets::TraceSettings;
 use crate::ui::focus::Focus;
@@ -82,6 +83,7 @@ impl Default for AppSettings {
                 interval: Duration::from_millis(2_500),
                 focus: Focus::default(),
                 period: Period::default(),
+                probe: Probe::Icmp,
             },
             timeout: Duration::from_secs(1),
             max_hops: 30,
@@ -148,6 +150,7 @@ impl SettingsStore {
                 interval: number("interval_ms")?.and_then(offered_interval).unwrap_or(fallback.defaults.interval),
                 focus: self.get("focus")?.and_then(|key| Focus::from_key(&key)).unwrap_or(fallback.defaults.focus),
                 period: number("period_s")?.and_then(Period::from_seconds).unwrap_or(fallback.defaults.period),
+                probe: self.get("probe")?.and_then(|key| Probe::from_key(&key)).unwrap_or(fallback.defaults.probe),
             },
             timeout: number("timeout_ms")?
                 .map(Duration::from_millis)
@@ -210,6 +213,7 @@ impl SettingsStore {
             ("interval_ms", millis(settings.defaults.interval)),
             ("focus", settings.defaults.focus.key().to_owned()),
             ("period_s", settings.defaults.period.seconds().to_string()),
+            ("probe", settings.defaults.probe.key()),
             ("timeout_ms", millis(settings.timeout)),
             ("max_hops", settings.max_hops.to_string()),
             ("retention_s", settings.retention.as_secs().to_string()),
@@ -253,6 +257,7 @@ mod tests {
                 interval: Duration::from_millis(2_500),
                 focus: Focus::Minutes5,
                 period: Period::Minutes10,
+                probe: Probe::Tcp(80),
             },
             timeout: Duration::from_secs(2),
             max_hops: 40,

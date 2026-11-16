@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod alerts;
+mod elevation;
 mod i18n;
 mod probe;
 mod snapshot;
@@ -51,6 +52,8 @@ fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
 /// Program entry point.
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    // An instance started to replace this one with administrator rights waits until the old one is gone.
+    let hosts = elevation::wait_for_replaced(std::env::args().skip(1).collect());
     // A second start shows the running window instead (its hosts, if any, are not opened).
     let first_instance = match ui::single_instance::claim() {
         ui::single_instance::Claim::First(first) => Some(first),
@@ -60,7 +63,6 @@ fn main() -> anyhow::Result<()> {
         }
         ui::single_instance::Claim::Unknown => None,
     };
-    let hosts: Vec<String> = std::env::args().skip(1).collect();
     // The window comes back where and as it was left.
     let window_store = store::history::default_path()
         .ok()

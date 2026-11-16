@@ -1,8 +1,8 @@
-//! Continuous tracing of one target: one worker thread per TTL probes its hop every interval and records the
-//! outcome into a shared [`Route`] (the UI reads snapshots of it) and, optionally, sends it to the history.
-//! The trace can be paused and its interval changed while it runs.
+//! Continuous tracing of one target: one worker thread per TTL probes its hop every interval (by ICMP echo or a
+//! TCP SYN) and records the outcome into a shared [`Route`] (the UI reads snapshots of it) and, optionally, sends it
+//! to the history. The trace can be paused and its interval changed while it runs.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -10,8 +10,41 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::probe::icmp::{IcmpError, Pinger};
 use crate::probe::route::{ProbeOutcome, Route, RouteState, Sample};
+use crate::probe::tcp::TcpProber;
 use crate::store::history::unix_ms;
 use crate::sync::lock;
+
+/// What the hops are probed with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Probe {
+    /// ICMP echo, as `ping` and `tracert`; needs no rights.
+    #[default]
+    Icmp,
+    /// A TCP SYN to this port, as a connection would start: passes firewalls that drop ICMP, and reaches servers
+    /// that don't answer ping. Needs administrator rights; IPv4 only.
+    Tcp(u16),
+}
+
+impl Probe {
+    /// Port of a TCP probe until another is chosen: HTTPS, open on every web server.
+    pub const DEFAULT_TCP_PORT: u16 = 443;
+
+    /// Text stored for this probe.
+    pub fn key(self) -> String {
+        match self {
+            Self::Icmp => "icmp".to_owned(),
+            Self::Tcp(port) => format!("tcp:{port}"),
+        }
+    }
+
+    /// The probe stored as `key`; `None` if unknown.
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "icmp" => Some(Self::Icmp),
+            key => key.strip_prefix("tcp:")?.parse().ok().filter(|port| *port != 0).map(Self::Tcp),
+        }
+    }
+}
 
 /// Tracing parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,11 +55,13 @@ pub struct TraceConfig {
     pub timeout: Duration,
     /// Largest TTL probed.
     pub max_hops: u8,
+    /// What the hops are probed with.
+    pub probe: Probe,
 }
 
 impl Default for TraceConfig {
     fn default() -> Self {
-        Self { interval: Duration::from_secs(1), timeout: Duration::from_secs(1), max_hops: 30 }
+        Self { interval: Duration::from_secs(1), timeout: Duration::from_secs(1), max_hops: 30, probe: Probe::Icmp }
     }
 }
 
@@ -39,6 +74,46 @@ pub enum TraceError {
     /// A worker thread couldn't be started.
     #[error("cannot start probe thread: {0}")]
     Spawn(#[from] std::io::Error),
+    /// TCP probes were asked for an IPv6 target.
+    #[error("TCP probes trace IPv4 addresses only")]
+    TcpIpv6,
+}
+
+/// What a worker probes its hop with.
+#[derive(Debug)]
+enum Prober {
+    /// Its own ICMP handle.
+    Icmp(Pinger),
+    /// The app's TCP prober, for this target and port.
+    Tcp {
+        /// Shared by all traces.
+        prober: Arc<TcpProber>,
+        /// The target.
+        target: Ipv4Addr,
+        /// Its port.
+        port: u16,
+    },
+}
+
+impl Prober {
+    /// The prober of `probe` for `target`.
+    fn new(probe: Probe, target: IpAddr, tcp: &Arc<TcpProber>) -> Result<Self, TraceError> {
+        match (probe, target) {
+            (Probe::Icmp, _) => Ok(Self::Icmp(Pinger::for_target(target)?)),
+            (Probe::Tcp(port), IpAddr::V4(target)) => Ok(Self::Tcp { prober: Arc::clone(tcp), target, port }),
+            (Probe::Tcp(_), IpAddr::V6(_)) => Err(TraceError::TcpIpv6),
+        }
+    }
+
+    /// Probes hop `ttl` towards `target`, waiting up to `timeout`; the error is shown to the user.
+    fn probe(&self, target: IpAddr, ttl: u8, timeout: Duration) -> Result<ProbeOutcome, String> {
+        match self {
+            Self::Icmp(pinger) => pinger.probe(target, ttl, timeout).map_err(|error| error.to_string()),
+            Self::Tcp { prober, target, port } => {
+                prober.probe(*target, *port, ttl, timeout).map_err(|error| error.to_string())
+            }
+        }
+    }
 }
 
 /// Settings the workers follow, changeable while they run.
@@ -105,12 +180,19 @@ pub struct Tracer {
 }
 
 impl Tracer {
-    /// Starts tracing `target`; every probe outcome is also sent to `history`, if given.
+    /// Starts tracing `target`; every probe outcome is also sent to `history`, if given. TCP probes go through
+    /// `tcp`, the app's prober.
     ///
     /// # Errors
     ///
-    /// [`TraceError`] if an ICMP handle can't be opened or a thread can't be started.
-    pub fn start(target: IpAddr, config: TraceConfig, history: Option<Sender<Sample>>) -> Result<Self, TraceError> {
+    /// [`TraceError`] if an ICMP handle can't be opened, TCP probes are asked for an IPv6 target or a thread can't
+    /// be started.
+    pub fn start(
+        target: IpAddr,
+        config: TraceConfig,
+        history: Option<Sender<Sample>>,
+        tcp: &Arc<TcpProber>,
+    ) -> Result<Self, TraceError> {
         let shared = Arc::new(Shared {
             route: Mutex::new(RouteState::new(target, config.max_hops)),
             control: Mutex::new(Control { stop: false, paused: false, interval: config.interval }),
@@ -120,12 +202,12 @@ impl Tracer {
         // Assigned before spawning, so that an early error drops (and stops) the already started workers.
         let mut tracer = Self { shared, workers: Vec::new() };
         for ttl in 1..=config.max_hops {
-            let pinger = Pinger::for_target(target)?;
+            let prober = Prober::new(config.probe, target, tcp)?;
             let shared = Arc::clone(&tracer.shared);
             let history = history.clone();
             let worker = thread::Builder::new()
                 .name(format!("probe-ttl-{ttl}"))
-                .spawn(move || probe_loop(&shared, &pinger, history.as_ref(), target, ttl, config))?;
+                .spawn(move || probe_loop(&shared, &prober, history.as_ref(), target, ttl, config))?;
             tracer.workers.push(worker);
         }
         Ok(tracer)
@@ -171,7 +253,7 @@ impl Drop for Tracer {
 /// Worker body: probes hop `ttl` every interval until stop is requested.
 fn probe_loop(
     shared: &Shared,
-    pinger: &Pinger,
+    prober: &Prober,
     history: Option<&Sender<Sample>>,
     target: IpAddr,
     ttl: u8,
@@ -181,7 +263,7 @@ fn probe_loop(
         let started = Instant::now();
         if lock(&shared.route).should_probe(ttl) {
             let at_ms = unix_ms(SystemTime::now());
-            let outcome = match pinger.probe(target, ttl, config.timeout) {
+            let outcome = match prober.probe(target, ttl, config.timeout) {
                 Ok(outcome) => {
                     if matches!(outcome, ProbeOutcome::Reply { .. }) {
                         *lock(&shared.last_error) = None;
@@ -192,7 +274,7 @@ fn probe_loop(
                     // No answer is a lost probe whatever the reason (with the network down Windows fails at once
                     // instead of timing out); the error itself is shown until a probe gets through again.
                     log::debug!("probe {target} ttl {ttl}: {error}");
-                    *lock(&shared.last_error) = Some(error.to_string());
+                    *lock(&shared.last_error) = Some(error);
                     ProbeOutcome::Lost
                 }
             };
@@ -218,9 +300,17 @@ fn probe_loop(
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
     use super::*;
+
+    #[test]
+    fn probes_round_trip_through_their_keys() {
+        for probe in [Probe::Icmp, Probe::Tcp(443), Probe::Tcp(22)] {
+            assert_eq!(Probe::from_key(&probe.key()), Some(probe));
+        }
+        assert_eq!(Probe::from_key("tcp:0"), None);
+        assert_eq!(Probe::from_key("tcp:99999"), None);
+        assert_eq!(Probe::from_key("udp"), None);
+    }
 
     /// Probes sent to the first hop so far.
     fn sent(tracer: &Tracer) -> u64 {
@@ -230,9 +320,14 @@ mod tests {
     /// Runs against the loopback address, so it needs no network.
     #[test]
     fn pause_stops_probing_and_interval_changes_live() {
-        let config =
-            TraceConfig { interval: Duration::from_millis(50), timeout: Duration::from_millis(200), max_hops: 2 };
-        let tracer = Tracer::start(IpAddr::V4(Ipv4Addr::LOCALHOST), config, None).expect("tracer starts");
+        let config = TraceConfig {
+            interval: Duration::from_millis(50),
+            timeout: Duration::from_millis(200),
+            max_hops: 2,
+            probe: Probe::Icmp,
+        };
+        let tcp = Arc::new(TcpProber::default());
+        let tracer = Tracer::start(IpAddr::V4(Ipv4Addr::LOCALHOST), config, None, &tcp).expect("tracer starts");
         thread::sleep(Duration::from_millis(400));
         assert!(sent(&tracer) >= 4, "probes every 50 ms");
 

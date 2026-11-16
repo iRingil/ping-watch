@@ -14,6 +14,7 @@ use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Se
 use crate::alerts::{Engine, Event, Observe, Rule, WindowStats};
 use crate::i18n::{self, Lang, Language, tr, trf, trn};
 use crate::probe::names::NameCache;
+use crate::probe::tcp::TcpProber;
 use crate::snapshot::{self, Snapshot};
 use crate::store::alerts::AlertStore;
 use crate::store::history::{self, Store};
@@ -177,6 +178,12 @@ pub struct PingWatchApp {
     alerts_window: AlertsWindow,
     /// Host of the tab whose reset waits for the user's yes (it deletes the target's history).
     reset_asked: Option<String>,
+    /// Whether Ping Watch runs with administrator rights, checked once at start (TCP probes need them).
+    elevated: bool,
+    /// An elevated instance was started to replace this one: quit on the next frame.
+    restarting: bool,
+    /// Sends TCP probes for all traces.
+    tcp: Arc<TcpProber>,
     /// When the app started (the first daily update check waits a little after it).
     started_at: Instant,
     /// The daily update check while it runs.
@@ -293,6 +300,9 @@ impl PingWatchApp {
             notifier,
             alerts_window: AlertsWindow::default(),
             reset_asked: None,
+            elevated: crate::elevation::is_elevated(),
+            restarting: false,
+            tcp: Arc::new(TcpProber::default()),
             started_at: Instant::now(),
             update_check: None,
             update_retry_at: None,
@@ -600,6 +610,15 @@ impl PingWatchApp {
                     self.close(index);
                 }
             }
+            Action::RestartElevated => self.restart_elevated(),
+        }
+    }
+
+    /// Starts Ping Watch again with administrator rights (after the UAC prompt) and quits this one, which saves the
+    /// tabs for the new one to restore. Nothing happens if the user says no.
+    fn restart_elevated(&mut self) {
+        if crate::elevation::restart_elevated() {
+            self.restarting = true;
         }
     }
 
@@ -1267,6 +1286,8 @@ impl eframe::App for PingWatchApp {
             history_path: self.history_path.as_deref(),
             targets: self.targets.as_ref(),
             settings: &self.settings,
+            elevated: self.elevated,
+            tcp: &self.tcp,
         };
         for tab in &mut self.tabs {
             tab.poll(context);
@@ -1302,7 +1323,13 @@ impl eframe::App for PingWatchApp {
             self.apply(action);
         }
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
-        self.settings_window.show(ui.ctx(), &mut self.settings, data_folder);
+        if self.settings_window.show(ui.ctx(), &mut self.settings, data_folder, self.elevated) {
+            self.restart_elevated();
+        }
+        if std::mem::take(&mut self.restarting) {
+            self.quit.store(true, Ordering::Relaxed);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.reset_dialog(ui.ctx());
         let hosts: Vec<String> =
             self.tabs.iter().map(Tab::host).filter(|host| !host.is_empty()).map(str::to_owned).collect();

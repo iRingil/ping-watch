@@ -3289,6 +3289,7 @@ dependencies = [
  "rfd",
  "rusqlite",
  "serde_json",
+ "socket2",
  "tauri-winrt-notification",
  "thiserror 2.0.21",
  "tray-icon",

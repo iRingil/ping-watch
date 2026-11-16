@@ -9,6 +9,7 @@ use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sen
 use egui_extras::TableBuilder;
 
 use crate::i18n::{Lang, Language, n, tr, trf, trn};
+use crate::probe::tracer::Probe;
 use crate::snapshot::{HopRow, Snapshot, SummaryRow};
 use crate::store::history;
 use crate::store::history::Store;
@@ -80,6 +81,7 @@ impl AllTargets {
                 interval: Duration::from_secs(1),
                 focus: Focus::default(),
                 period: Period::default(),
+                probe: Probe::Icmp,
             },
             table_share: TABLE_SHARE,
         };

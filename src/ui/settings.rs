@@ -132,11 +132,20 @@ impl SettingsWindow {
         }
     }
 
-    /// Draws the window if it is open; `settings` are changed in place. `data_folder` is where the history lives.
-    pub fn show(&mut self, ctx: &egui::Context, settings: &mut AppSettings, data_folder: Option<&Path>) {
+    /// Draws the window if it is open; `settings` are changed in place. `data_folder` is where the history lives;
+    /// `elevated` tells whether TCP probes can be chosen. Returns whether the user asked to restart Ping Watch with
+    /// administrator rights.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &mut AppSettings,
+        data_folder: Option<&Path>,
+        elevated: bool,
+    ) -> bool {
         if !self.open {
-            return;
+            return false;
         }
+        let mut restart_elevated = false;
         if self.logo.is_none() {
             self.logo = load_logo(ctx);
         }
@@ -158,7 +167,7 @@ impl SettingsWindow {
                 ui.spacing_mut().combo_width = COMBO_WIDTH;
                 match self.page {
                     Page::General => self.general(ui, settings),
-                    Page::Tracing => tracing(ui, settings),
+                    Page::Tracing => restart_elevated = tracing(ui, settings, elevated),
                     Page::Appearance => appearance(ui, settings),
                     Page::Language => language(ui, settings),
                     Page::About => self.about(ui, data_folder),
@@ -169,6 +178,7 @@ impl SettingsWindow {
         if modal.inner || modal.should_close() {
             self.open = false;
         }
+        restart_elevated
     }
 
     /// General: what the close button does, starting with Windows.
@@ -199,9 +209,11 @@ impl SettingsWindow {
     }
 }
 
-/// Tracing: what new targets start with, probe timeout and hop limit, history retention.
-fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
+/// Tracing: what new targets start with (TCP probes only with administrator rights, `elevated`), probe timeout
+/// and hop limit, history retention. Returns whether the user asked to restart with administrator rights.
+fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
     let language = ui.language();
+    let mut restart_elevated = false;
     settings_grid(ui, "settings-tracing", |ui| {
         ui.weak(tr!(ui, "New targets: interval"));
         tab::interval_choice(ui, &mut settings.defaults.interval);
@@ -217,6 +229,11 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
                     ui.selectable_value(&mut settings.defaults.period, period, period.label(language));
                 }
             });
+        ui.end_row();
+        ui.weak(tr!(ui, "New targets: probe"));
+        ui.horizontal(|ui| {
+            restart_elevated = tab::probe_choice(ui, &mut settings.defaults.probe, elevated).restart_elevated;
+        });
         ui.end_row();
         ui.weak(tr!(ui, "Wait for an answer"));
         choice(ui, "timeout", &mut settings.timeout, &TIMEOUTS, |timeout| {
@@ -245,8 +262,9 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings) {
     ui.add_space(10.0);
     ui.weak(tr!(
         ui,
-        "Targets you traced before keep their own interval, focus and period. Timeout and hop limit apply to traces started from now on."
+        "Targets you traced before keep their own interval, focus, period and probe. Timeout and hop limit apply to traces started from now on."
     ));
+    restart_elevated
 }
 
 /// Appearance: the theme (follow Windows, dark or light) and the latency zones.

@@ -1,7 +1,7 @@
 //! The user's list of targets, kept in the history database: seeded once with well-known targets, extended
 //! automatically by every new target traced, editable (address and an optional name) and prunable (presets too).
 //! The address family is determined once, when an address is added or changed, and stored with it. Each entry
-//! also keeps the trace settings last used for it (interval, focus, timeline period).
+//! also keeps the trace settings last used for it (interval, focus, timeline period, probe).
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::probe::tracer::Probe;
 use crate::store::history::{self, HistoryError};
 use crate::store::presets;
 use crate::store::settings::offered_interval;
@@ -26,6 +27,14 @@ const SCHEMA: &str = "
         interval_ms INTEGER, -- probe interval
         focus       TEXT,    -- Focus::key
         period_s    INTEGER  -- timeline period, seconds
+    );
+";
+/// The probe chosen per target, kept apart from the list's own table (created with it or later); a target without
+/// a row is probed by ICMP.
+const PROBES_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS target_probes (
+        target_id INTEGER PRIMARY KEY, -- saved_targets.id
+        probe     TEXT NOT NULL        -- Probe::key
     );
 ";
 
@@ -84,7 +93,12 @@ pub struct TraceSettings {
     pub focus: Focus,
     /// Period the timeline shows.
     pub period: Period,
+    /// What the hops are probed with.
+    pub probe: Probe,
 }
+
+/// A target's stored settings columns: interval (ms), focus key, period (s) and probe key; each may be NULL.
+type StoredSettings = (Option<i64>, Option<String>, Option<i64>, Option<String>);
 
 /// One entry of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +161,7 @@ impl TargetList {
             }
             transaction.commit()?;
         }
+        connection.execute_batch(PROBES_SCHEMA)?;
         Ok(Self { connection })
     }
 
@@ -222,24 +237,28 @@ impl TargetList {
     ///
     /// [`HistoryError::Db`] if SQLite fails.
     pub fn settings(&self, address: &str) -> Result<Option<TraceSettings>, HistoryError> {
-        let row: Option<(Option<i64>, Option<String>, Option<i64>)> = self
+        let row: Option<StoredSettings> = self
             .connection
             .query_row(
-                "SELECT interval_ms, focus, period_s FROM saved_targets WHERE address = ?1",
+                "SELECT interval_ms, focus, period_s, probe FROM saved_targets
+                 LEFT JOIN target_probes ON target_id = saved_targets.id WHERE address = ?1",
                 [normalize(address)],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((Some(interval_ms), Some(focus), Some(period_s))) = row else {
+        let Some((Some(interval_ms), Some(focus), Some(period_s), probe)) = row else {
             return Ok(None);
         };
+        let probe = probe.and_then(|key| Probe::from_key(&key)).unwrap_or_default();
         let interval = u64::try_from(interval_ms).ok().and_then(offered_interval);
         let focus = Focus::from_key(&focus);
         let period = u64::try_from(period_s).ok().and_then(Period::from_seconds);
-        Ok(interval
-            .zip(focus)
-            .zip(period)
-            .map(|((interval, focus), period)| TraceSettings { interval, focus, period }))
+        Ok(interval.zip(focus).zip(period).map(|((interval, focus), period)| TraceSettings {
+            interval,
+            focus,
+            period,
+            probe,
+        }))
     }
 
     /// Remembers `settings` for `address` (which must already be listed, see [`Self::remember`]).
@@ -250,10 +269,17 @@ impl TargetList {
     pub fn save_settings(&self, address: &str, settings: TraceSettings) -> Result<(), HistoryError> {
         let interval_ms = i64::try_from(settings.interval.as_millis()).unwrap_or(i64::MAX);
         let period_s = i64::try_from(settings.period.seconds()).unwrap_or(i64::MAX);
-        self.connection.execute(
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "UPDATE saved_targets SET interval_ms = ?2, focus = ?3, period_s = ?4 WHERE address = ?1",
             params![normalize(address), interval_ms, settings.focus.key(), period_s],
         )?;
+        transaction.execute(
+            "INSERT INTO target_probes (target_id, probe) SELECT id, ?2 FROM saved_targets WHERE address = ?1
+             ON CONFLICT (target_id) DO UPDATE SET probe = excluded.probe",
+            params![normalize(address), settings.probe.key()],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -261,9 +287,12 @@ impl TargetList {
     ///
     /// # Errors
     ///
-    /// [`HistoryError::Db`] if SQLite fails.
+    /// [`HistoryError::Db`] if SQLite fails; then nothing is deleted.
     pub fn delete(&self, id: i64) -> Result<(), HistoryError> {
-        self.connection.execute("DELETE FROM saved_targets WHERE id = ?1", [id])?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute("DELETE FROM target_probes WHERE target_id = ?1", [id])?;
+        transaction.execute("DELETE FROM saved_targets WHERE id = ?1", [id])?;
+        transaction.commit()?;
         Ok(())
     }
 }
@@ -342,10 +371,17 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
         assert_eq!(list.settings("9.9.9.9").ok(), Some(None), "never traced yet");
         list.remember("9.9.9.9", ip).expect("remembered");
-        let settings =
-            TraceSettings { interval: Duration::from_millis(500), focus: Focus::Minutes5, period: Period::Hour };
+        let settings = TraceSettings {
+            interval: Duration::from_millis(500),
+            focus: Focus::Minutes5,
+            period: Period::Hour,
+            probe: Probe::Tcp(8443),
+        };
         list.save_settings("9.9.9.9", settings).expect("saved");
         assert_eq!(list.settings(" 9.9.9.9 ").ok(), Some(Some(settings)));
+        let icmp = TraceSettings { probe: Probe::Icmp, ..settings };
+        list.save_settings("9.9.9.9", icmp).expect("saved again");
+        assert_eq!(list.settings("9.9.9.9").ok(), Some(Some(icmp)));
         assert_eq!(list.settings("1.1.1.1").ok(), Some(None), "other targets keep their own");
     }
 
