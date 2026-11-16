@@ -17,7 +17,7 @@ use crate::i18n::{Lang, Language, n, tr, trf};
 use crate::probe::names::{NameCache, ResolveError, resolve};
 use crate::probe::route::{Hop, Route};
 use crate::probe::tcp::TcpProber;
-use crate::probe::tracer::{Probe, TraceConfig, Tracer};
+use crate::probe::tracer::{Probe, ProbeError, TraceConfig, Tracer};
 use crate::snapshot::{AlertRow, Chart, HopRow, TargetReport};
 use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, HopKey, Recorder, Store};
@@ -486,7 +486,14 @@ impl Tab {
     pub fn problem(&self) -> Option<String> {
         match &self.state {
             State::Editing(Some(error)) => Some(error.clone()),
-            State::Running(session) => session.tracer.last_error().or_else(|| self.warning.clone()),
+            State::Running(session) => session
+                .tracer
+                .last_error()
+                .map(|error| match error {
+                    ProbeError::Known(text) => self.language.translate(text).to_owned(),
+                    ProbeError::Text(text) => text,
+                })
+                .or_else(|| self.warning.clone()),
             State::Editing(None) | State::Resolving(_) => self.warning.clone(),
         }
     }

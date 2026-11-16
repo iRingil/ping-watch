@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read as _};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::windows::io::AsRawSocket as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -14,8 +14,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
-use windows::Win32::Networking::WinSock::{RCVALL_ON, SIO_RCVALL, SOCKET, WSAIoctl};
+use windows::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
+use windows::Win32::Networking::WinSock::{
+    AF_INET, IN_ADDR, IN_ADDR_0, RCVALL_ON, SIO_RCVALL, SOCKADDR_IN, SOCKADDR_INET, SOCKET, WSAIoctl,
+};
 
+use crate::i18n::n;
 use crate::probe::route::ProbeOutcome;
 use crate::sync::lock;
 
@@ -35,21 +39,25 @@ const TCP_RST: u8 = 0x04;
 const TCP_ACK: u8 = 0x10;
 /// Windows' "access denied" socket error: the raw socket needs administrator rights.
 const WSAEACCES: i32 = 10013;
+/// Message of [`TcpError::NotElevated`], translated where it is shown.
+pub const NOT_ELEVATED: &str = n!("TCP probes need administrator rights");
+/// Message of [`TcpError::Blocked`], translated where it is shown.
+pub const BLOCKED: &str = n!("A firewall on this computer blocks Ping Watch's TCP connections");
 
 /// Error of a TCP probe itself (not a lost probe).
 #[derive(Debug, thiserror::Error)]
 pub enum TcpError {
     /// The raw socket that catches the answers can't be opened without administrator rights.
-    #[error("TCP probes need administrator rights")]
+    #[error("{}", NOT_ELEVATED)]
     NotElevated,
     /// The raw socket couldn't be opened or switched to receive everything.
     #[error("cannot listen for TCP probe answers: {0}")]
     Listen(io::Error),
     /// No local address leads to the target (no network).
     #[error("no route to {0}: {1}")]
-    Route(Ipv4Addr, io::Error),
+    Route(Ipv4Addr, windows::core::Error),
     /// A firewall on this computer doesn't let Ping Watch open TCP connections.
-    #[error("A firewall on this computer blocks Ping Watch's TCP connections")]
+    #[error("{}", BLOCKED)]
     Blocked,
     /// The probe's socket couldn't be set up.
     #[error("cannot send a TCP probe: {0}")]
@@ -93,7 +101,7 @@ impl TcpProber {
     /// [`TcpError`] if the answers can't be listened for (no administrator rights) or the probe can't be sent; no
     /// answer is [`ProbeOutcome::Lost`], not an error.
     pub fn probe(&self, target: Ipv4Addr, port: u16, ttl: u8, timeout: Duration) -> Result<ProbeOutcome, TcpError> {
-        let local = local_address(target, port)?;
+        let local = local_address(target)?;
         let listener = self.listener(local)?;
         let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(TcpError::Socket)?;
         socket.set_ttl_v4(u32::from(ttl)).map_err(TcpError::Socket)?;
@@ -212,15 +220,26 @@ fn receive_all(socket: &Socket) -> io::Result<()> {
     if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
-/// The local address Windows would send from to reach `target`:`port` (no packet is sent).
-fn local_address(target: Ipv4Addr, port: u16) -> Result<Ipv4Addr, TcpError> {
-    let route = |error| TcpError::Route(target, error);
-    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).map_err(route)?;
-    socket.connect(SocketAddrV4::new(target, port)).map_err(route)?;
-    match socket.local_addr().map_err(route)? {
-        SocketAddr::V4(address) => Ok(*address.ip()),
-        SocketAddr::V6(_) => Err(route(io::Error::other("an IPv6 route to an IPv4 target"))),
-    }
+/// The local address Windows sends from to reach `target`, from its routing table (no socket, no packet).
+fn local_address(target: Ipv4Addr) -> Result<Ipv4Addr, TcpError> {
+    let destination = SOCKADDR_INET {
+        Ipv4: SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_port: 0,
+            sin_addr: IN_ADDR { S_un: IN_ADDR_0 { S_addr: u32::from_ne_bytes(target.octets()) } },
+            sin_zero: [0; 8],
+        },
+    };
+    let mut route = MIB_IPFORWARD_ROW2::default();
+    let mut source = SOCKADDR_INET::default();
+    // SAFETY: `destination` is a filled IPv4 address; `route` and `source` are writable structs of the types the
+    // function fills; no interface or source address is imposed.
+    let result = unsafe { GetBestRoute2(None, 0, None, &raw const destination, 0, &raw mut route, &raw mut source) };
+    result.ok().map_err(|error| TcpError::Route(target, error))?;
+    // SAFETY: for an IPv4 destination the function writes an IPv4 source address, so `Ipv4` is the variant set;
+    // reading the `u32` of an `IN_ADDR` is valid for any bits.
+    let bits = unsafe { source.Ipv4.sin_addr.S_un.S_addr };
+    Ok(Ipv4Addr::from(bits.to_ne_bytes()))
 }
 
 /// If `packet` (an IPv4 packet received on `local`) answers a TCP probe: the probe's key and who answered. A
@@ -306,6 +325,11 @@ mod tests {
         let mut message = vec![icmp_type, 0, 0, 0, 0, 0, 0, 0];
         message.extend(syn);
         ip(PROTOCOL_ICMP, ROUTER, LOCAL, &message)
+    }
+
+    #[test]
+    fn the_local_address_comes_from_the_routing_table() {
+        assert_eq!(local_address(Ipv4Addr::LOCALHOST).ok(), Some(Ipv4Addr::LOCALHOST));
     }
 
     #[test]

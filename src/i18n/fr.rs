@@ -25,6 +25,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
         "A TCP SYN to a port, as a connection starts: passes firewalls that drop ping and reaches servers that ignore it",
         "Un SYN TCP vers un port, comme au début d'une connexion : passe les pare-feu qui bloquent le ping et atteint les serveurs qui l'ignorent",
     ),
+    (
+        "A firewall on this computer blocks Ping Watch's TCP connections",
+        "Un pare-feu sur cet ordinateur bloque les connexions TCP de Ping Watch",
+    ),
     ("A new version is available: see About", "Une nouvelle version est disponible : voir À propos"),
     ("A snapshot needs a running trace", "Un instantané nécessite une trace en cours"),
     ("About", "À propos"),
@@ -230,6 +234,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Start Ping Watch", "Lancer Ping Watch"),
     ("Started", "Début"),
     ("Status", "État"),
+    ("TCP probes need administrator rights", "Les sondes TCP demandent des droits d'administrateur"),
     ("TCP probes need administrator rights.", "Les sondes TCP demandent des droits d'administrateur."),
     (
         "TCP probes need administrator rights; probing by ICMP",

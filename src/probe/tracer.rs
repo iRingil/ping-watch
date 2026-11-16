@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::probe::icmp::{IcmpError, Pinger};
 use crate::probe::route::{ProbeOutcome, Route, RouteState, Sample};
-use crate::probe::tcp::TcpProber;
+use crate::probe::tcp::{self, TcpError, TcpProber};
 use crate::store::history::unix_ms;
 use crate::sync::lock;
 
@@ -106,14 +106,29 @@ impl Prober {
     }
 
     /// Probes hop `ttl` towards `target`, waiting up to `timeout`; the error is shown to the user.
-    fn probe(&self, target: IpAddr, ttl: u8, timeout: Duration) -> Result<ProbeOutcome, String> {
+    fn probe(&self, target: IpAddr, ttl: u8, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
         match self {
-            Self::Icmp(pinger) => pinger.probe(target, ttl, timeout).map_err(|error| error.to_string()),
+            Self::Icmp(pinger) => {
+                pinger.probe(target, ttl, timeout).map_err(|error| ProbeError::Text(error.to_string()))
+            }
             Self::Tcp { prober, target, port } => {
-                prober.probe(*target, *port, ttl, timeout).map_err(|error| error.to_string())
+                prober.probe(*target, *port, ttl, timeout).map_err(|error| match error {
+                    TcpError::NotElevated => ProbeError::Known(tcp::NOT_ELEVATED),
+                    TcpError::Blocked => ProbeError::Known(tcp::BLOCKED),
+                    error => ProbeError::Text(error.to_string()),
+                })
             }
         }
     }
+}
+
+/// Why probes fail, as shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeError {
+    /// One of the app's own messages (marked for translation), shown in the user's language.
+    Known(&'static str),
+    /// A message from Windows, shown as it is.
+    Text(String),
 }
 
 /// Settings the workers follow, changeable while they run.
@@ -137,7 +152,7 @@ struct Shared {
     /// Wakes waiting workers when `control` changes.
     wake: Condvar,
     /// Error of the latest failed probe, cleared by the next answer.
-    last_error: Mutex<Option<String>>,
+    last_error: Mutex<Option<ProbeError>>,
 }
 
 impl Shared {
@@ -219,7 +234,7 @@ impl Tracer {
     }
 
     /// Error of the latest failed probe (network down, ...), `None` once probes get answers again.
-    pub fn last_error(&self) -> Option<String> {
+    pub fn last_error(&self) -> Option<ProbeError> {
         lock(&self.shared.last_error).clone()
     }
 
@@ -273,7 +288,7 @@ fn probe_loop(
                 Err(error) => {
                     // No answer is a lost probe whatever the reason (with the network down Windows fails at once
                     // instead of timing out); the error itself is shown until a probe gets through again.
-                    log::debug!("probe {target} ttl {ttl}: {error}");
+                    log::debug!("probe {target} ttl {ttl}: {error:?}");
                     *lock(&shared.last_error) = Some(error);
                     ProbeOutcome::Lost
                 }
