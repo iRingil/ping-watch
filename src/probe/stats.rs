@@ -70,14 +70,18 @@ impl HopStats {
         self.received
     }
 
+    /// Number of probes that got no answer.
+    pub fn lost(&self) -> u64 {
+        self.sent.saturating_sub(self.received)
+    }
+
     /// Share of unanswered probes in percent, `0.0` before the first probe.
     #[expect(clippy::cast_precision_loss, reason = "counters stay far below 2^52")]
     pub fn loss_percent(&self) -> f64 {
         if self.sent == 0 {
             return 0.0;
         }
-        let lost = self.sent.saturating_sub(self.received);
-        lost as f64 * 100.0 / self.sent as f64
+        self.lost() as f64 * 100.0 / self.sent as f64
     }
 
     /// Fastest round-trip time, `None` until the first answer.

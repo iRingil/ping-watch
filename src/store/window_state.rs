@@ -41,6 +41,11 @@ const SCHEMA: &str = "
         width      REAL    NOT NULL,
         PRIMARY KEY (table_name, position)
     ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS hidden_columns (
+        table_name TEXT    NOT NULL,
+        position   INTEGER NOT NULL,
+        PRIMARY KEY (table_name, position)
+    ) WITHOUT ROWID;
 ";
 /// Stored keys, in the order of [`WindowState::values`].
 const KEYS: [&str; 7] = ["x", "y", "width", "height", "maximized", "minimized", "table_share"];
@@ -286,6 +291,38 @@ impl WindowStore {
         Ok(())
     }
 
+    /// Positions of the columns the user hid in table `name`, in order.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails.
+    pub fn load_hidden_columns(&self, name: &str) -> Result<Vec<usize>, HistoryError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT position FROM hidden_columns WHERE table_name = ?1 ORDER BY position")?;
+        let positions = statement.query_map([name], |row| row.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(positions.into_iter().filter_map(|position| usize::try_from(position).ok()).collect())
+    }
+
+    /// Stores `positions` as the hidden columns of table `name`, replacing the previous ones.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Db`] if SQLite fails; then nothing is stored.
+    pub fn save_hidden_columns(&mut self, name: &str, positions: &[usize]) -> Result<(), HistoryError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM hidden_columns WHERE table_name = ?1", [name])?;
+        for position in positions {
+            let position = i64::try_from(*position).unwrap_or(i64::MAX);
+            transaction.execute(
+                "INSERT INTO hidden_columns (table_name, position) VALUES (?1, ?2)",
+                params![name, position],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Stores `state`.
     ///
     /// # Errors
@@ -381,6 +418,18 @@ mod tests {
         store.save_columns("hops", &[44.0, 60.0]).expect("saved again");
         assert_eq!(store.load_columns("hops").ok(), Some(vec![44.0, 60.0]));
         assert_eq!(store.load_columns("targets").ok(), Some(vec![120.0]));
+    }
+
+    #[test]
+    fn hidden_columns_round_trip_per_table() {
+        let mut store = WindowStore::open_in_memory().expect("store opens");
+        assert_eq!(store.load_hidden_columns("hops").ok(), Some(Vec::new()));
+        store.save_hidden_columns("hops", &[8, 3]).expect("saved");
+        store.save_hidden_columns("targets", &[2]).expect("saved");
+        assert_eq!(store.load_hidden_columns("hops").ok(), Some(vec![3, 8]));
+        store.save_hidden_columns("hops", &[]).expect("saved again");
+        assert_eq!(store.load_hidden_columns("hops").ok(), Some(Vec::new()));
+        assert_eq!(store.load_hidden_columns("targets").ok(), Some(vec![2]));
     }
 
     #[test]

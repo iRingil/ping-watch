@@ -46,6 +46,8 @@ pub struct HopRow {
     pub jitter: Option<f64>,
     /// Packet loss, percent.
     pub loss: f64,
+    /// Probes lost over the focus period.
+    pub lost: u64,
 }
 
 /// A latency and loss chart: the same series the window's timeline draws.
@@ -304,7 +306,7 @@ fn write_all(
                 write_numbers(page, hop, language);
                 let _ = write!(page, "<td>{}</td>", latency_bar(hop, scale, zones));
             }
-            None => page.push_str(&"<td></td>".repeat(7)),
+            None => page.push_str(&"<td></td>".repeat(8)),
         }
         page.push_str("</tr>");
     }
@@ -316,14 +318,14 @@ fn write_all(
 
 /// The titles of the number columns and the latency bar column (its scale `0–scale ms`), closing the header row.
 fn write_number_titles(page: &mut String, scale: f64, language: Language) {
-    for title in [n!("Avg"), n!("Min"), n!("Max"), n!("Cur"), n!("Jitter"), n!("PL%")] {
+    for title in [n!("Avg"), n!("Min"), n!("Max"), n!("Cur"), n!("Jitter"), n!("PL%"), n!("PL pcs")] {
         let _ = write!(page, "<th class=\"num\">{}</th>", escape(language.translate(title)));
     }
     let latency = trf!(language, "Latency (0\u{2013}{scale} ms)", scale = format!("{scale:.0}"));
     let _ = write!(page, "<th>{}</th></tr>", escape(&latency));
 }
 
-/// The Avg, Min, Max, Cur, Jitter and PL% cells of a hop.
+/// The Avg, Min, Max, Cur, Jitter, PL% and PL pcs cells of a hop.
 fn write_numbers(page: &mut String, hop: &HopRow, language: Language) {
     let ms = |value: Option<f64>| value.map_or_else(|| "-".to_owned(), |value| language.decimal(value));
     for value in [hop.avg, hop.min, hop.max] {
@@ -336,7 +338,12 @@ fn write_numbers(page: &mut String, hop: &HopRow, language: Language) {
     };
     let _ = write!(page, "<td class=\"num\">{current}</td><td class=\"num\">{}</td>", ms(hop.jitter));
     let loss_class = if hop.loss > 0.0 { "num bad" } else { "num" };
-    let _ = write!(page, "<td class=\"{loss_class}\">{}</td>", language.decimal(hop.loss));
+    let _ = write!(
+        page,
+        "<td class=\"{loss_class}\">{}</td><td class=\"{loss_class}\">{}</td>",
+        language.decimal(hop.loss),
+        hop.lost
+    );
 }
 
 /// The scale of the latency bars for `zones`, as the app sets it (see [`Zones::bar_scale`]).
@@ -638,6 +645,7 @@ mod tests {
             cur: Some(avg),
             jitter: Some(0.5),
             loss,
+            lost: 0,
         }
     }
 

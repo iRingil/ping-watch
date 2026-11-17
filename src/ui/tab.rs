@@ -1020,6 +1020,7 @@ fn hop_row(hop: &Hop, names: &NameCache) -> HopRow {
         cur: stats.last().map(latency_bars::millis),
         jitter: stats.jitter().map(latency_bars::millis),
         loss: stats.loss_percent(),
+        lost: stats.lost(),
     }
 }
 

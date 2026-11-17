@@ -188,6 +188,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ),
     ("Open", "Abrir"),
     ("Open its tab", "Abrir su pestaña"),
+    ("PL pcs", "Pérd n.º"),
     ("PL%", "Pérd%"),
     ("Packet loss", "Pérdida de paquetes"),
     ("Pale panel, dark text", "Panel claro, texto oscuro"),

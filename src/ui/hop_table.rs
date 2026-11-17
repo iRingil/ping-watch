@@ -36,7 +36,7 @@ const NUMBER_WIDTH: f32 = 58.0;
 /// Diameter of the hop number badge.
 const BADGE_SIZE: f32 = 17.0;
 /// Column titles and whether the column is numeric (right-aligned).
-const HEADERS: [(&str, bool); 10] = [
+const HEADERS: [(&str, bool); 11] = [
     (n!("Hop"), false),
     (n!("Count"), true),
     (n!("IP"), false),
@@ -47,7 +47,12 @@ const HEADERS: [(&str, bool); 10] = [
     (n!("Cur"), true),
     (n!("Jitter"), true),
     (n!("PL%"), true),
+    (n!("PL pcs"), true),
 ];
+/// Position of the Name column, which takes the room the others leave by default.
+const NAME_COLUMN: usize = 3;
+/// Columns that can't be hidden: Hop (it also paints the header band).
+const FIXED_COLUMNS: [usize; 1] = [0];
 
 /// How bad a hop's packet loss is; picks the badge and PL% color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +90,7 @@ impl LossLevel {
 /// Draws the hop table of `route` (just the header without one) with the latency bars; at most `limit` hops are
 /// shown, those after the first hop beyond it are folded into one row. Hop names come from `names`, the `selected` hop is
 /// highlighted, `focus` labels the period under the bars. Returns the TTL of the hop row clicked in this frame. The
-/// columns can be dragged wider or narrower; `columns` keeps their widths.
+/// columns can be dragged wider or narrower and hidden from the header's right-click menu; `columns` keeps them.
 pub fn show(
     ui: &mut Ui,
     route: Option<&Route>,
@@ -107,13 +112,21 @@ pub fn show(
     let mut body_top = f32::NEG_INFINITY;
     // One table state for all tabs: a column dragged in one tab is that wide in the others.
     columns::scope(ui, "hop-table", |ui| {
-        // Default widths: the latency bars get their share, Name gets whatever the fixed columns leave.
+        // Default widths: the latency bars get their share, Name gets whatever the other shown columns leave.
         let available = ui.available_width();
         let latency_width = (available * LATENCY_SHARE).max(LATENCY_MIN_WIDTH);
-        let fixed = HOP_WIDTH + NUMBER_WIDTH * 7.0 + IP_WIDTH + latency_width;
-        let name_width = (available - fixed).max(80.0);
-        let mut defaults = vec![HOP_WIDTH, NUMBER_WIDTH, IP_WIDTH, name_width];
-        defaults.extend([NUMBER_WIDTH; 6]);
+        let mut defaults = vec![HOP_WIDTH, NUMBER_WIDTH, IP_WIDTH, 0.0];
+        defaults.extend([NUMBER_WIDTH; HEADERS.len() - 4]);
+        let others: f32 = defaults
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| columns.is_shown(*index))
+            .map(|(_, width)| *width)
+            .sum();
+        if let Some(name) = defaults.get_mut(NAME_COLUMN) {
+            *name = (available - others - latency_width).max(80.0);
+        }
+        let shown = columns.shown().to_vec();
         let builder = TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
@@ -123,33 +136,37 @@ pub fn show(
             .columns(builder, defaults, available, LATENCY_MIN_WIDTH)
             .header(HEADER_HEIGHT, |mut header| {
                 for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
-                    header.col(|ui| {
+                    let cell = columns::cell(&mut header, &shown, index, |ui| {
                         header_widths.push(ui.max_rect().width());
                         let title = ui.language().translate(title);
                         header_cell(ui, index == 0, numeric, title, available);
                     });
+                    if let Some(response) = cell {
+                        columns.menu(&response, &HEADERS.map(|(title, _)| title), &FIXED_COLUMNS);
+                    }
                 }
-                header.col(|ui| {
+                let (_, latency) = header.col(|ui| {
                     body_top = ui.max_rect().bottom();
                     latency_bars::header(ui, scale_ms);
                 });
+                columns.menu(&latency, &HEADERS.map(|(title, _)| title), &FIXED_COLUMNS);
             })
             .body(|mut body| {
                 for (index, hop) in head.iter().chain(tail).enumerate() {
                     if index == head.len() && hidden > 0 {
-                        body.row(ROW_HEIGHT, |mut row| hidden_cell = hidden_row(&mut row));
+                        body.row(ROW_HEIGHT, |mut row| hidden_cell = hidden_row(&mut row, &shown));
                         break_at = Some(averages.len());
                     }
                     body.row(ROW_HEIGHT, |mut row| {
                         row.set_selected(selected == Some(hop.ttl));
-                        averages.extend(hop_row(&mut row, hop, names, scale_ms));
+                        averages.extend(hop_row(&mut row, &shown, hop, names, scale_ms));
                         if row.response().clicked() {
                             clicked = Some(hop.ttl);
                         }
                     });
                 }
                 if let Some(hop) = target_hop {
-                    body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &hop.stats, focus));
+                    body.row(ROW_HEIGHT, |mut row| round_trip_row(&mut row, &shown, &hop.stats, focus));
                 }
             });
         columns.take_header(&header_widths);
@@ -163,38 +180,43 @@ pub fn show(
     clicked
 }
 
-/// Fills in the row of one hop; returns the position of its average latency marker, if drawn.
-fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f64) -> Option<Pos2> {
-    row.col(|ui| badge(ui, hop));
-    row.col(|ui| cell(ui, true, hop.stats.sent().to_string()));
+/// Fills in the row of one hop (the `shown` columns); returns the position of its average latency marker, if
+/// drawn.
+fn hop_row(row: &mut TableRow<'_, '_>, shown: &[bool], hop: &Hop, names: &NameCache, scale_ms: f64) -> Option<Pos2> {
+    columns::cell(row, shown, 0, |ui| badge(ui, hop));
+    columns::cell(row, shown, 1, |ui| cell(ui, true, hop.stats.sent().to_string()));
     match hop.address {
         Some(ip) => {
             // The column fits an IPv4 address; a longer IPv6 one is clipped, so the whole address is on hover.
-            let (_, address) = row.col(|ui| cell(ui, false, ip.to_string()));
-            address.on_hover_text(ip.to_string());
+            if let Some(address) = columns::cell(row, shown, 2, |ui| cell(ui, false, ip.to_string())) {
+                address.on_hover_text(ip.to_string());
+            }
             let name = names.get(ip).unwrap_or_else(|| ip.to_string());
-            let (_, name_cell) = row.col(|ui| cell(ui, false, name.clone()));
-            name_cell.on_hover_text(name);
+            if let Some(name_cell) = columns::cell(row, shown, NAME_COLUMN, |ui| cell(ui, false, name.clone())) {
+                name_cell.on_hover_text(name);
+            }
         }
         None => {
-            row.col(|ui| cell(ui, false, "*"));
-            row.col(|ui| cell(ui, false, tr!(ui, "No response")));
+            columns::cell(row, shown, 2, |ui| cell(ui, false, "*"));
+            columns::cell(row, shown, NAME_COLUMN, |ui| cell(ui, false, tr!(ui, "No response")));
         }
     }
-    stat_cols(row, &hop.stats, false);
+    stat_cols(row, shown, &hop.stats, false);
     let mut average = None;
     row.col(|ui| average = latency_bars::cell(ui, &hop.stats, hop.address.is_some(), scale_ms));
     average
 }
 
-/// Takes the row standing for the hidden hops of a route: empty cells, painted over by [`paint_hidden`]
-/// once the table is drawn. Returns where the row starts (its left top) and its height.
-fn hidden_row(row: &mut TableRow<'_, '_>) -> Option<Rect> {
+/// Takes the row standing for the hidden hops of a route: empty cells in the `shown` columns, painted over by
+/// [`paint_hidden`] once the table is drawn. Returns the rect of its first cell.
+fn hidden_row(row: &mut TableRow<'_, '_>, shown: &[bool]) -> Option<Rect> {
     let mut first = None;
     row.col(|ui| first = Some(ui.max_rect()));
-    for _ in 0..RESIZABLE_COLUMNS {
+    // The first (Hop) column is always shown; the latency column too.
+    for _ in shown.iter().skip(1).filter(|shown| **shown) {
         row.col(|_| {});
     }
+    row.col(|_| {});
     first
 }
 
@@ -224,20 +246,27 @@ fn paint_hidden(ui: &Ui, cell: Rect, row_width: f32, body_top: f32, hidden: usiz
 }
 
 /// Fills the summary row of the whole round trip (the target hop), with the focus period under the bars.
-/// The row reads as a summary, not another hop: a header-colored band with a rule above it.
-fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&str>) {
+/// The row reads as a summary, not another hop: a header-colored band with a rule above it. Its title sits in the
+/// Name column, or in IP while Name is hidden.
+fn round_trip_row(row: &mut TableRow<'_, '_>, shown: &[bool], stats: &HopStats, focus: Option<&str>) {
     let emphasis = |text: String| RichText::new(text).font(theme::heading_font(14.5));
-    row.col(summary_band);
-    row.col(|ui| {
+    let title_column = if shown.get(NAME_COLUMN).copied().unwrap_or(false) { NAME_COLUMN } else { 2 };
+    let title = |ui: &mut Ui| {
+        summary_band(ui);
+        cell(ui, true, emphasis(tr!(ui, "Round trip (ms)").to_owned()));
+    };
+    columns::cell(row, shown, 0, summary_band);
+    columns::cell(row, shown, 1, |ui| {
         summary_band(ui);
         cell(ui, true, emphasis(stats.sent().to_string()));
     });
-    row.col(summary_band);
-    row.col(|ui| {
-        summary_band(ui);
-        cell(ui, true, emphasis(tr!(ui, "Round trip (ms)").to_owned()));
-    });
-    stat_cols(row, stats, true);
+    if title_column == 2 {
+        columns::cell(row, shown, 2, title);
+    } else {
+        columns::cell(row, shown, 2, summary_band);
+        columns::cell(row, shown, NAME_COLUMN, title);
+    }
+    stat_cols(row, shown, stats, true);
     row.col(|ui| {
         summary_band(ui);
         if let Some(focus) = focus {
@@ -283,20 +312,21 @@ fn summary_band(ui: &mut Ui) {
     ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.5, theme::palette(ui).ink_muted));
 }
 
-/// Fills the Avg, Min, Max, Cur, Jitter and PL% columns; `summary` gives them the summary row's band.
-fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats, summary: bool) {
+/// Fills the Avg, Min, Max, Cur, Jitter, PL% and PL pcs columns that are `shown`; `summary` gives them the summary
+/// row's band.
+fn stat_cols(row: &mut TableRow<'_, '_>, shown: &[bool], stats: &HopStats, summary: bool) {
     let band = |ui: &mut Ui| {
         if summary {
             summary_band(ui);
         }
     };
-    for value in [stats.average(), stats.best(), stats.worst()] {
-        row.col(|ui| {
+    for (position, value) in (4..).zip([stats.average(), stats.best(), stats.worst()]) {
+        columns::cell(row, shown, position, |ui| {
             band(ui);
             cell(ui, true, format_ms(value, ui.language()));
         });
     }
-    row.col(|ui| {
+    columns::cell(row, shown, 7, |ui| {
         band(ui);
         let current = match stats.last() {
             Some(rtt) => format_ms(Some(rtt), ui.language()),
@@ -305,17 +335,24 @@ fn stat_cols(row: &mut TableRow<'_, '_>, stats: &HopStats, summary: bool) {
         };
         cell(ui, true, current);
     });
-    row.col(|ui| {
+    columns::cell(row, shown, 8, |ui| {
         band(ui);
         cell(ui, true, format_ms(stats.jitter(), ui.language()));
     });
     let loss = stats.loss_percent();
-    row.col(|ui| {
+    let colored = |ui: &Ui, text: String| {
+        let text = RichText::new(text);
+        if loss > 0.0 { text.color(LossLevel::of(loss).color(theme::palette(ui))) } else { text }
+    };
+    columns::cell(row, shown, 9, |ui| {
         band(ui);
-        let loss_text = RichText::new(ui.language().decimal(loss));
-        let loss_text =
-            if loss > 0.0 { loss_text.color(LossLevel::of(loss).color(theme::palette(ui))) } else { loss_text };
-        cell(ui, true, loss_text);
+        let text = colored(ui, ui.language().decimal(loss));
+        cell(ui, true, text);
+    });
+    columns::cell(row, shown, 10, |ui| {
+        band(ui);
+        let text = colored(ui, stats.lost().to_string());
+        cell(ui, true, text);
     });
 }
 

@@ -35,10 +35,24 @@ const TARGET_WIDTH: f32 = 208.0;
 const IP_WIDTH: f32 = 238.0;
 /// Width of a numeric column.
 const NUMBER_WIDTH: f32 = 70.0;
-/// Number of numeric columns (Hops, Avg, Min, Max, Cur, PL%).
-const NUMBER_COLUMNS: usize = 6;
-/// Number of columns that can be dragged: all but the latency bars (Status, Target, IP and the numbers).
-const RESIZABLE_COLUMNS: usize = NUMBER_COLUMNS + 3;
+/// Column titles and whether the column is numeric (right-aligned): all but the latency bars, which come last.
+const HEADERS: [(&str, bool); 10] = [
+    (n!("Status"), false),
+    (n!("Target"), false),
+    (n!("IP"), false),
+    (n!("Hops"), true),
+    (n!("Avg"), true),
+    (n!("Min"), true),
+    (n!("Max"), true),
+    (n!("Cur"), true),
+    (n!("PL%"), true),
+    (n!("PL pcs"), true),
+];
+/// Number of columns that can be dragged: all but the latency bars.
+const RESIZABLE_COLUMNS: usize = HEADERS.len();
+/// Columns that can't be hidden: Status (its checkbox shows the chart; it also paints the header band) and
+/// Target (the link to its tab).
+const FIXED_COLUMNS: [usize; 2] = [0, 1];
 /// Narrowest the latency column gets.
 const LATENCY_MIN_WIDTH: f32 = 160.0;
 /// Least height of a chart: the charts share the pane equally, and below this the pane scrolls instead.
@@ -123,6 +137,7 @@ impl AllTargets {
                     cur: hop.stats.last().map(latency_bars::millis),
                     jitter: hop.stats.jitter().map(latency_bars::millis),
                     loss: hop.stats.loss_percent(),
+                    lost: hop.stats.lost(),
                 });
                 SummaryRow {
                     title: overview.title.clone(),
@@ -250,11 +265,16 @@ impl AllTargets {
         let row_width = ui.available_width();
         // Default widths: in a narrow window Target and IP give up room (clipped), so the numbers and the bars stay
         // in view.
-        #[expect(clippy::cast_precision_loss, reason = "a handful of columns")]
-        let fixed = STATUS_WIDTH + NUMBER_WIDTH * NUMBER_COLUMNS as f32 + LATENCY_MIN_WIDTH;
-        let squeeze = ((row_width - fixed) / (TARGET_WIDTH + IP_WIDTH)).clamp(0.3, 1.0);
+        let shown = self.columns.shown().to_vec();
+        let numbers: f32 = (3..RESIZABLE_COLUMNS)
+            .filter(|position| self.columns.is_shown(*position))
+            .map(|_| NUMBER_WIDTH)
+            .sum();
+        let ip = if self.columns.is_shown(2) { IP_WIDTH } else { 0.0 };
+        let fixed = STATUS_WIDTH + numbers + LATENCY_MIN_WIDTH;
+        let squeeze = ((row_width - fixed) / (TARGET_WIDTH + ip)).clamp(0.3, 1.0);
         let mut defaults = vec![STATUS_WIDTH, TARGET_WIDTH * squeeze, IP_WIDTH * squeeze];
-        defaults.extend([NUMBER_WIDTH; NUMBER_COLUMNS]);
+        defaults.extend([NUMBER_WIDTH; RESIZABLE_COLUMNS - 3]);
         let mut request = None;
         let mut toggle = None;
         let mut header_widths = Vec::new();
@@ -265,33 +285,26 @@ impl AllTargets {
         self.columns
             .columns(builder, defaults, row_width, LATENCY_MIN_WIDTH)
             .header(ROW_HEIGHT, |mut header| {
-                // Title and whether the column is numeric (right-aligned).
-                let columns = [
-                    (n!("Status"), false),
-                    (n!("Target"), false),
-                    (n!("IP"), false),
-                    (n!("Hops"), true),
-                    (n!("Avg"), true),
-                    (n!("Min"), true),
-                    (n!("Max"), true),
-                    (n!("Cur"), true),
-                    (n!("PL%"), true),
-                ];
-                for (index, (title, numeric)) in columns.into_iter().enumerate() {
-                    header.col(|ui| {
+                let titles = HEADERS.map(|(title, _)| title);
+                for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
+                    let cell = columns::cell(&mut header, &shown, index, |ui| {
                         header_widths.push(ui.max_rect().width());
                         let title = ui.language().translate(title);
                         hop_table::header_cell(ui, index == 0, numeric, title, row_width);
                     });
+                    if let Some(response) = cell {
+                        self.columns.menu(&response, &titles, &FIXED_COLUMNS);
+                    }
                 }
-                header.col(|ui| latency_bars::header(ui, scale_ms));
+                let (_, latency) = header.col(|ui| latency_bars::header(ui, scale_ms));
+                self.columns.menu(&latency, &titles, &FIXED_COLUMNS);
             })
             .body(|mut body| {
                 for (index, overview) in overviews.iter().enumerate() {
                     let charted = tabs.get(index).is_some_and(Tab::is_charted);
                     body.row(ROW_HEIGHT, |mut row| {
                         row.set_selected(self.selected.as_deref() == Some(overview.title.as_str()));
-                        row.col(|ui| {
+                        columns::cell(&mut row, &shown, 0, |ui| {
                             ui.add_space(4.0);
                             let mut ticked = charted;
                             if ui.checkbox(&mut ticked, "").on_hover_text(tr!(ui, "Show the chart below")).changed() {
@@ -304,7 +317,7 @@ impl AllTargets {
                                 ui.label(RichText::new(&overview.status).color(theme::palette(ui).ink_muted));
                             }
                         });
-                        row.col(|ui| {
+                        columns::cell(&mut row, &shown, 1, |ui| {
                             ui.add_space(4.0);
                             let link = egui::Link::new(
                                 RichText::new(&overview.title)
@@ -315,24 +328,29 @@ impl AllTargets {
                                 request = Some(Request::Open(index));
                             }
                         });
-                        row.col(|ui| {
+                        columns::cell(&mut row, &shown, 2, |ui| {
                             hop_table::cell(ui, false, overview.target.map(|ip| ip.to_string()).unwrap_or_default());
                         });
-                        row.col(|ui| {
+                        columns::cell(&mut row, &shown, 3, |ui| {
                             hop_table::cell(ui, true, overview.hops.map(|hops| hops.to_string()).unwrap_or_default());
                         });
                         let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
-                        for value in [
+                        for (position, value) in (4..).zip([
                             stats.and_then(|stats| stats.average()),
                             stats.and_then(|stats| stats.best()),
                             stats.and_then(|stats| stats.worst()),
                             stats.and_then(|stats| stats.last()),
-                        ] {
-                            row.col(|ui| hop_table::cell(ui, true, format_ms(value, ui.language())));
+                        ]) {
+                            columns::cell(&mut row, &shown, position, |ui| {
+                                hop_table::cell(ui, true, format_ms(value, ui.language()));
+                            });
                         }
-                        row.col(|ui| {
+                        columns::cell(&mut row, &shown, 8, |ui| {
                             let loss = stats.map(|stats| ui.language().decimal(stats.loss_percent()));
                             hop_table::cell(ui, true, loss.unwrap_or_default());
+                        });
+                        columns::cell(&mut row, &shown, 9, |ui| {
+                            hop_table::cell(ui, true, stats.map(|stats| stats.lost().to_string()).unwrap_or_default());
                         });
                         row.col(|ui| {
                             if let Some(stats) = stats {
