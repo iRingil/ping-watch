@@ -501,6 +501,9 @@ fn draw_charts(
     let utc_offset_s = i64::from(chrono::Local::now().offset().local_minus_utc());
     let base = |id: &'static str, scale: f64, height: f32| {
         Plot::new(id)
+            // The pointer's time shows on every chart of the page (only one page is drawn at a time); the values
+            // differ in scale, so only the time is linked.
+            .link_cursor(egui::Id::unique("timeline-cursor"), [true, false])
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
