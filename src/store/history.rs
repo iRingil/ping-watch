@@ -409,12 +409,33 @@ impl Store {
     }
 }
 
-/// Background writer of one target's samples; flushes and stops on drop.
+/// What the recorder's thread receives.
+#[derive(Debug)]
+enum Record {
+    /// A sample to write.
+    Sample(Sample),
+    /// Write what came before and stop; probes still in flight are not waited for.
+    Stop,
+}
+
+/// Where a tracer sends its samples: the channel of a [`Recorder`].
+#[derive(Debug, Clone)]
+pub struct HistorySender(Sender<Record>);
+
+impl HistorySender {
+    /// Queues `sample` for writing; `false` if the recorder is gone.
+    pub fn send(&self, sample: Sample) -> bool {
+        self.0.send(Record::Sample(sample)).is_ok()
+    }
+}
+
+/// Background writer of one target's samples; on drop it writes what is queued and stops at once, without waiting
+/// for the tracer's probes in flight.
 #[derive(Debug)]
 pub struct Recorder {
-    /// Channel the tracer sends samples into; `None` only while dropping.
-    sender: Option<Sender<Sample>>,
-    /// Writer thread.
+    /// Channel the tracer's samples go into.
+    sender: Sender<Record>,
+    /// Writer thread; `None` only while dropping.
     worker: Option<JoinHandle<()>>,
 }
 
@@ -431,19 +452,21 @@ impl Recorder {
         let worker = thread::Builder::new()
             .name("history".to_owned())
             .spawn(move || record_loop(store, target_id, &receiver))?;
-        Ok(Self { sender: Some(sender), worker: Some(worker) })
+        Ok(Self { sender, worker: Some(worker) })
     }
 
     /// A sender for the tracer's workers.
-    pub fn sender(&self) -> Option<Sender<Sample>> {
-        self.sender.clone()
+    pub fn sender(&self) -> HistorySender {
+        HistorySender(self.sender.clone())
     }
 }
 
 impl Drop for Recorder {
     fn drop(&mut self) {
-        // The loop ends once every sender (ours and the tracer's) is gone, after a final flush.
-        self.sender = None;
+        // Queued after every sample sent so far: the loop writes them, then ends.
+        if self.sender.send(Record::Stop).is_err() {
+            log::debug!("history thread is gone already");
+        }
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
         {
@@ -452,8 +475,8 @@ impl Drop for Recorder {
     }
 }
 
-/// Writer body: collects samples and writes them every [`FLUSH_INTERVAL`].
-fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Sample>) {
+/// Writer body: collects samples and writes them every [`FLUSH_INTERVAL`], until [`Record::Stop`].
+fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Record>) {
     let mut batch = Vec::new();
     let mut connected = true;
     while connected {
@@ -461,9 +484,9 @@ fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Sample>) {
         loop {
             let wait = flush_at.map_or(FLUSH_INTERVAL, |at| at.saturating_duration_since(Instant::now()));
             match receiver.recv_timeout(wait) {
-                Ok(sample) => batch.push(sample),
+                Ok(Record::Sample(sample)) => batch.push(sample),
                 Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => {
+                Ok(Record::Stop) | Err(RecvTimeoutError::Disconnected) => {
                     connected = false;
                     break;
                 }
@@ -708,12 +731,13 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("ping-watch-test-{}", std::process::id()));
         let path = folder.join("history.sqlite");
         let recorder = Recorder::start(&path, "example").expect("recorder starts");
-        let sender = recorder.sender().expect("sender available");
+        let sender = recorder.sender();
         // A current timestamp, or the recorder's first prune would delete the sample as expired.
         let now = unix_ms(SystemTime::now());
-        sender.send(reply(1, now, 10)).expect("recorder is listening");
-        drop(sender);
+        assert!(sender.send(reply(1, now, 10)), "recorder is listening");
+        // A tracer's sender still alive doesn't keep the recorder from stopping.
         drop(recorder);
+        assert!(!sender.send(reply(1, now, 10)), "recorder stopped");
 
         let store = Store::open(&path).expect("database reopens");
         let target = store.target_id("example").expect("target exists");

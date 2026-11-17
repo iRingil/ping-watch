@@ -8,8 +8,8 @@
 //!
 //! An instance restarted with administrator rights would create these objects with an administrators-only default
 //! DACL and a High integrity label, which an ordinary process of the same user can neither open nor signal; so they
-//! get a descriptor of their own: the session's interactive user, SYSTEM and administrators may use them, and their
-//! label is Medium.
+//! get a descriptor of their own: the session's interactive user may signal and wait for them, SYSTEM and
+//! administrators may do anything, and their label is Medium.
 
 use std::thread;
 
@@ -30,10 +30,10 @@ const NAMES: Names = Names {
     quit: w!("Local\\iRingil.PingWatch.Quit"),
     running: w!("Local\\iRingil.PingWatch.Running"),
 };
-/// Security of the objects: full access (which opening an existing event by `CreateEventW` asks for) to
-/// interactive users, SYSTEM and administrators; Medium integrity, so a process without administrator rights may
-/// signal or see the objects of an instance that has them.
-const SECURITY: PCWSTR = w!("D:(A;;GA;;;IU)(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;ME)");
+/// Security of the objects: interactive users may only signal and wait for them (`EVENT_MODIFY_STATE |
+/// SYNCHRONIZE`: no closing, no changing their security), SYSTEM and administrators have full access; Medium
+/// integrity, so a process without administrator rights may signal or see the objects of an instance that has them.
+const SECURITY: PCWSTR = w!("D:(A;;0x100002;;;IU)(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;ME)");
 /// What `WaitForMultipleObjects` returns when the first object is signaled; the others follow it.
 const WAIT_OBJECT_0: u32 = 0;
 
@@ -124,9 +124,9 @@ fn claim_named(names: Names) -> Claim {
     Claim::Other
 }
 
-/// The event `name` exists but may not be opened with full access (made by a build with administrator rights
-/// that gave it no descriptor of its own): another instance runs. It is asked to show itself if the event can at
-/// least be signaled; this one exits either way, as two instances must not share the database.
+/// The event `name` exists but may not be opened with full access (which `CreateEventW` asks for; [`SECURITY`]
+/// gives an ordinary process only the right to signal): another instance runs. It is asked to show itself if the
+/// event can be signaled; this one exits either way, as two instances must not share the database.
 fn signal_protected(name: PCWSTR) -> Claim {
     // SAFETY: only the right to signal is asked for; the handle is owned (and closed) by `Handle`.
     match unsafe { OpenEventW(EVENT_MODIFY_STATE, false, name) } {

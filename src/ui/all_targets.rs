@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui, vec2};
 use egui_extras::TableBuilder;
 
+use crate::elevation::Rights;
 use crate::i18n::{Lang, Language, n, tr, trf, trn};
 use crate::probe::names::same_host;
 use crate::probe::tracer::Probe;
@@ -41,7 +42,7 @@ const NUMBER_WIDTH: f32 = 70.0;
 const HEADERS: [(&str, bool, &str); 10] = [
     (n!("Status"), false, n!("Tick to show the chart below; the state of the trace")),
     (n!("Target"), false, n!("Host as entered; click to open its tab")),
-    (n!("IP"), false, n!("Address that answered")),
+    (n!("IP"), false, n!("Address of the target")),
     (n!("Hops"), true, n!("Number of hops to the target")),
     (n!("Avg"), true, n!("Average round trip, ms")),
     (n!("Min"), true, n!("Fastest round trip, ms")),
@@ -69,6 +70,8 @@ pub enum Request {
     Open(usize),
     /// Open a tab tracing this host (the page stays shown).
     Add(String),
+    /// Start Ping Watch again with administrator rights (for the TCP targets waiting for them).
+    RestartElevated,
 }
 
 /// State of the overview page.
@@ -185,7 +188,8 @@ impl AllTargets {
         self.saved = Some(self.settings);
     }
 
-    /// Draws the page for `tabs`; returns what the user asked the app to do.
+    /// Draws the page for `tabs`; returns what the user asked the app to do. `rights` decide whether TCP targets
+    /// waiting for administrator rights get a button restarting Ping Watch with them.
     pub fn ui(
         &mut self,
         ui: &mut Ui,
@@ -193,6 +197,7 @@ impl AllTargets {
         targets: Option<&TargetList>,
         history_path: Option<&Path>,
         alerting: &[String],
+        rights: Rights,
     ) -> Option<Request> {
         let toolbar_frame = Frame::new().fill(theme::palette(ui).chassis).inner_margin(Margin::symmetric(10, 8));
         let mut request = egui::Panel::top("all-targets-toolbar")
@@ -213,7 +218,8 @@ impl AllTargets {
             (area, None)
         };
         tab::pane(ui, table_rect, Margin::same(1), |ui| {
-            let table = columns::scope(ui, "all-targets-table", |ui| self.table(ui, tabs, visible, now_ms, alerting));
+            let table =
+                columns::scope(ui, "all-targets-table", |ui| self.table(ui, tabs, visible, now_ms, alerting, rights));
             request = request.take().or(table);
         });
         if let Some(charts_rect) = charts_rect {
@@ -262,6 +268,7 @@ impl AllTargets {
         visible: (i64, i64),
         now_ms: i64,
         alerting: &[String],
+        rights: Rights,
     ) -> Option<Request> {
         let focus = self.settings.trace.focus;
         let overviews: Vec<Overview> = tabs.iter().map(|tab| tab.overview_with(focus, visible)).collect();
@@ -321,6 +328,8 @@ impl AllTargets {
                             ui.add_space(4.0);
                             if alerting.iter().any(|host| same_host(host, &overview.title)) {
                                 ui.label(RichText::new(tr!(ui, "alert")).color(theme::palette(ui).bad));
+                            } else if tabs.get(index).is_some_and(Tab::needs_rights) {
+                                ui.label(RichText::new(&overview.status).color(theme::palette(ui).bad));
                             } else {
                                 ui.label(RichText::new(&overview.status).color(theme::palette(ui).ink_muted));
                             }
@@ -387,6 +396,20 @@ impl AllTargets {
             } else {
                 let count = tabs.len();
                 ui.weak(trn!(ui, u64::try_from(count).unwrap_or(u64::MAX), "{n} target|{n} targets"));
+            }
+            let waiting = tabs.iter().filter(|tab| tab.needs_rights()).count();
+            if waiting > 0 {
+                ui.add_space(16.0);
+                let waiting = u64::try_from(waiting).unwrap_or(u64::MAX);
+                let text = trn!(
+                    ui,
+                    waiting,
+                    "{n} TCP target is stopped: it needs administrator rights|{n} TCP targets are stopped: they need administrator rights"
+                );
+                ui.label(RichText::new(text).color(theme::palette(ui).bad));
+                if rights == Rights::CanElevate && ui.button(tr!(ui, "Restart as administrator")).clicked() {
+                    request = Some(Request::RestartElevated);
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);

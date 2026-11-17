@@ -11,6 +11,10 @@ use crate::probe::stats::HopStats;
 /// Largest TTL probed: routes up to this long are seen whole (how many hops are shown is a separate setting).
 pub const MAX_TTL: u8 = 40;
 
+/// While the target doesn't answer, the TTLs up to this many past the farthest hop that answered are probed every
+/// interval; the farther ones take turns, one per interval, so a silent target isn't sent every TTL each time.
+pub const NEAR_EXTRA: u8 = 3;
+
 /// How far back each hop keeps individual probes: the longest focus period that isn't "all".
 pub const RECENT_WINDOW: Duration = Duration::from_secs(60 * 60);
 
@@ -133,23 +137,46 @@ pub struct RouteState {
     target_ttl: Option<u8>,
     /// Send time of the first recorded probe, Unix ms.
     started_ms: Option<i64>,
+    /// Samples waiting for the TTLs before them to be probed (the first round): only then is it known whether they
+    /// lie on the route.
+    pending: Vec<Sample>,
+    /// The far TTL whose turn is next while the target doesn't answer ([`NEAR_EXTRA`]); 0 before the first turn.
+    next_far: u8,
+    /// When the next far TTL may be probed, Unix ms.
+    far_due_ms: i64,
 }
 
 impl RouteState {
     /// Creates an empty route to `target` that probes the TTLs from 1 to `max_ttl`.
     pub fn new(target: IpAddr, max_ttl: u8) -> Self {
-        Self { target, hops: vec![HopState::default(); usize::from(max_ttl)], target_ttl: None, started_ms: None }
+        Self {
+            target,
+            hops: vec![HopState::default(); usize::from(max_ttl)],
+            target_ttl: None,
+            started_ms: None,
+            pending: Vec::new(),
+            next_far: 0,
+            far_due_ms: i64::MIN,
+        }
     }
 
     /// Last TTL of the route: the target's once it answered; while it doesn't (unreachable since the trace
     /// started), one past the farthest hop that answered — where the target would stand, as PingPlotter shows it,
     /// instead of rows of silent TTLs up to the largest probed.
     fn end(&self) -> u8 {
-        self.target_ttl.unwrap_or_else(|| {
-            // The farthest answering hop is at index `i`, TTL `i + 1`; the end is the TTL after it.
-            let end = self.hops.iter().rposition(|hop| hop.address.is_some()).map_or(1, |i| i.saturating_add(2));
-            u8::try_from(end.min(self.hops.len())).unwrap_or(u8::MAX)
-        })
+        self.target_ttl.unwrap_or_else(|| self.farthest_answer().saturating_add(1).min(self.max_ttl()))
+    }
+
+    /// TTL of the farthest hop that answered, 0 if none did.
+    fn farthest_answer(&self) -> u8 {
+        // The farthest answering hop is at index `i`, TTL `i + 1`.
+        let ttl = self.hops.iter().rposition(|hop| hop.address.is_some()).map_or(0, |i| i.saturating_add(1));
+        u8::try_from(ttl).unwrap_or(u8::MAX)
+    }
+
+    /// Largest TTL probed.
+    fn max_ttl(&self) -> u8 {
+        u8::try_from(self.hops.len()).unwrap_or(u8::MAX)
     }
 
     /// Whether probes with `ttl` are the ones meant for the target: the route length, or, while the target doesn't
@@ -158,27 +185,48 @@ impl RouteState {
         self.end() == ttl
     }
 
-    /// Whether `ttl` lies on the route as shown and every TTL before it has been probed: its probes belong in the
-    /// history. The silent TTLs past the end are only noise; so is a target's answer at a far TTL in the first
-    /// round, before the nearer TTLs (one of which the target will answer too) are heard from.
-    pub fn in_route(&self, ttl: u8) -> bool {
-        let before = usize::from(ttl).saturating_sub(1);
-        ttl <= self.end() && self.hops.iter().take(before).all(|hop| hop.total.sent() > 0)
+    /// Whether every TTL before `ttl` has been probed: only then is it known whether `ttl` lies on the route.
+    fn heard_before(&self, ttl: u8) -> bool {
+        self.hops.iter().take(usize::from(ttl).saturating_sub(1)).all(|hop| hop.total.sent() > 0)
     }
 
-    /// Whether probes with `ttl` are still useful: TTLs beyond the target are not.
-    pub fn should_probe(&self, ttl: u8) -> bool {
-        self.target_ttl.is_none_or(|target_ttl| ttl <= target_ttl)
+    /// Whether the worker of `ttl` probes now, at `at_ms` (Unix ms), with `interval_ms` between its probes. TTLs
+    /// beyond the target are not probed. While the target doesn't answer, every TTL is probed once (the first
+    /// round), then those up to [`NEAR_EXTRA`] past the farthest answer every interval and the farther ones in
+    /// turns, one per interval: a silent hop may hide routers and the target behind it, and a turn finds them.
+    pub fn take_turn(&mut self, ttl: u8, at_ms: i64, interval_ms: i64) -> bool {
+        if let Some(target_ttl) = self.target_ttl {
+            return ttl <= target_ttl;
+        }
+        let Some(hop) = usize::from(ttl).checked_sub(1).and_then(|index| self.hops.get(index)) else {
+            return false;
+        };
+        let near_end = self.farthest_answer().saturating_add(NEAR_EXTRA);
+        if hop.total.sent() == 0 || ttl <= near_end {
+            return true;
+        }
+        let first_far = near_end.saturating_add(1);
+        let next = if (first_far..=self.max_ttl()).contains(&self.next_far) { self.next_far } else { first_far };
+        self.next_far = next;
+        if ttl != next || at_ms < self.far_due_ms {
+            return false;
+        }
+        self.next_far = if next >= self.max_ttl() { first_far } else { next.saturating_add(1) };
+        self.far_due_ms = at_ms.saturating_add(interval_ms);
+        true
     }
 
-    /// Records the outcome of a probe sent with `ttl` at `at_ms` (Unix ms); TTLs outside the route and beyond the
-    /// target are ignored.
-    pub fn record(&mut self, ttl: u8, at_ms: i64, outcome: ProbeOutcome) {
+    /// Records the outcome of a probe sent with `ttl` at `at_ms` (Unix ms) and returns the samples that now belong
+    /// in the history: those on the route as shown, once every TTL before them has been probed. The silent TTLs
+    /// past the end are only noise; so is a target's answer at a far TTL in the first round, before the nearer
+    /// TTLs (one of which the target will answer too) are heard from. TTLs outside the route and beyond the target
+    /// are ignored.
+    pub fn record(&mut self, ttl: u8, at_ms: i64, outcome: ProbeOutcome) -> Vec<Sample> {
         if self.target_ttl.is_some_and(|target_ttl| ttl > target_ttl) {
-            return;
+            return Vec::new();
         }
         let Some(hop) = usize::from(ttl).checked_sub(1).and_then(|index| self.hops.get_mut(index)) else {
-            return;
+            return Vec::new();
         };
         self.started_ms = Some(self.started_ms.map_or(at_ms, |started| started.min(at_ms)));
         hop.since_ms = Some(hop.since_ms.map_or(at_ms, |since| since.min(at_ms)));
@@ -213,6 +261,24 @@ impl RouteState {
         if cut {
             self.hops.iter_mut().skip(usize::from(ttl)).for_each(|hop| *hop = HopState::default());
         }
+        self.pending.push(Sample { at_ms, ttl, outcome, at_target: false });
+        self.settle()
+    }
+
+    /// Takes the pending samples whose turn has come ([`Self::record`]); those past the target are dropped.
+    fn settle(&mut self) -> Vec<Sample> {
+        let mut ready = Vec::new();
+        for sample in std::mem::take(&mut self.pending) {
+            if self.target_ttl.is_some_and(|target_ttl| sample.ttl > target_ttl) {
+                continue;
+            }
+            if !self.heard_before(sample.ttl) {
+                self.pending.push(sample);
+            } else if sample.ttl <= self.end() {
+                ready.push(Sample { at_target: self.is_target_ttl(sample.ttl), ..sample });
+            }
+        }
+        ready
     }
 
     /// Snapshot with statistics over `focus` = `(from, to)` Unix ms, or since the start if `None`. Only the last
@@ -287,24 +353,66 @@ mod tests {
         route.record(3, 0, reply(ROUTER));
         route.record(2, 0, ProbeOutcome::Lost);
         assert_eq!(all(&route).hops().len(), 4);
-        // Every TTL is still probed: a silent hop may hide routers and the target behind it.
-        assert!(route.should_probe(30));
-        assert!(route.in_route(4));
-        assert!(!route.in_route(5));
+        assert_eq!(ttls(&route.record(4, 0, ProbeOutcome::Lost)), [4], "the end of the route is in the history");
+        assert!(route.record(5, 0, ProbeOutcome::Lost).is_empty(), "past the end it isn't");
+    }
+
+    /// TTLs of `samples`.
+    fn ttls(samples: &[Sample]) -> Vec<u8> {
+        samples.iter().map(|sample| sample.ttl).collect()
     }
 
     #[test]
     fn a_far_answer_of_the_target_waits_for_the_nearer_hops() {
         let mut route = RouteState::new(TARGET, 30);
         // The first round: the target answers at 27 before the TTLs below it report.
-        route.record(27, 0, reply(TARGET));
-        assert!(!route.in_route(27), "not in the history yet");
+        assert!(route.record(27, 0, reply(TARGET)).is_empty(), "not in the history yet");
         for ttl in 1..10 {
-            route.record(ttl, 0, reply(ROUTER));
+            assert_eq!(ttls(&route.record(ttl, 0, reply(ROUTER))), [ttl]);
         }
-        route.record(10, 0, reply(TARGET));
-        assert!(route.in_route(10));
-        assert!(!route.in_route(27), "past the route");
+        let at_ten = route.record(10, 0, reply(TARGET));
+        assert_eq!(ttls(&at_ten), [10], "the far answer is past the route");
+        assert!(at_ten.first().is_some_and(|sample| sample.at_target));
+    }
+
+    #[test]
+    fn answers_behind_a_silent_hop_wait_for_it_in_the_first_round() {
+        let mut route = RouteState::new(TARGET, 30);
+        assert_eq!(ttls(&route.record(1, 0, reply(ROUTER))), [1]);
+        // Hop 2 is silent and times out last; the hops behind it answered before.
+        assert!(route.record(3, 0, reply(ROUTER)).is_empty());
+        assert!(route.record(4, 0, reply(TARGET)).is_empty());
+        let released = route.record(2, 0, ProbeOutcome::Lost);
+        assert_eq!(ttls(&released), [3, 4, 2]);
+        let at_target: Vec<bool> = released.iter().map(|sample| sample.at_target).collect();
+        assert_eq!(at_target, [false, true, false]);
+    }
+
+    /// The TTLs of `route` up to 10 that take their turn at `at_ms`, with probes every second.
+    fn round(route: &mut RouteState, at_ms: i64) -> Vec<u8> {
+        (1..=10).filter(|ttl| route.take_turn(*ttl, at_ms, 1_000)).collect()
+    }
+
+    #[test]
+    fn a_silent_target_gets_the_far_ttls_in_turns() {
+        let mut route = RouteState::new(TARGET, 10);
+        // The first round probes every TTL; hops 1 and 2 answer.
+        assert_eq!(round(&mut route, 0), (1..=10).collect::<Vec<_>>());
+        route.record(1, 0, reply(ROUTER));
+        route.record(2, 0, reply(ROUTER));
+        for ttl in 3..=10 {
+            route.record(ttl, 0, ProbeOutcome::Lost);
+        }
+        // Hops up to 2 + 3 every interval; of 6 to 10 one per interval, in turn.
+        let far: Vec<Vec<u8>> = (1..=6).map(|i| round(&mut route, i * 1_000)).collect();
+        let near = [1, 2, 3, 4, 5];
+        let with = |ttl: u8| near.iter().copied().chain([ttl]).collect::<Vec<_>>();
+        assert_eq!(far, [with(6), with(7), with(8), with(9), with(10), with(6)]);
+        // A turn too early waits for the next interval.
+        assert_eq!(round(&mut route, 6_500), near);
+        // Once the target answers, every TTL up to it is probed, none past it.
+        route.record(4, 7_000, reply(TARGET));
+        assert_eq!(round(&mut route, 8_000), [1, 2, 3, 4]);
     }
 
     #[test]
@@ -354,8 +462,8 @@ mod tests {
         // Later TTLs also reach the target; they must not extend the route.
         route.record(7, 0, reply(TARGET));
         assert_eq!(all(&route).hops().len(), 5);
-        assert!(route.should_probe(5));
-        assert!(!route.should_probe(6));
+        assert!(route.take_turn(5, 0, 1_000));
+        assert!(!route.take_turn(6, 0, 1_000));
     }
 
     #[test]
@@ -372,7 +480,7 @@ mod tests {
         route.record(5, 0, reply(TARGET));
         route.record(5, 0, reply(ROUTER));
         assert_eq!(all(&route).hops().len(), 6);
-        assert!(route.should_probe(30));
+        assert!(route.take_turn(30, 0, 1_000), "not probed since it was forgotten");
     }
 
     #[test]

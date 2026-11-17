@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 use windows::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
 use windows::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, RCVALL_IPLEVEL, SIO_RCVALL, SOCKADDR_IN, SOCKADDR_IN6,
-    SOCKADDR_INET, SOCKET, WSAIoctl,
+    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, RCVALL_IPLEVEL, SIO_RCVALL, SIO_TCP_INITIAL_RTO,
+    SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET, SOCKET, TCP_INITIAL_RTO_DEFAULT_RTT,
+    TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS, WSAIoctl,
 };
 
 use crate::i18n::{Message, n};
@@ -49,6 +50,10 @@ const ICMP6_UNREACHABLE: u8 = 1;
 const ICMP6_TIME_EXCEEDED: u8 = 3;
 /// Length of an IPv6 header (without extension headers; our SYN has none).
 const IPV6_HEADER: usize = 40;
+/// Length of a TCP header without options.
+const TCP_HEADER: usize = 20;
+/// TCP flag SYN.
+const TCP_SYN: u8 = 0x02;
 /// TCP flag RST.
 const TCP_RST: u8 = 0x04;
 /// TCP flag ACK.
@@ -161,6 +166,11 @@ impl TcpProber {
         .map_err(TcpError::Socket)?;
         // Closing then resets the connection instead of leaving it in TIME_WAIT: a trace opens dozens a second.
         socket.set_linger(Some(Duration::ZERO)).map_err(TcpError::Socket)?;
+        // Windows would send the SYN again after a second, with the same TTL and port: an answer to that one would
+        // count for this probe, a loss turning into a round trip of a second.
+        if let Err(error) = no_syn_retransmissions(&socket) {
+            log::debug!("cannot turn off SYN retransmissions: {error}");
+        }
         // Bound first, so the local port is known before the SYN can be answered.
         socket.bind(&local.into()).map_err(TcpError::Socket)?;
         let local_port = socket
@@ -225,6 +235,8 @@ impl TcpProber {
 impl Listener {
     /// Opens the raw socket of `local` in `SIO_RCVALL` mode and starts its receiving thread.
     fn open(local: SocketAddr) -> Result<Arc<Self>, TcpError> {
+        // Protocol 0 for both families: for IPv6 it receives the ICMPv6 errors and the target's TCP segments too
+        // (checked live, `a_web_server_answers_an_ipv6_tcp_probe`).
         let socket = Socket::new(Domain::for_address(local), Type::RAW, Some(Protocol::from(0))).map_err(|error| {
             if error.raw_os_error() == Some(WSAEACCES) { TcpError::NotElevated } else { TcpError::Listen(error) }
         })?;
@@ -287,20 +299,29 @@ impl Listener {
     }
 }
 
-/// Switches the raw `socket` to receive every packet of its address family that the computer sends or receives
-/// (`RCVALL_IPLEVEL`: the network card is not put in promiscuous mode, other computers' traffic is not seen).
-fn receive_all(socket: &Socket) -> io::Result<()> {
-    let value = RCVALL_IPLEVEL.0;
+/// Keeps Windows from sending the SYN of `socket` again when no answer comes: one probe, one SYN.
+fn no_syn_retransmissions(socket: &Socket) -> io::Result<()> {
+    // The header's value is `(UCHAR) -2`; the crate gives it as a wider integer.
+    let no_retransmissions = u8::try_from(TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS & 0xFF).map_err(io::Error::other)?;
+    let parameters = TCP_INITIAL_RTO_PARAMETERS {
+        Rtt: u16::try_from(TCP_INITIAL_RTO_DEFAULT_RTT).map_err(io::Error::other)?,
+        MaxSynRetransmissions: no_retransmissions,
+    };
+    socket_ioctl(socket, SIO_TCP_INITIAL_RTO, &parameters)
+}
+
+/// Runs the input-only `WSAIoctl` `code` on `socket` with `input`.
+fn socket_ioctl<T>(socket: &Socket, code: u32, input: &T) -> io::Result<()> {
     let mut returned = 0_u32;
     let handle = SOCKET(usize::try_from(socket.as_raw_socket()).map_err(io::Error::other)?);
-    // SAFETY: `handle` is the open raw socket owned by `socket`; the input buffer is `value`, which lives across
-    // the call, with its exact size; there is no output buffer, overlapped structure or completion routine.
+    // SAFETY: `handle` is the open socket owned by `socket`; the input buffer is `input`, which lives across the
+    // call, with its exact size; there is no output buffer, overlapped structure or completion routine.
     let result = unsafe {
         WSAIoctl(
             handle,
-            SIO_RCVALL,
-            Some((&raw const value).cast()),
-            u32::try_from(size_of_val(&value)).unwrap_or(u32::MAX),
+            code,
+            Some((&raw const *input).cast()),
+            u32::try_from(size_of_val(input)).unwrap_or(u32::MAX),
             None,
             0,
             &raw mut returned,
@@ -309,6 +330,12 @@ fn receive_all(socket: &Socket) -> io::Result<()> {
         )
     };
     if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+/// Switches the raw `socket` to receive every packet of its address family that the computer sends or receives
+/// (`RCVALL_IPLEVEL`: the network card is not put in promiscuous mode, other computers' traffic is not seen).
+fn receive_all(socket: &Socket) -> io::Result<()> {
+    socket_ioctl(socket, SIO_RCVALL, &RCVALL_IPLEVEL.0)
 }
 
 /// The local address (port 0) Windows sends from to reach `target`, from its routing table (no socket, no
@@ -426,11 +453,18 @@ fn icmp6_answer(message: &[u8], local: Ipv6Addr) -> Option<(Key, bool)> {
     Some(((target.into(), target_port, local_port), icmp_type == ICMP6_UNREACHABLE))
 }
 
-/// The key of the probe a TCP `segment` from `from` (the target) answers, if it is a SYN-ACK or RST.
+/// The key of the probe a TCP `segment` from `from` (the target) answers, if it is a SYN-ACK or RST. An IPv6
+/// listener doesn't see the protocol of what it gets, so the segment must also look like a TCP header: whole, with
+/// a plausible header length — another protocol's packet between the same ports is unlikely to pass.
 fn target_answer(segment: &[u8], from: IpAddr) -> Option<(Key, Heard)> {
     let (target_port, local_port) = ports(segment)?;
+    let header = usize::from(*segment.get(12)? >> 4).checked_mul(4)?;
+    if segment.len() < TCP_HEADER || header < TCP_HEADER {
+        return None;
+    }
     let flags = *segment.get(13)?;
-    let answers = flags & TCP_RST != 0 || flags & TCP_ACK != 0;
+    let syn_ack = TCP_SYN | TCP_ACK;
+    let answers = flags & TCP_RST != 0 || flags & syn_ack == syn_ack;
     answers.then_some(((from, target_port, local_port), Heard::Reply(from)))
 }
 
@@ -506,7 +540,9 @@ mod tests {
         let mut header = Vec::new();
         header.extend(source_port.to_be_bytes());
         header.extend(destination_port.to_be_bytes());
-        header.extend([0; 9]);
+        header.extend([0; 8]);
+        // Header length: 5 words, no options.
+        header.push(0x50);
         header.push(flags);
         header.extend([0; 6]);
         header
@@ -612,6 +648,13 @@ mod tests {
         assert_eq!(answer_of(&[0x87, 0, 0, 0, 0, 0, 0, 0], ROUTER6.into(), LOCAL6.into()), None);
         assert_eq!(answer_of(&tcp(443, 50_017, 0x02), TARGET6.into(), LOCAL6.into()), None);
         assert_eq!(answer_of(&[1, 0xbb], TARGET6.into(), LOCAL6.into()), None);
+        // Not a TCP header: a bare ACK, a header length below the minimum, a segment cut short.
+        assert_eq!(answer_of(&tcp(443, 50_020, 0x10), TARGET6.into(), LOCAL6.into()), None);
+        let mut short_header = tcp(443, 50_021, 0x12);
+        short_header[12] = 0x40;
+        assert_eq!(answer_of(&short_header, TARGET6.into(), LOCAL6.into()), None);
+        let cut = tcp(443, 50_022, 0x12);
+        assert_eq!(answer_of(cut.get(..19).unwrap_or_default(), TARGET6.into(), LOCAL6.into()), None);
         // An IPv4 sender on an IPv6 listener.
         assert_eq!(answer_of(&tcp(443, 50_018, 0x12), TARGET.into(), LOCAL6.into()), None);
     }

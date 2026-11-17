@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::alerts::{Engine, Event, Observe, Rule, WindowStats};
+use crate::elevation::Rights;
 use crate::i18n::{self, Lang, Language, tr, trf, trn};
 use crate::probe::names::NameCache;
 use crate::probe::tcp::TcpProber;
@@ -178,8 +179,10 @@ pub struct PingWatchApp {
     alerts_window: AlertsWindow,
     /// Host of the tab whose reset waits for the user's yes (it deletes the target's history).
     reset_asked: Option<String>,
-    /// Whether Ping Watch runs with administrator rights, checked once at start (TCP probes need them).
-    elevated: bool,
+    /// The Ping Watch administrator rights, checked once at start (TCP probes need them).
+    rights: Rights,
+    /// The restart with administrator rights was offered by itself (a TCP target without them): once per run.
+    rights_asked: bool,
     /// An elevated instance was started to replace this one: quit on the next frame.
     restarting: bool,
     /// Sends TCP probes for all traces.
@@ -300,7 +303,8 @@ impl PingWatchApp {
             notifier,
             alerts_window: AlertsWindow::default(),
             reset_asked: None,
-            elevated: crate::elevation::is_elevated(),
+            rights: crate::elevation::rights(),
+            rights_asked: false,
             restarting: false,
             tcp: Arc::new(TcpProber::default()),
             started_at: Instant::now(),
@@ -1288,7 +1292,7 @@ impl eframe::App for PingWatchApp {
             history_path: self.history_path.as_deref(),
             targets: self.targets.as_ref(),
             settings: &self.settings,
-            elevated: self.elevated,
+            rights: self.rights,
             tcp: &self.tcp,
         };
         for tab in &mut self.tabs {
@@ -1304,10 +1308,12 @@ impl eframe::App for PingWatchApp {
                         self.targets.as_ref(),
                         self.history_path.as_deref(),
                         &alerting,
+                        self.rights,
                     )
                 });
                 match request {
                     Some(Request::Open(index)) => self.page = Page::Target(index),
+                    Some(Request::RestartElevated) => self.restart_elevated(),
                     Some(Request::Add(host)) => {
                         let defaults =
                             TraceSettings { interval: self.all_targets.interval(), ..self.settings.defaults };
@@ -1326,7 +1332,13 @@ impl eframe::App for PingWatchApp {
         }
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
         let tables = settings::Tables { hops: &mut self.hop_columns, all_targets: self.all_targets.columns_mut() };
-        if self.settings_window.show(ui.ctx(), &mut self.settings, tables, data_folder, self.elevated) {
+        if self.settings_window.show(ui.ctx(), &mut self.settings, tables, data_folder, self.rights) {
+            self.restart_elevated();
+        }
+        // A target traced by TCP before, now without administrator rights (say, started with Windows): their
+        // prompt comes at once, once per run; said no to, the tabs tell what is missing.
+        if !self.rights_asked && self.rights == Rights::CanElevate && self.tabs.iter().any(Tab::needs_rights) {
+            self.rights_asked = true;
             self.restart_elevated();
         }
         if std::mem::take(&mut self.restarting) {

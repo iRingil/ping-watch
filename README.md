@@ -75,10 +75,15 @@ stands out at once. It keeps the history, so you can look back at what happened 
 - **ICMP or TCP.** Hops are probed with pings, or, for a server that ignores pings or a network whose firewall drops
   them, with TCP connection requests to a port of your choice (443 by default), over IPv4 and IPv6. TCP needs no
   packet driver, only administrator rights: without them it is greyed out, with a button that restarts Ping Watch as
-  administrator. The whole app then runs as administrator.
+  administrator. The whole app then runs as administrator. A target traced by TCP before asks for these rights as
+  soon as Ping Watch starts without them; said no to, it stays stopped (never traced by ICMP in its place) and its
+  tab and All targets tell why. In a Windows account without administrator rights, TCP isn't available. An open port
+  answers with a full connection, which Ping Watch resets at once: a server may log these connections, and strict
+  rules (fail2ban and the like) may count them as attempts.
 - **History.** Every probe is stored on this PC. Tick hops in the table (or double-click their rows) to chart their
   latency, jitter and loss one under another, over the last minute to the last seven days; a slider goes back in
-  time, and comments can be pinned to a moment.
+  time, and comments can be pinned to a moment; a change of probe is marked on the chart by itself. Reset and
+  restart (Ctrl+R) starts a target over and deletes its history: chart, comments and alert marks.
 - **Several targets.** Each target has its own tab. "All targets" shows them side by side, each with its latency bar,
   and charts the ones you tick, all over the same period.
 - **Alerts.** Rules for loss and latency, for one target or all of them, such as "loss above 5 % for two minutes".
@@ -129,13 +134,16 @@ as well.
 
 ## Privacy
 
-Ping Watch has no accounts, telemetry, ads or analytics. It sends only what tracing needs, and one request you ask
-for:
+Ping Watch has no accounts, telemetry, ads or analytics. It sends only what tracing needs, and a daily check for
+updates that you can turn off:
 
-- **ICMP echo requests** (pings) to the targets you enter, sent with a TTL of 1, 2, 3 and so on up to 40, so that
-  each router on the way answers the one that expires at it.
+- **ICMP echo requests** (pings) to the targets you enter, sent with a TTL of 1, 2, 3 and so on up to the target, so
+  that each router on the way answers the one that expires at it. While a target doesn't answer, the TTLs up to three
+  past the last answering router are probed every interval and the farther ones (up to 40) one per interval in turn.
 - **TCP connection requests** (SYN) instead, for the targets you set to TCP probes: to the port you choose, with the
-  same TTLs. Each is closed (reset) once answered; no data is sent.
+  same TTLs. Each is closed (reset) once answered; no data is sent. To catch the answers, Ping Watch reads the headers
+  of the IP packets this PC receives while a TCP trace runs (a raw socket, the reason it needs administrator rights);
+  it looks only for answers to its own probes and stores nothing else.
 - **DNS lookups**: the address of a target given by name, and the names of the routers on the route (reverse DNS;
   Settings → Tracing → Hop names turns these off).
 - **GitHub** (`api.github.com`): once a day, a request for the latest release of this repository, to tell you when a

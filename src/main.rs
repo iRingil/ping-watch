@@ -49,9 +49,24 @@ fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
     }
 }
 
+/// Has the DLLs loaded later (by Windows' own libraries, on demand) come from System32 only, not from the
+/// program's folder, which any program of the user may write to while Ping Watch may run as administrator. The
+/// DLLs the executable imports get the same rule from the linker (`build.rs`).
+fn load_dlls_from_system32() {
+    // SAFETY: no preconditions; it only changes where this process looks for DLLs.
+    if let Err(error) = unsafe {
+        windows::Win32::System::LibraryLoader::SetDefaultDllDirectories(
+            windows::Win32::System::LibraryLoader::LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    } {
+        log::warn!("cannot restrict where DLLs are loaded from: {error}");
+    }
+}
+
 /// Program entry point.
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    load_dlls_from_system32();
     // An instance started to replace this one with administrator rights waits until the old one is gone.
     let hosts = elevation::wait_for_replaced(std::env::args().skip(1).collect());
     // A second start shows the running window instead (its hosts, if any, are not opened).

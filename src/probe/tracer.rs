@@ -3,16 +3,15 @@
 //! to the history. The trace can be paused and its interval changed while it runs.
 
 use std::net::IpAddr;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::i18n::{Message, n};
 use crate::probe::icmp::{IcmpError, Pinger};
-use crate::probe::route::{MAX_TTL, ProbeOutcome, Route, RouteState, Sample};
+use crate::probe::route::{MAX_TTL, ProbeOutcome, Route, RouteState, millis};
 use crate::probe::tcp::TcpProber;
-use crate::store::history::unix_ms;
+use crate::store::history::{HistorySender, unix_ms};
 use crate::sync::lock;
 
 /// What the hops are probed with.
@@ -173,13 +172,11 @@ impl Shared {
     }
 }
 
-/// Running trace of one target; stops its workers on drop.
+/// Running trace of one target, by one worker thread per TTL; stops its workers on drop.
 #[derive(Debug)]
 pub struct Tracer {
     /// State shared with the workers.
     shared: Arc<Shared>,
-    /// Worker threads, one per TTL.
-    workers: Vec<JoinHandle<()>>,
 }
 
 impl Tracer {
@@ -188,12 +185,11 @@ impl Tracer {
     ///
     /// # Errors
     ///
-    /// [`TraceError`] if an ICMP handle can't be opened, TCP probes are asked for an IPv6 target or a thread can't
-    /// be started.
+    /// [`TraceError`] if an ICMP handle can't be opened or a thread can't be started.
     pub fn start(
         target: IpAddr,
         config: TraceConfig,
-        history: Option<Sender<Sample>>,
+        history: Option<HistorySender>,
         tcp: &Arc<TcpProber>,
     ) -> Result<Self, TraceError> {
         let shared = Arc::new(Shared {
@@ -202,16 +198,15 @@ impl Tracer {
             wake: Condvar::new(),
             last_error: Mutex::new(None),
         });
-        // Assigned before spawning, so that an early error drops (and stops) the already started workers.
-        let mut tracer = Self { shared, workers: Vec::new() };
+        // Made before spawning, so that an early error drops it and stops the workers already started.
+        let tracer = Self { shared };
         for ttl in 1..=config.max_ttl {
             let prober = Prober::new(config.probe, target, tcp)?;
             let shared = Arc::clone(&tracer.shared);
             let history = history.clone();
-            let worker = thread::Builder::new()
+            thread::Builder::new()
                 .name(format!("probe-ttl-{ttl}"))
                 .spawn(move || probe_loop(&shared, &prober, history.as_ref(), target, ttl, config))?;
-            tracer.workers.push(worker);
         }
         Ok(tracer)
     }
@@ -243,13 +238,10 @@ impl Tracer {
 }
 
 impl Drop for Tracer {
+    /// Tells the workers to stop and doesn't wait for them: one waiting for an answer ends when its timeout does,
+    /// and its outcome goes nowhere. Closing a tab or the app is immediate.
     fn drop(&mut self) {
         self.shared.update(|control| control.stop = true);
-        for worker in self.workers.drain(..) {
-            if worker.join().is_err() {
-                log::error!("probe thread panicked");
-            }
-        }
     }
 }
 
@@ -257,15 +249,16 @@ impl Drop for Tracer {
 fn probe_loop(
     shared: &Shared,
     prober: &Prober,
-    history: Option<&Sender<Sample>>,
+    history: Option<&HistorySender>,
     target: IpAddr,
     ttl: u8,
     config: TraceConfig,
 ) {
     loop {
         let started = Instant::now();
-        if lock(&shared.route).should_probe(ttl) {
-            let at_ms = unix_ms(SystemTime::now());
+        let at_ms = unix_ms(SystemTime::now());
+        let interval_ms = millis(lock(&shared.control).interval);
+        if lock(&shared.route).take_turn(ttl, at_ms, interval_ms) {
             let outcome = match prober.probe(target, ttl, config.timeout) {
                 Ok(outcome) => {
                     if matches!(outcome, ProbeOutcome::Reply { .. }) {
@@ -281,17 +274,15 @@ fn probe_loop(
                     ProbeOutcome::Lost
                 }
             };
-            let (in_route, at_target) = {
-                let mut route = lock(&shared.route);
-                route.record(ttl, at_ms, outcome);
-                (route.in_route(ttl), route.is_target_ttl(ttl))
-            };
-            // TTLs beyond the target, or past the end of an unreachable route, only add noise to the history.
-            if in_route
-                && let Some(history) = history
-                && history.send(Sample { at_ms, ttl, outcome, at_target }).is_err()
+            // A trace stopped while this probe was out (its tab closed, its probe changed) records nothing more.
+            if lock(&shared.control).stop {
+                break;
+            }
+            let ready = lock(&shared.route).record(ttl, at_ms, outcome);
+            if let Some(history) = history
+                && !ready.into_iter().all(|sample| history.send(sample))
             {
-                log::debug!("history recorder is gone; sample of ttl {ttl} dropped");
+                log::debug!("history recorder is gone; samples of ttl {ttl} dropped");
             }
         }
         if !shared.wait_turn(started) {

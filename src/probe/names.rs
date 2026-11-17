@@ -2,11 +2,12 @@
 //! "Name" column.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::sync::lock;
 
@@ -17,6 +18,19 @@ pub const MAX_HOST_LENGTH: usize = 253;
 const MAX_CACHED_NAMES: usize = 4_096;
 /// Most reverse lookups running at once; an address asked for while all run is looked up on a later call.
 const MAX_LOOKUPS: usize = 16;
+/// A failed reverse lookup (no name, or no network at the time) is asked again after this long.
+const RETRY_FAILED: Duration = Duration::from_secs(5 * 60);
+
+/// What the cache knows about one address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Lookup {
+    /// The lookup runs.
+    Running,
+    /// The address has this name.
+    Named(String),
+    /// The lookup failed at this moment.
+    Failed(Instant),
+}
 
 /// Error resolving the target host.
 #[derive(Debug, thiserror::Error)]
@@ -77,8 +91,8 @@ pub fn is_plausible_host(host: &str) -> bool {
 pub struct NameCache {
     /// Lookups are off: no new ones start and known names aren't given out.
     off: Arc<AtomicBool>,
-    /// Known addresses: `None` while the lookup runs or if it failed.
-    names: Arc<Mutex<HashMap<IpAddr, Option<String>>>>,
+    /// Addresses looked up.
+    names: Arc<Mutex<HashMap<IpAddr, Lookup>>>,
     /// Lookups running now.
     running: Arc<AtomicUsize>,
 }
@@ -89,27 +103,29 @@ impl NameCache {
         self.off.store(!enabled, Ordering::Relaxed);
     }
 
-    /// Name of `ip` if already known; the first call for an address starts its lookup and returns `None`. Always
-    /// `None` while lookups are off.
+    /// Name of `ip` if already known; the first call for an address starts its lookup and returns `None`, as does
+    /// the first call [`RETRY_FAILED`] after a failed lookup, which starts it again. Always `None` while lookups
+    /// are off.
     pub fn get(&self, ip: IpAddr) -> Option<String> {
         if self.off.load(Ordering::Relaxed) {
             return None;
         }
         let mut names = lock(&self.names);
-        if let Some(known) = names.get(&ip) {
-            return known.clone();
+        match names.get(&ip) {
+            Some(Lookup::Named(name)) => return Some(name.clone()),
+            Some(Lookup::Running) => return None,
+            Some(Lookup::Failed(at)) if at.elapsed() < RETRY_FAILED => return None,
+            Some(Lookup::Failed(_)) | None => {}
         }
         if self.running.load(Ordering::Relaxed) >= MAX_LOOKUPS {
             return None;
         }
         if names.len() >= MAX_CACHED_NAMES {
             // Lookups still running keep their entries, so they are not started twice.
-            names.retain(|_, name| name.is_none());
+            names.retain(|_, lookup| *lookup == Lookup::Running);
         }
-        if let Entry::Vacant(entry) = names.entry(ip) {
-            entry.insert(None);
-            self.spawn_lookup(ip);
-        }
+        names.insert(ip, Lookup::Running);
+        self.spawn_lookup(ip);
         None
     }
 
@@ -118,10 +134,14 @@ impl NameCache {
         let (names, running) = (Arc::clone(&self.names), Arc::clone(&self.running));
         running.fetch_add(1, Ordering::Relaxed);
         let spawned = thread::Builder::new().name("rdns".to_owned()).spawn(move || {
-            let name = dns_lookup::lookup_addr(&ip)
-                .inspect_err(|error| log::debug!("reverse lookup of {ip} failed: {error}"))
-                .ok();
-            lock(&names).insert(ip, name);
+            let lookup = match dns_lookup::lookup_addr(&ip) {
+                Ok(name) => Lookup::Named(name),
+                Err(error) => {
+                    log::debug!("reverse lookup of {ip} failed: {error}");
+                    Lookup::Failed(Instant::now())
+                }
+            };
+            lock(&names).insert(ip, lookup);
             running.fetch_sub(1, Ordering::Relaxed);
         });
         if let Err(error) = spawned {
@@ -151,6 +171,20 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
         assert_eq!(names.get(ip), None);
         assert!(lock(&names.names).is_empty(), "no lookup started");
+    }
+
+    #[test]
+    fn a_failed_lookup_is_asked_again_later() {
+        let names = NameCache::default();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let failed = |ago: Duration| Instant::now().checked_sub(ago).map(Lookup::Failed);
+        lock(&names.names).extend(failed(Duration::from_secs(1)).map(|lookup| (ip, lookup)));
+        assert_eq!(names.get(ip), None);
+        assert!(matches!(lock(&names.names).get(&ip), Some(Lookup::Failed(_))), "not asked again yet");
+        lock(&names.names).extend(failed(RETRY_FAILED).map(|lookup| (ip, lookup)));
+        assert_eq!(names.get(ip), None);
+        let stale = matches!(lock(&names.names).get(&ip), Some(Lookup::Failed(at)) if at.elapsed() >= RETRY_FAILED);
+        assert!(!stale, "asked again");
     }
 
     #[test]

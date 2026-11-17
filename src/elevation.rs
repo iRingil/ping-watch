@@ -1,15 +1,19 @@
-//! Administrator rights: whether Ping Watch runs with them (checked once at start, no prompt), and restarting it
-//! with them through the UAC prompt. TCP probes need them; everything else works without.
+//! Administrator rights: whether Ping Watch runs with them or could get them (checked once at start, no prompt),
+//! and restarting it with them through the UAC prompt. TCP probes need them; everything else works without.
 
 use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::Security::{
+    CheckTokenMembership, CreateWellKnownSid, GetTokenInformation, PSID, SECURITY_MAX_SID_SIZE, TOKEN_ELEVATION_TYPE,
+    TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevationType, TokenElevationTypeLimited, WinBuiltinAdministratorsSid,
+};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::BOOL;
 use windows::core::{HSTRING, w};
 
 /// Command-line option of a restarted instance: the process id of the instance it replaces.
@@ -19,36 +23,85 @@ const AFTER_WAIT: Duration = Duration::from_secs(15);
 /// `ShellExecuteW` results above this mean success.
 const SHELL_EXECUTE_OK: isize = 32;
 
-/// Whether this process runs with administrator rights (elevated); `false` if it can't be told.
-pub fn is_elevated() -> bool {
+/// What this process may do about administrator rights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rights {
+    /// It runs with them.
+    Elevated,
+    /// It runs without them in an administrator's account: the UAC prompt only asks that user's yes.
+    CanElevate,
+    /// It runs in an account without them: the UAC prompt would ask for another account's password, and Ping
+    /// Watch would then run in that account's profile, with other data. Not offered.
+    Standard,
+}
+
+impl Rights {
+    /// Whether TCP probes can run.
+    pub fn elevated(self) -> bool {
+        self == Self::Elevated
+    }
+}
+
+/// This process's [`Rights`], checked once at start (no prompt); [`Rights::Standard`] if they can't be told.
+/// Elevated means the administrators group is in force in its token, which is what the raw socket of TCP probes
+/// needs: with UAC off, a token restricted to a basic user still reads as "elevated" otherwise.
+pub fn rights() -> Rights {
+    match in_administrators() {
+        Ok(true) => return Rights::Elevated,
+        Ok(false) => {}
+        Err(error) => log::warn!("cannot read this process's rights: {error}"),
+    }
     let mut token = HANDLE::default();
     // SAFETY: the pseudo handle of the current process needs no closing; `token` receives a handle we close below.
     if let Err(error) = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } {
         log::warn!("cannot read this process's rights: {error}");
-        return false;
+        return Rights::Standard;
     }
-    let mut elevation = TOKEN_ELEVATION::default();
-    let mut returned = 0_u32;
-    // SAFETY: `token` is the open token; the buffer is `elevation` with its exact size.
-    let read = unsafe {
-        GetTokenInformation(
-            token,
-            TokenElevation,
-            Some((&raw mut elevation).cast()),
-            u32::try_from(size_of::<TOKEN_ELEVATION>()).unwrap_or(u32::MAX),
-            &raw mut returned,
-        )
-    };
+    let mut elevation_type = TOKEN_ELEVATION_TYPE::default();
+    let read = token_information(token, TokenElevationType, &mut elevation_type);
     // SAFETY: `token` was opened above and isn't used after this.
     if let Err(error) = unsafe { CloseHandle(token) } {
         log::debug!("cannot close the token handle: {error}");
     }
     match read {
-        Ok(()) => elevation.TokenIsElevated != 0,
+        // The filtered token of an administrator; its full one is a yes away.
+        Ok(()) if elevation_type == TokenElevationTypeLimited => Rights::CanElevate,
+        Ok(()) => Rights::Standard,
         Err(error) => {
             log::warn!("cannot read this process's rights: {error}");
-            false
+            Rights::Standard
         }
+    }
+}
+
+/// Whether the administrators group is enabled in this process's token (not only present, as it is, deny-only, in
+/// the filtered token of an administrator).
+fn in_administrators() -> windows::core::Result<bool> {
+    // A SID buffer of the largest size, aligned as a SID needs.
+    let mut buffer = [0_u32; SECURITY_MAX_SID_SIZE as usize / 4];
+    let mut size = u32::try_from(size_of_val(&buffer)).unwrap_or(u32::MAX);
+    let sid = PSID((&raw mut buffer).cast());
+    // SAFETY: `sid` points to `buffer`, writable and `size` bytes long, which lives across both calls.
+    unsafe { CreateWellKnownSid(WinBuiltinAdministratorsSid, None, Some(sid), &raw mut size) }?;
+    let mut member = BOOL::default();
+    // SAFETY: no token: the calling thread's own is checked; `sid` holds the SID written above.
+    unsafe { CheckTokenMembership(None, sid, &raw mut member) }?;
+    Ok(member.as_bool())
+}
+
+/// Reads the `class` information of the open `token` into `value`, the plain struct or enum Windows fills for it.
+fn token_information<T>(token: HANDLE, class: TOKEN_INFORMATION_CLASS, value: &mut T) -> windows::core::Result<()> {
+    let mut returned = 0_u32;
+    // SAFETY: `token` is an open token with query access; the buffer is `value` with its exact size, of the type
+    // Windows writes for `class` (the callers pair them).
+    unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            Some((&raw mut *value).cast()),
+            u32::try_from(size_of::<T>()).unwrap_or(u32::MAX),
+            &raw mut returned,
+        )
     }
 }
 

@@ -1,5 +1,5 @@
-//! The Settings window, opened from the gear: pages General, Tracing, Appearance, Language and About. Changes apply
-//! at once (the app stores them); there is nothing to confirm.
+//! The Settings window, opened from the gear: pages General, Tracing, Appearance, Columns, Language and About.
+//! Changes apply at once (the app stores them); there is nothing to confirm.
 
 use std::path::Path;
 use std::time::Duration;
@@ -7,6 +7,7 @@ use std::time::Duration;
 use eframe::egui::{self, Align, DragValue, Grid, Layout, RichText, Ui};
 
 use crate::APP_NAME;
+use crate::elevation::Rights;
 use crate::i18n::{Lang, Language, Message, n, tr, trf, trn};
 use crate::store::autostart;
 use crate::store::settings::{AppSettings, MAX_HOPS, RETENTIONS, TIMEOUTS};
@@ -21,7 +22,7 @@ use crate::update::{Check, Outcome, REPOSITORY, UpdateError};
 /// Width of the window's content: the widest page in any language (About in Spanish, 604 points, measured
 /// 2026-11-15), so the window is the same size on every page.
 const WIDTH: f32 = 610.0;
-/// Height of a page: the tallest one (Trace, about 343 points), so switching pages doesn't make the window jump.
+/// Height of a page: the tallest one (Tracing, about 343 points), so switching pages doesn't make the window jump.
 const PAGE_HEIGHT: f32 = 345.0;
 /// Side of the logo on the About page.
 const LOGO_SIZE: f32 = 96.0;
@@ -149,7 +150,7 @@ impl SettingsWindow {
     }
 
     /// Draws the window if it is open; `settings` are changed in place. `data_folder` is where the history lives;
-    /// `elevated` tells whether TCP probes can be chosen. Returns whether the user asked to restart Ping Watch with
+    /// `rights` tell whether TCP probes can be chosen. Returns whether the user asked to restart Ping Watch with
     /// administrator rights.
     pub fn show(
         &mut self,
@@ -157,7 +158,7 @@ impl SettingsWindow {
         settings: &mut AppSettings,
         tables: Tables<'_>,
         data_folder: Option<&Path>,
-        elevated: bool,
+        rights: Rights,
     ) -> bool {
         if !self.open {
             return false;
@@ -184,7 +185,7 @@ impl SettingsWindow {
                 ui.spacing_mut().combo_width = COMBO_WIDTH;
                 match self.page {
                     Page::General => self.general(ui, settings),
-                    Page::Tracing => restart_elevated = tracing(ui, settings, elevated),
+                    Page::Tracing => restart_elevated = tracing(ui, settings, rights),
                     Page::Appearance => appearance(ui, settings),
                     Page::Columns => columns(ui, tables),
                     Page::Language => language(ui, settings),
@@ -230,9 +231,10 @@ impl SettingsWindow {
     }
 }
 
-/// Tracing: what new targets start with (TCP probes only with administrator rights, `elevated`), probe timeout
-/// hop limit (how many hops are shown) and names, history retention. Returns whether the user asked to restart with administrator rights.
-fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
+/// Tracing: what new targets start with (TCP probes only with administrator rights, `rights`), the probe timeout,
+/// the hop limit (how many hops are shown) and names, the history retention. Returns whether the user asked to
+/// restart with administrator rights.
+fn tracing(ui: &mut Ui, settings: &mut AppSettings, rights: Rights) -> bool {
     let language = ui.language();
     let mut restart_elevated = false;
     settings_grid(ui, "settings-tracing", |ui| {
@@ -253,7 +255,7 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
         ui.end_row();
         ui.weak(tr!(ui, "New targets: probe"));
         ui.horizontal(|ui| {
-            restart_elevated = tab::probe_choice(ui, &mut settings.defaults.probe, elevated).restart_elevated;
+            restart_elevated = tab::probe_choice(ui, &mut settings.defaults.probe, rights).restart_elevated;
         });
         ui.end_row();
         ui.weak(tr!(ui, "Wait for an answer"));
@@ -261,13 +263,22 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
             trf!(language, "{ms} ms", ms = timeout.as_millis())
         });
         ui.end_row();
-        ui.weak(tr!(ui, "Hop limit"));
-        choice(ui, "max-hops", &mut settings.max_hops, &MAX_HOPS, |hops| {
-            trn!(language, u64::from(*hops), "{n} hop|{n} hops")
-        });
+        let limit = tr!(
+            ui,
+            "How many hops the table shows; the first ones after hop 1 are folded into one row. The trace always goes up to 40 hops."
+        );
+        ui.weak(tr!(ui, "Hop limit")).on_hover_text(limit);
+        ui.scope(|ui| {
+            choice(ui, "max-hops", &mut settings.max_hops, &MAX_HOPS, |hops| {
+                trn!(language, u64::from(*hops), "{n} hop|{n} hops")
+            });
+        })
+        .response
+        .on_hover_text(limit);
         ui.end_row();
-        ui.weak(tr!(ui, "Hop names"));
-        ui.checkbox(&mut settings.resolve_names, tr!(ui, "Look up by reverse DNS"));
+        let names = tr!(ui, "Off: no reverse DNS queries are sent, the Name column stays empty.");
+        ui.weak(tr!(ui, "Hop names")).on_hover_text(names);
+        ui.checkbox(&mut settings.resolve_names, tr!(ui, "Look up by reverse DNS")).on_hover_text(names);
         ui.end_row();
         // Said on hover: the page has no room for another line in every language.
         let applies = tr!(
@@ -320,12 +331,13 @@ fn appearance(ui: &mut Ui, settings: &mut AppSettings) {
 /// to the defaults and the toolbar legend as a preview.
 fn zones_editor(ui: &mut Ui, zones: &mut Zones) {
     let (mut fine, mut slow) = (zones.fine_ms(), zones.slow_ms());
+    let unit = format!(" {}", tr!(ui, "ms"));
     Grid::new("latency-zones").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label(tr!(ui, "Fine below"));
-        ui.add(DragValue::new(&mut fine).range(Zones::MIN_MS..=slow.saturating_sub(1)).speed(1.0).suffix(" ms"));
+        ui.add(DragValue::new(&mut fine).range(Zones::MIN_MS..=slow.saturating_sub(1)).speed(1.0).suffix(&unit));
         ui.end_row();
         ui.label(tr!(ui, "Slow below"));
-        ui.add(DragValue::new(&mut slow).range(fine.saturating_add(1)..=Zones::MAX_MS).speed(1.0).suffix(" ms"));
+        ui.add(DragValue::new(&mut slow).range(fine.saturating_add(1)..=Zones::MAX_MS).speed(1.0).suffix(&unit));
         ui.end_row();
     });
     if let Some(changed) = Zones::new(fine, slow) {
@@ -344,7 +356,7 @@ fn zones_editor(ui: &mut Ui, zones: &mut Zones) {
     });
 }
 
-/// Language: the interface language (only English so far). The choices run top to bottom, then left to right, in
+/// Language: the interface language, one of [`Language::ALL`]. The choices run top to bottom, then left to right, in
 /// up to [`LANGUAGE_COLUMNS`] columns.
 fn language(ui: &mut Ui, settings: &mut AppSettings) {
     let languages = Language::ALL;

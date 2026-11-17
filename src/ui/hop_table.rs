@@ -48,15 +48,17 @@ const HEADERS: [(&str, bool, &str); 11] = [
     (n!("PL%"), true, n!("Packet loss: share of probes without an answer, %")),
     (n!("PL pcs"), true, n!("Packet loss: number of probes without an answer")),
 ];
-/// The hop table's columns as stored in `store`: all but the latency bars can be dragged, all but Hop hidden.
+/// The hop table's columns as stored in `store`: all but the latency bars can be dragged, all but Hop, IP and
+/// Name hidden.
 pub fn column_set(store: Option<&WindowStore>) -> ColumnWidths {
     ColumnWidths::load("hop-table", &HEADERS.map(|(title, _, _)| title), &FIXED_COLUMNS, store)
 }
 
 /// Position of the Name column, which takes the room the others leave by default.
 const NAME_COLUMN: usize = 3;
-/// Columns that can't be hidden: Hop (it also paints the header band).
-const FIXED_COLUMNS: [usize; 1] = [0];
+/// Columns that can't be hidden: Hop (its checkbox charts the hop; it also paints the header band), IP and Name
+/// (they say which router a row is; Name also holds the round trip row's title).
+const FIXED_COLUMNS: [usize; 3] = [0, 2, NAME_COLUMN];
 
 /// How bad a hop's packet loss is; picks the badge and PL% color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,8 +226,12 @@ fn hop_row(
             if let Some(address) = columns::cell(row, shown, 2, |ui| cell(ui, false, ip.to_string())) {
                 address.on_hover_text(ip.to_string());
             }
-            let name = names.get(ip).unwrap_or_else(|| ip.to_string());
-            if let Some(name_cell) = columns::cell(row, shown, NAME_COLUMN, |ui| cell(ui, false, name.clone())) {
+            // Empty while the lookup runs, with lookups off, and without a PTR record (the lookup gives back the
+            // address then): the IP is in its own column.
+            let name = names.get(ip).filter(|name| *name != ip.to_string());
+            let name_cell =
+                columns::cell(row, shown, NAME_COLUMN, |ui| cell(ui, false, name.clone().unwrap_or_default()));
+            if let (Some(name_cell), Some(name)) = (name_cell, name) {
                 name_cell.on_hover_text(name);
             }
         }
@@ -287,25 +293,19 @@ fn paint_hidden(ui: &Ui, cell: Rect, row_width: f32, body_top: f32, hidden: usiz
 
 /// Fills the summary row of the whole round trip (the target hop), with the focus period under the bars.
 /// The row reads as a summary, not another hop: a header-colored band with a rule above it. Its title sits in the
-/// Name column, or in IP while Name is hidden.
+/// Name column, which can't be hidden.
 fn round_trip_row(row: &mut TableRow<'_, '_>, shown: &[bool], stats: &HopStats, focus: Option<&str>) {
     let emphasis = |text: String| RichText::new(text).font(theme::heading_font(14.5));
-    let title_column = if shown.get(NAME_COLUMN).copied().unwrap_or(false) { NAME_COLUMN } else { 2 };
-    let title = |ui: &mut Ui| {
-        summary_band(ui);
-        cell(ui, true, emphasis(tr!(ui, "Round trip (ms)").to_owned()));
-    };
     columns::cell(row, shown, 0, summary_band);
     columns::cell(row, shown, 1, |ui| {
         summary_band(ui);
         cell(ui, true, emphasis(stats.sent().to_string()));
     });
-    if title_column == 2 {
-        columns::cell(row, shown, 2, title);
-    } else {
-        columns::cell(row, shown, 2, summary_band);
-        columns::cell(row, shown, NAME_COLUMN, title);
-    }
+    columns::cell(row, shown, 2, summary_band);
+    columns::cell(row, shown, NAME_COLUMN, |ui| {
+        summary_band(ui);
+        cell(ui, true, emphasis(tr!(ui, "Round trip (ms)").to_owned()));
+    });
     stat_cols(row, shown, stats, true);
     row.col(|ui| {
         summary_band(ui);
