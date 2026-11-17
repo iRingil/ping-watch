@@ -230,6 +230,9 @@ pub fn cell(
 pub fn scope<R>(ui: &mut Ui, id: &str, add_table: impl FnOnce(&mut Ui) -> R) -> R {
     ui.scope_builder(UiBuilder::new().scope_id(Id::unique(id)), |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
+        // The tables are read, not copied from (a snapshot is for that): a click selects a row, not text, and a
+        // right click on a header title opens the column menu like one beside it.
+        ui.style_mut().interaction.selectable_labels = false;
         ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
         add_table(ui)
     })

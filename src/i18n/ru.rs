@@ -284,11 +284,11 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Tell me", "Сообщать"),
     ("The alert journal couldn't be written: {error}", "Не удалось записать журнал оповещений: {error}"),
     ("The chart appears once the trace runs.", "График появится, когда пойдёт трассировка."),
-    ("The comment wasn't saved: {error}", "Комментарий не сохранён: {error}"),
     (
-        "The history of the selected hop appears here once a trace runs.",
-        "Здесь появится история выбранного хопа, когда пойдёт трассировка.",
+        "The charts of the ticked hops appear here once a trace runs.",
+        "Графики отмеченных хопов появятся здесь, когда пойдёт трассировка.",
     ),
+    ("The comment wasn't saved: {error}", "Комментарий не сохранён: {error}"),
     (
         "The history period applies at once: older probes, comments and alert journal entries are deleted.",
         "Срок хранения действует сразу: более старые замеры, комментарии и записи журнала оповещений удаляются.",
@@ -308,6 +308,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Third-party licenses", "Лицензии компонентов"),
     ("This address is already in the list", "Этот адрес уже есть в списке"),
     ("This is not a host name or an IP address", "Это не имя хоста и не IP-адрес"),
+    ("Tick a hop in the table to chart it here.", "Отметьте хоп в таблице, чтобы увидеть здесь его график."),
     ("Tick to show the chart below; the state of the trace", "Галочка показывает график ниже; состояние трассировки"),
     ("Trace (Enter)", "Трассировать (Enter)"),
     ("Trace in a new tab (Enter)", "Трассировать в новой вкладке (Enter)"),

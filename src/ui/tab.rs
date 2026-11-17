@@ -32,7 +32,7 @@ use crate::ui::icons::{self, Icon, Style};
 use crate::ui::latency_bars;
 use crate::ui::target_entry::TargetEntry;
 use crate::ui::theme;
-use crate::ui::timeline::{Period, Series, Timeline, Window};
+use crate::ui::timeline::{self, Period, Series, Timeline, Window};
 
 /// Names of the probe intervals offered ([`INTERVALS`], in the same order).
 const INTERVAL_LABELS: [&str; 7] = [
@@ -137,6 +137,34 @@ pub struct Overview {
     pub reached: bool,
 }
 
+/// Least height of a hop chart in a tab: the charts share the pane equally, and below this the pane scrolls.
+const HOP_CHART_MIN_HEIGHT: f32 = 180.0;
+
+/// A hop charted below the hop table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChartedHop {
+    /// The target (the last row, whatever its TTL): its line survives the route changing length.
+    Target,
+    /// The router at this TTL.
+    Ttl(u8),
+}
+
+/// The chart of one hop.
+#[derive(Debug)]
+struct HopChart {
+    /// The hop.
+    hop: ChartedHop,
+    /// Its chart.
+    timeline: Timeline,
+}
+
+impl HopChart {
+    /// A chart of `hop`.
+    fn new(hop: ChartedHop) -> Self {
+        Self { hop, timeline: Timeline::default() }
+    }
+}
+
 /// One target tab.
 #[derive(Debug)]
 pub struct Tab {
@@ -150,10 +178,14 @@ pub struct Tab {
     warning: Option<String>,
     /// Interface language, taken from the settings every frame (for texts made outside drawing).
     language: Language,
-    /// Hop chosen for the timeline by clicking its row; `None` means the target hop.
+    /// Hop highlighted by clicking its row; `None` means the target hop.
     selected_ttl: Option<u8>,
-    /// Timeline pane state.
-    timeline: Timeline,
+    /// Hops charted below the table (ticked in the table), the target at first.
+    charts: Vec<HopChart>,
+    /// Period of the charts, the same for all of them.
+    chart_period: Period,
+    /// Right end of the charts, Unix ms; `None` follows the current time.
+    chart_end_ms: Option<i64>,
     /// Probe interval.
     interval: Duration,
     /// Period the hop table summarizes.
@@ -177,15 +209,15 @@ pub struct Tab {
 impl Tab {
     /// An empty tab asking for a host, with the interval, focus and timeline period of `defaults`.
     pub fn new(defaults: TraceSettings) -> Self {
-        let mut timeline = Timeline::default();
-        timeline.set_period(defaults.period);
         Self {
             entry: TargetEntry::new(true),
             host: String::new(),
             state: State::Editing(None),
             warning: None,
             selected_ttl: None,
-            timeline,
+            charts: vec![HopChart::new(ChartedHop::Target)],
+            chart_period: defaults.period,
+            chart_end_ms: None,
             interval: defaults.interval,
             focus: defaults.focus,
             probe: defaults.probe,
@@ -281,12 +313,8 @@ impl Tab {
         let (State::Running(_), Some(targets)) = (&self.state, targets) else {
             return;
         };
-        let current = TraceSettings {
-            interval: self.interval,
-            focus: self.focus,
-            period: self.timeline.period(),
-            probe: self.probe,
-        };
+        let current =
+            TraceSettings { interval: self.interval, focus: self.focus, period: self.chart_period, probe: self.probe };
         if self.saved_settings == Some(current) {
             return;
         }
@@ -332,8 +360,14 @@ impl Tab {
     /// Starts resolving `host` in the background (stopping any running trace); tracing begins once it resolves.
     fn begin(&mut self, host: String) {
         self.state = State::Editing(None);
+        let changed = self.host != host.trim();
         self.host = host.trim().to_owned();
         self.selected_ttl = None;
+        if changed {
+            // Another target: its own hops, starting with the target's chart.
+            self.charts = vec![HopChart::new(ChartedHop::Target)];
+            self.chart_end_ms = None;
+        }
         self.warning = None;
         if self.host.is_empty() {
             return;
@@ -367,9 +401,11 @@ impl Tab {
         {
             history::forget_in_background(path, &history_key(&self.host));
         }
-        let period = self.timeline.period();
-        self.timeline = Timeline::default();
-        self.timeline.set_period(period);
+        // The charts drop what they read before the reset.
+        for chart in &mut self.charts {
+            chart.timeline = Timeline::default();
+        }
+        self.chart_end_ms = None;
     }
 
     /// Moves a resolving tab on once the address is known: starts the history recorder and the tracer.
@@ -409,7 +445,7 @@ impl Tab {
         if let Some(settings) = self.saved_settings {
             self.interval = settings.interval;
             self.focus = settings.focus;
-            self.timeline.set_period(settings.period);
+            self.chart_period = settings.period;
             self.probe = settings.probe;
         }
         let key = history_key(&self.host);
@@ -463,10 +499,95 @@ impl Tab {
         self.state = State::Editing(Some(error));
     }
 
+    /// Time range the charts show, Unix ms (`now_ms` is the right end while they follow the current time).
+    fn chart_range(&self, now_ms: i64) -> (i64, i64) {
+        let end = self.chart_end_ms.unwrap_or(now_ms);
+        (end.saturating_sub(self.chart_period.millis()), end)
+    }
+
+    /// Switches the chart of the hop at `ttl` on or off; the last row of `route` is charted as the target.
+    fn toggle_chart(&mut self, route: &Route, ttl: u8) {
+        let hop = if target_row(route) == Some(ttl) { ChartedHop::Target } else { ChartedHop::Ttl(ttl) };
+        let charted = |chart: &HopChart| chart.hop == hop || chart_ttl(chart.hop, route) == Some(ttl);
+        if self.charts.iter().any(charted) {
+            self.charts.retain(|chart| !charted(chart));
+        } else {
+            self.charts.push(HopChart::new(hop));
+        }
+    }
+
+    /// The charts of the ticked hops, one under another in route order, all over the same period: a period or
+    /// position changed in one goes to the others. They share the pane's height; once that would make them
+    /// shorter than [`HOP_CHART_MIN_HEIGHT`], the pane scrolls. The slider is under the last one only.
+    fn show_charts(
+        &mut self,
+        ui: &mut Ui,
+        route: &Route,
+        target_id: Option<i64>,
+        names: &NameCache,
+        history_path: Option<&Path>,
+    ) {
+        let mut shown: Vec<(u8, usize)> = self
+            .charts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, chart)| chart_ttl(chart.hop, route).map(|ttl| (ttl, index)))
+            .collect();
+        shown.sort_unstable();
+        if shown.is_empty() {
+            ui.weak(tr!(ui, "Tick a hop in the table to chart it here."));
+            return;
+        }
+        let gap = ui.spacing().item_spacing.y;
+        // The slider's row goes to the last chart on top of its share, so all the plots are as tall.
+        let slider = timeline::slider_height(ui);
+        #[expect(clippy::cast_precision_loss, reason = "a handful of charts")]
+        let height = {
+            let count = shown.len() as f32;
+            ((ui.available_height() - slider - gap * (count - 1.0)) / count).max(HOP_CHART_MIN_HEIGHT)
+        };
+        let (mut period, mut end_ms) = (self.chart_period, self.chart_end_ms);
+        let last = shown.len().saturating_sub(1);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for (position, (ttl, index)) in shown.iter().enumerate() {
+                let Some(chart) = self.charts.get_mut(*index) else {
+                    continue;
+                };
+                chart.timeline.set_period(self.chart_period);
+                chart.timeline.set_end_ms(self.chart_end_ms);
+                chart.timeline.set_slider_hidden(position != last);
+                let height = if position == last { height + slider } else { height };
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(Layout::top_down(Align::Min))
+                        .id_salt(("hop-chart", *ttl)),
+                );
+                child.set_clip_rect(rect.intersect(ui.clip_rect()));
+                let title = hop_title(route, *ttl, names, self.language);
+                let key = match chart.hop {
+                    ChartedHop::Target => HopKey::Target,
+                    ChartedHop::Ttl(ttl) => HopKey::Ttl(ttl),
+                };
+                chart.timeline.show(&mut child, history_path, target_id, key, &title, self.interval);
+                // What this chart's controls changed applies to all of them from the next frame.
+                if chart.timeline.period() != self.chart_period {
+                    period = chart.timeline.period();
+                }
+                if chart.timeline.end_ms() != self.chart_end_ms {
+                    end_ms = chart.timeline.end_ms();
+                }
+            }
+        });
+        self.chart_period = period;
+        self.chart_end_ms = end_ms;
+    }
+
     /// Current route with the tab's focus, if tracing.
     fn route(&self) -> Option<Route> {
         let now_ms = history::unix_ms(SystemTime::now());
-        self.route_with(self.focus, self.timeline.visible_range(now_ms))
+        self.route_with(self.focus, self.chart_range(now_ms))
     }
 
     /// Current route summarized over `focus`, where Auto means `visible` (Unix ms), if tracing.
@@ -557,14 +678,14 @@ impl Tab {
             .map(|hidden| hop_table::hidden_text(self.language, hidden, limit));
         let focus = focus_range(&route).unwrap_or_else(|| tr!(self.language, "since the trace started").to_owned());
         let now_ms = history::unix_ms(SystemTime::now());
-        let (from_ms, to_ms) = self.timeline.visible_range(now_ms);
+        let (from_ms, to_ms) = self.chart_range(now_ms);
         let alerts = journal
             .iter()
             .filter(|entry| same_host(&entry.host, &self.host))
             .filter(|entry| entry.started_ms <= to_ms && entry.ended_ms.is_none_or(|ended| ended >= from_ms))
             .map(|entry| alert_row(entry, self.language))
             .collect();
-        let chart = self.chart_over(reader, self.timeline.period(), to_ms);
+        let chart = self.chart_over(reader, self.chart_period, to_ms);
         Some(TargetReport { label, focus, hops, hidden, chart, alerts })
     }
 
@@ -606,7 +727,7 @@ impl Tab {
     /// Final-hop numbers with the tab's own focus.
     pub fn overview(&self) -> Overview {
         let now_ms = history::unix_ms(SystemTime::now());
-        self.overview_with(self.focus, self.timeline.visible_range(now_ms))
+        self.overview_with(self.focus, self.chart_range(now_ms))
     }
 
     /// Final-hop numbers summarized over `focus`, where Auto means `visible` (Unix ms) — for the overview page,
@@ -690,29 +811,31 @@ impl Tab {
         let (table_rect, splitter_rect, timeline_rect) = split(area, *table_share);
         splitter(ui, splitter_rect, area, table_share);
 
+        let charted: Vec<u8> = route
+            .as_ref()
+            .map(|route| self.charts.iter().filter_map(|chart| chart_ttl(chart.hop, route)).collect())
+            .unwrap_or_default();
         pane(ui, table_rect, Margin::same(1), |ui| {
             let focus = route.as_ref().and_then(focus_range).map(|range| trf!(ui, "Focus {range}", range = range));
-            if let Some(clicked) =
-                hop_table::show(ui, route.as_ref(), limit, context.names, ttl, focus.as_deref(), columns)
-            {
-                self.selected_ttl = Some(clicked);
+            let clicks =
+                hop_table::show(ui, route.as_ref(), limit, context.names, ttl, &charted, focus.as_deref(), columns);
+            if let Some(selected) = clicks.selected {
+                self.selected_ttl = Some(selected);
+            }
+            if let (Some(ttl), Some(route)) = (clicks.charted, &route) {
+                self.toggle_chart(route, ttl);
             }
         });
-        pane(ui, timeline_rect, Margin::same(8), |ui| match (&self.state, &route, ttl) {
-            (State::Running(session), Some(route), Some(ttl)) => {
-                let title = hop_title(route, ttl, context.names, self.language);
-                // The target's line is read by target, not hop number, so it keeps its history when the route
-                // length changes; so is the silent last row of a target that doesn't answer, which stands for it
-                // (its probes are recorded as the target's).
-                let is_target = route
-                    .hops()
-                    .last()
-                    .is_some_and(|hop| hop.ttl == ttl && hop.address.is_none_or(|address| address == route.target()));
-                let hop = if is_target { HopKey::Target } else { HopKey::Ttl(ttl) };
-                self.timeline.show(ui, context.history_path, session.target_id, hop, &title, self.interval);
+        let target_id = match &self.state {
+            State::Running(session) => Some(session.target_id),
+            State::Editing(_) | State::Resolving(_) => None,
+        };
+        pane(ui, timeline_rect, Margin::same(8), |ui| match (target_id, &route) {
+            (Some(target_id), Some(route)) => {
+                self.show_charts(ui, route, target_id, context.names, context.history_path);
             }
             _ => {
-                ui.weak(tr!(ui, "The history of the selected hop appears here once a trace runs."));
+                ui.weak(tr!(ui, "The charts of the ticked hops appear here once a trace runs."));
             }
         });
         action
@@ -1051,6 +1174,26 @@ fn date_time(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|time| time.with_timezone(&chrono::Local).format("%d.%m %H:%M:%S").to_string())
         .unwrap_or_default()
+}
+
+/// TTL of the last row of `route` when it stands for the target: the target answered there, or it doesn't answer
+/// and the row is the silent end of the route (its probes are recorded as the target's).
+fn target_row(route: &Route) -> Option<u8> {
+    route
+        .hops()
+        .last()
+        .filter(|hop| hop.address.is_none_or(|address| address == route.target()))
+        .map(|hop| hop.ttl)
+}
+
+/// The row of `route` that charted `hop` is drawn for: the target's row, or the router's while it lies on the route
+/// before the target; `None` if it isn't on the route (anymore).
+fn chart_ttl(hop: ChartedHop, route: &Route) -> Option<u8> {
+    let target = target_row(route);
+    match hop {
+        ChartedHop::Target => target,
+        ChartedHop::Ttl(ttl) => (target != Some(ttl) && route.hops().iter().any(|row| row.ttl == ttl)).then_some(ttl),
+    }
 }
 
 /// Timeline title of hop `ttl`, in the style of the target labels: "Hop 10: 208.67.222.222 / dns.sse.cisco.com"

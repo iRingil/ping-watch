@@ -26,8 +26,8 @@ const LATENCY_MIN_WIDTH: f32 = 200.0;
 const HEADER_INSET: f32 = 4.0;
 /// Height of the header row.
 const HEADER_HEIGHT: f32 = 26.0;
-/// Width of the Hop column.
-const HOP_WIDTH: f32 = 40.0;
+/// Width of the Hop column: the chart checkbox and the hop number.
+const HOP_WIDTH: f32 = 64.0;
 /// Width of the IP column (fits an IPv4 address; IPv6 ones are clipped, the full address is in the timeline).
 const IP_WIDTH: f32 = 130.0;
 /// Width of a numeric column.
@@ -91,19 +91,30 @@ impl LossLevel {
     }
 }
 
+/// What the user did in the hop table this frame, by TTL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Clicks {
+    /// The row clicked: it gets highlighted.
+    pub selected: Option<u8>,
+    /// The row whose chart was switched on or off (its checkbox, or a double click on the row).
+    pub charted: Option<u8>,
+}
+
 /// Draws the hop table of `route` (just the header without one) with the latency bars; at most `limit` hops are
 /// shown, those after the first hop beyond it are folded into one row. Hop names come from `names`, the `selected` hop is
-/// highlighted, `focus` labels the period under the bars. Returns the TTL of the hop row clicked in this frame. The
+/// highlighted, the `charted` hops have their checkbox ticked, `focus` labels the period under the bars. The
 /// columns can be dragged wider or narrower and hidden from the header's right-click menu; `columns` keeps them.
+#[expect(clippy::too_many_arguments, reason = "the table's inputs, all needed every frame")]
 pub fn show(
     ui: &mut Ui,
     route: Option<&Route>,
     limit: u8,
     names: &NameCache,
     selected: Option<u8>,
+    charted: &[u8],
     focus: Option<&str>,
     columns: &mut ColumnWidths,
-) -> Option<u8> {
+) -> Clicks {
     let (head, tail) = route.map_or((&[][..], &[][..]), |route| route.shown(limit));
     let hidden = route.map_or(0, |route| route.hidden(limit));
     let target_hop = route.and_then(|route| route.hops().last().filter(|hop| hop.address == Some(route.target())));
@@ -111,7 +122,7 @@ pub fn show(
     let mut averages: Vec<Pos2> = Vec::new();
     // Where the averages before the hidden row end: the line connecting them breaks there.
     let mut break_at = None;
-    let mut clicked = None;
+    let mut clicks = Clicks::default();
     let mut hidden_cell = None;
     let mut body_top = f32::NEG_INFINITY;
     // One table state for all tabs: a column dragged in one tab is that wide in the others.
@@ -166,9 +177,13 @@ pub fn show(
                     }
                     body.row(ROW_HEIGHT, |mut row| {
                         row.set_selected(selected == Some(hop.ttl));
-                        averages.extend(hop_row(&mut row, &shown, hop, names, scale_ms));
-                        if row.response().clicked() {
-                            clicked = Some(hop.ttl);
+                        let mut ticked = charted.contains(&hop.ttl);
+                        averages.extend(hop_row(&mut row, &shown, hop, names, scale_ms, &mut ticked));
+                        let response = row.response();
+                        if ticked != charted.contains(&hop.ttl) || response.double_clicked() {
+                            clicks.charted = Some(hop.ttl);
+                        } else if response.clicked() {
+                            clicks.selected = Some(hop.ttl);
                         }
                     });
                 }
@@ -184,13 +199,24 @@ pub fn show(
         latency_bars::connect(ui, before);
         latency_bars::connect(ui, after);
     });
-    clicked
+    clicks
 }
 
-/// Fills in the row of one hop (the `shown` columns); returns the position of its average latency marker, if
-/// drawn.
-fn hop_row(row: &mut TableRow<'_, '_>, shown: &[bool], hop: &Hop, names: &NameCache, scale_ms: f64) -> Option<Pos2> {
-    columns::cell(row, shown, 0, |ui| badge(ui, hop));
+/// Fills in the row of one hop (the `shown` columns), with its chart checkbox `ticked`; returns the position of
+/// its average latency marker, if drawn.
+fn hop_row(
+    row: &mut TableRow<'_, '_>,
+    shown: &[bool],
+    hop: &Hop,
+    names: &NameCache,
+    scale_ms: f64,
+    ticked: &mut bool,
+) -> Option<Pos2> {
+    columns::cell(row, shown, 0, |ui| {
+        ui.add_space(HEADER_INSET);
+        ui.checkbox(ticked, "").on_hover_text(tr!(ui, "Show the chart below"));
+        badge(ui, hop);
+    });
     columns::cell(row, shown, 1, |ui| cell(ui, true, hop.stats.sent().to_string()));
     match hop.address {
         Some(ip) => {

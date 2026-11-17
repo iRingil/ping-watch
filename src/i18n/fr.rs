@@ -293,11 +293,11 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Tell me", "Me prévenir"),
     ("The alert journal couldn't be written: {error}", "Impossible d’écrire le journal des alertes\u{a0}: {error}"),
     ("The chart appears once the trace runs.", "Le graphique apparaît dès que la trace tourne."),
-    ("The comment wasn't saved: {error}", "Le commentaire n’a pas été enregistré\u{a0}: {error}"),
     (
-        "The history of the selected hop appears here once a trace runs.",
-        "L’historique du saut choisi apparaît ici dès qu’une trace tourne.",
+        "The charts of the ticked hops appear here once a trace runs.",
+        "Les graphiques des sauts cochés apparaissent ici une fois le traçage lancé.",
     ),
+    ("The comment wasn't saved: {error}", "Le commentaire n’a pas été enregistré\u{a0}: {error}"),
     (
         "The history period applies at once: older probes, comments and alert journal entries are deleted.",
         "La durée de conservation s’applique tout de suite\u{a0}: les mesures, commentaires et entrées du journal des alertes plus anciens sont supprimés.",
@@ -321,6 +321,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
         "Tick to show the chart below; the state of the trace",
         "Cocher pour afficher le graphique ci-dessous\u{a0}; état de la trace",
     ),
+    ("Tick a hop in the table to chart it here.", "Cochez un saut dans le tableau pour afficher son graphique ici."),
     ("Trace (Enter)", "Tracer (Entrée)"),
     ("Trace in a new tab (Enter)", "Tracer dans un nouvel onglet (Entrée)"),
     (

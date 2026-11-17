@@ -76,8 +76,9 @@ stands out at once. It keeps the history, so you can look back at what happened 
   them, with TCP connection requests to a port of your choice (443 by default), over IPv4 and IPv6. TCP needs no
   packet driver, only administrator rights: without them it is greyed out, with a button that restarts Ping Watch as
   administrator. The whole app then runs as administrator.
-- **History.** Every probe is stored on this PC. The timeline shows latency, jitter and loss of any hop over the
-  last minute to the last seven days; a slider goes back in time, and comments can be pinned to a moment.
+- **History.** Every probe is stored on this PC. Tick hops in the table (or double-click their rows) to chart their
+  latency, jitter and loss one under another, over the last minute to the last seven days; a slider goes back in
+  time, and comments can be pinned to a moment.
 - **Several targets.** Each target has its own tab. "All targets" shows them side by side, each with its latency bar,
   and charts the ones you tick, all over the same period.
 - **Alerts.** Rules for loss and latency, for one target or all of them, such as "loss above 5 % for two minutes".

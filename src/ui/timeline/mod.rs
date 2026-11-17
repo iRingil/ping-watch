@@ -128,6 +128,8 @@ pub struct Timeline {
     comment_failure: Option<(String, Instant)>,
     /// A small chart (All targets page): latency only, no jitter strip, no slider.
     compact: bool,
+    /// No slider under the chart: another chart of the same stack, further down, has it.
+    slider_hidden: bool,
 }
 
 impl Timeline {
@@ -144,6 +146,21 @@ impl Timeline {
     /// Shows another period.
     pub fn set_period(&mut self, period: Period) {
         self.period = period;
+    }
+
+    /// Right end of the window, Unix ms; `None` follows the current time.
+    pub fn end_ms(&self) -> Option<i64> {
+        self.end_ms
+    }
+
+    /// Moves the window's right end (`None`: follow the current time), as another chart of the stack did.
+    pub fn set_end_ms(&mut self, end_ms: Option<i64>) {
+        self.end_ms = end_ms;
+    }
+
+    /// Leaves out the slider (`hidden`), for a chart that isn't the last of its stack.
+    pub fn set_slider_hidden(&mut self, hidden: bool) {
+        self.slider_hidden = hidden;
     }
 
     /// Time range the chart shows, Unix ms.
@@ -202,7 +219,7 @@ impl Timeline {
             }
             return;
         };
-        let (response, pointer) = draw_charts(ui, shown, self.period, self.compact);
+        let (response, pointer) = draw_charts(ui, shown, self.period, self.compact, self.has_slider());
         let oldest_ms = shown.oldest_ms;
         let bucket_ms = shown.request.window.bucket_ms;
         if response.secondary_clicked() {
@@ -229,10 +246,15 @@ impl Timeline {
         if let Some(choice) = self.menu(&response) {
             self.choose(choice, target_id);
         }
-        if !self.compact {
+        if self.has_slider() {
             self.slider(ui, oldest_ms, bucket_ms, now_ms);
         }
         self.comment_dialog(ui.ctx());
+    }
+
+    /// Whether the slider is drawn under the chart.
+    fn has_slider(&self) -> bool {
+        !self.compact && !self.slider_hidden
     }
 
     /// Title, period and the shown range; with `commentable` (the target id), a button to comment the moment at the
@@ -457,8 +479,20 @@ impl Timeline {
 
 /// Draws the jitter strip and the latency chart; returns the chart's response and the time/latency under the
 /// pointer.
-/// `compact` leaves out the jitter strip and the slider's row.
-fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Response, Option<PlotPoint>) {
+/// Height of the slider's row under a chart: a stack of charts gives it to the last one on top of its share, so
+/// all their plots are as tall.
+pub fn slider_height(ui: &Ui) -> f32 {
+    ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0
+}
+
+/// `compact` leaves out the jitter strip; without `slider` no room is left for the slider's row.
+fn draw_charts(
+    ui: &mut Ui,
+    shown: &Shown,
+    period: Period,
+    compact: bool,
+    slider: bool,
+) -> (Response, Option<PlotPoint>) {
     // Grid lines are drawn by us over everything (zones included), so they look the same on zones and on the
     // bare plot; egui_plot's own grid lies under the zones and glares on the bare plot.
     let palette = theme::palette(ui);
@@ -527,7 +561,7 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
     let scale = latency.scale_ms;
     let zones = Zones::of(ui.ctx());
     // Leave exactly the slider's row: taking more than the panel has would grow the panel every frame.
-    let slider_row = if compact { 0.0 } else { ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 };
+    let slider_row = if slider { slider_height(ui) } else { 0.0 };
     let height = (ui.available_height() - slider_row).max(60.0);
     let response = base("timeline", scale, height)
         .x_axis_formatter(move |mark, _| {

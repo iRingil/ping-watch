@@ -290,11 +290,11 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Tell me", "Benachrichtigen"),
     ("The alert journal couldn't be written: {error}", "Das Alarmjournal ließ sich nicht schreiben: {error}"),
     ("The chart appears once the trace runs.", "Das Diagramm erscheint, sobald die Messung läuft."),
-    ("The comment wasn't saved: {error}", "Der Kommentar wurde nicht gespeichert: {error}"),
     (
-        "The history of the selected hop appears here once a trace runs.",
-        "Hier erscheint der Verlauf des gewählten Hops, sobald eine Messung läuft.",
+        "The charts of the ticked hops appear here once a trace runs.",
+        "Die Diagramme der angehakten Hops erscheinen hier, sobald die Messung läuft.",
     ),
+    ("The comment wasn't saved: {error}", "Der Kommentar wurde nicht gespeichert: {error}"),
     (
         "The history period applies at once: older probes, comments and alert journal entries are deleted.",
         "Die Aufbewahrungsdauer gilt sofort: Ältere Messwerte, Kommentare und Einträge im Alarmjournal werden gelöscht.",
@@ -314,6 +314,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Third-party licenses", "Lizenzen von Drittanbietern"),
     ("This address is already in the list", "Diese Adresse ist schon in der Liste"),
     ("This is not a host name or an IP address", "Das ist kein Hostname und keine IP-Adresse"),
+    (
+        "Tick a hop in the table to chart it here.",
+        "Haken Sie einen Hop in der Tabelle an, um sein Diagramm hier zu sehen.",
+    ),
     ("Tick to show the chart below; the state of the trace", "Haken zeigt das Diagramm unten; Zustand der Messung"),
     ("Trace (Enter)", "Messen (Eingabe)"),
     ("Trace in a new tab (Enter)", "In neuem Tab messen (Eingabe)"),
