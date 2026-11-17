@@ -35,19 +35,19 @@ const IP_WIDTH: f32 = 130.0;
 const NUMBER_WIDTH: f32 = 58.0;
 /// Diameter of the hop number badge.
 const BADGE_SIZE: f32 = 17.0;
-/// Column titles and whether the column is numeric (right-aligned).
-const HEADERS: [(&str, bool); 11] = [
-    (n!("Hop"), false),
-    (n!("Count"), true),
-    (n!("IP"), false),
-    (n!("Name"), false),
-    (n!("Avg"), true),
-    (n!("Min"), true),
-    (n!("Max"), true),
-    (n!("Cur"), true),
-    (n!("Jitter"), true),
-    (n!("PL%"), true),
-    (n!("PL pcs"), true),
+/// Column titles, whether the column is numeric (right-aligned) and the hint on its title.
+const HEADERS: [(&str, bool, &str); 11] = [
+    (n!("Hop"), false, n!("Hop number: how many routers away (the probe's TTL)")),
+    (n!("Count"), true, n!("Probes sent over the focus period")),
+    (n!("IP"), false, n!("Address that answered")),
+    (n!("Name"), false, n!("Name of the address by reverse DNS")),
+    (n!("Avg"), true, n!("Average round trip, ms")),
+    (n!("Min"), true, n!("Fastest round trip, ms")),
+    (n!("Max"), true, n!("Slowest round trip, ms")),
+    (n!("Cur"), true, n!("Round trip of the latest probe, ms; * if it was lost")),
+    (n!("Jitter"), true, n!("Jitter: how much the round trip varies from probe to probe, ms")),
+    (n!("PL%"), true, n!("Packet loss: share of probes without an answer, %")),
+    (n!("PL pcs"), true, n!("Packet loss: number of probes without an answer")),
 ];
 /// Position of the Name column, which takes the room the others leave by default.
 const NAME_COLUMN: usize = 3;
@@ -127,6 +127,7 @@ pub fn show(
             *name = (available - others - latency_width).max(80.0);
         }
         let shown = columns.shown().to_vec();
+        let language = ui.language();
         let builder = TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
@@ -135,21 +136,22 @@ pub fn show(
         columns
             .columns(builder, defaults, available, LATENCY_MIN_WIDTH)
             .header(HEADER_HEIGHT, |mut header| {
-                for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
+                for (index, (title, numeric, hint)) in HEADERS.into_iter().enumerate() {
                     let cell = columns::cell(&mut header, &shown, index, |ui| {
                         header_widths.push(ui.max_rect().width());
                         let title = ui.language().translate(title);
                         header_cell(ui, index == 0, numeric, title, available);
                     });
                     if let Some(response) = cell {
-                        columns.menu(&response, &HEADERS.map(|(title, _)| title), &FIXED_COLUMNS);
+                        let response = response.on_hover_text(language.translate(hint));
+                        columns.menu(&response, &HEADERS.map(|(title, _, _)| title), &FIXED_COLUMNS);
                     }
                 }
                 let (_, latency) = header.col(|ui| {
                     body_top = ui.max_rect().bottom();
                     latency_bars::header(ui, scale_ms);
                 });
-                columns.menu(&latency, &HEADERS.map(|(title, _)| title), &FIXED_COLUMNS);
+                columns.menu(&latency, &HEADERS.map(|(title, _, _)| title), &FIXED_COLUMNS);
             })
             .body(|mut body| {
                 for (index, hop) in head.iter().chain(tail).enumerate() {

@@ -35,18 +35,19 @@ const TARGET_WIDTH: f32 = 208.0;
 const IP_WIDTH: f32 = 238.0;
 /// Width of a numeric column.
 const NUMBER_WIDTH: f32 = 70.0;
-/// Column titles and whether the column is numeric (right-aligned): all but the latency bars, which come last.
-const HEADERS: [(&str, bool); 10] = [
-    (n!("Status"), false),
-    (n!("Target"), false),
-    (n!("IP"), false),
-    (n!("Hops"), true),
-    (n!("Avg"), true),
-    (n!("Min"), true),
-    (n!("Max"), true),
-    (n!("Cur"), true),
-    (n!("PL%"), true),
-    (n!("PL pcs"), true),
+/// Column titles, whether the column is numeric (right-aligned) and the hint on its title: all but the latency
+/// bars, which come last.
+const HEADERS: [(&str, bool, &str); 10] = [
+    (n!("Status"), false, n!("Tick to show the chart below; the state of the trace")),
+    (n!("Target"), false, n!("Host as entered; click to open its tab")),
+    (n!("IP"), false, n!("Address that answered")),
+    (n!("Hops"), true, n!("Number of hops to the target")),
+    (n!("Avg"), true, n!("Average round trip, ms")),
+    (n!("Min"), true, n!("Fastest round trip, ms")),
+    (n!("Max"), true, n!("Slowest round trip, ms")),
+    (n!("Cur"), true, n!("Round trip of the latest probe, ms; * if it was lost")),
+    (n!("PL%"), true, n!("Packet loss: share of probes without an answer, %")),
+    (n!("PL pcs"), true, n!("Packet loss: number of probes without an answer")),
 ];
 /// Number of columns that can be dragged: all but the latency bars.
 const RESIZABLE_COLUMNS: usize = HEADERS.len();
@@ -278,6 +279,7 @@ impl AllTargets {
         let mut request = None;
         let mut toggle = None;
         let mut header_widths = Vec::new();
+        let language = ui.language();
         let builder = TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
@@ -285,14 +287,15 @@ impl AllTargets {
         self.columns
             .columns(builder, defaults, row_width, LATENCY_MIN_WIDTH)
             .header(ROW_HEIGHT, |mut header| {
-                let titles = HEADERS.map(|(title, _)| title);
-                for (index, (title, numeric)) in HEADERS.into_iter().enumerate() {
+                let titles = HEADERS.map(|(title, _, _)| title);
+                for (index, (title, numeric, hint)) in HEADERS.into_iter().enumerate() {
                     let cell = columns::cell(&mut header, &shown, index, |ui| {
                         header_widths.push(ui.max_rect().width());
                         let title = ui.language().translate(title);
                         hop_table::header_cell(ui, index == 0, numeric, title, row_width);
                     });
                     if let Some(response) = cell {
+                        let response = response.on_hover_text(language.translate(hint));
                         self.columns.menu(&response, &titles, &FIXED_COLUMNS);
                     }
                 }
