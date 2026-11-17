@@ -61,7 +61,7 @@ Enter an address, and Ping Watch probes every router on the way to it, again and
 stands out at once. It keeps the history, so you can look back at what happened while you were away.
 
 <p align="center">
-    <img src="docs/main-window.webp" alt="A target tab in the light and the dark theme: the hops to Cloudflare DNS over IPv6 by TCP with their latency and loss, the latency bars and the charts of two ticked hops over five minutes" width="880">
+    <img src="docs/main-window.webp" alt="A target tab in the light and the dark theme: the hops to Cloudflare DNS with their latency and loss, the latency bars and the chart of the target over five minutes" width="880">
 </p>
 
 ## Features
