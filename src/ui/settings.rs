@@ -583,12 +583,14 @@ fn is_web_link(url: &str) -> bool {
 fn columns(ui: &mut Ui, tables: Tables<'_>) {
     ui.weak(tr!(ui, "Also with a right click on a table's header."));
     ui.add_space(8.0);
+    // Both lists get as many rows as the longer one, so their buttons line up.
+    let rows = tables.hops.choice_rows(2).max(tables.all_targets.choice_rows(2));
     ui.columns(2, |halves| {
         if let [left, right] = halves {
             left.label(RichText::new(tr!(left, "Target tabs")).strong());
-            tables.hops.choices(left, 2);
+            tables.hops.choices(left, 2, rows);
             right.label(RichText::new(tr!(right, "All targets")).strong());
-            tables.all_targets.choices(right, 2);
+            tables.all_targets.choices(right, 2, rows);
         }
     });
 }

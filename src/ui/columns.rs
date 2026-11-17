@@ -149,14 +149,21 @@ impl ColumnWidths {
 
     /// The header's right-click menu on `response` (a header cell): the [`choices`](Self::choices) in one column.
     pub fn menu(&mut self, response: &Response) {
-        response.context_menu(|ui| self.choices(ui, 1));
+        response.context_menu(|ui| self.choices(ui, 1, 0));
     }
 
-    /// A checkbox per column that can be hidden, laid out in `across` columns, and a button bringing back the
-    /// default widths (enabled once the user has dragged a border).
-    pub fn choices(&mut self, ui: &mut Ui, across: usize) {
+    /// Rows the [`choices`](Self::choices) checkboxes take in `across` columns.
+    pub fn choice_rows(&self, across: usize) -> usize {
+        let hideable = (0..self.count).filter(|position| !self.fixed.contains(position)).count();
+        hideable.div_ceil(across.max(1))
+    }
+
+    /// Checkboxes of the columns that can be hidden, in `across` columns and at least `rows` rows. Below them, a
+    /// button brings back the default widths once a border was dragged.
+    pub fn choices(&mut self, ui: &mut Ui, across: usize, rows: usize) {
         let positions: Vec<usize> = (0..self.count).filter(|position| !self.fixed.contains(position)).collect();
-        Grid::new(self.name).num_columns(across).show(ui, |ui| {
+        let own_rows = self.choice_rows(across);
+        let grid = Grid::new(self.name).num_columns(across).show(ui, |ui| {
             for row in positions.chunks(across.max(1)) {
                 for position in row {
                     if let (Some(title), Some(shown)) = (self.titles.get(*position), self.shown.get_mut(*position)) {
@@ -166,6 +173,13 @@ impl ColumnWidths {
                 ui.end_row();
             }
         });
+        let missing = rows.saturating_sub(own_rows);
+        if missing > 0 && own_rows > 0 {
+            #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
+            let row_height = (grid.response.rect.height() + ui.spacing().item_spacing.y) / own_rows as f32;
+            #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
+            ui.add_space(row_height * missing as f32);
+        }
         ui.separator();
         ui.horizontal(|ui| {
             let reset = ui.add_enabled(self.widths.is_some(), Button::new(tr!(ui, "Default widths")));
