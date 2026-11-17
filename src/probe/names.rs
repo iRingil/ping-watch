@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::net::{IpAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -67,9 +67,11 @@ pub fn is_plausible_host(host: &str) -> bool {
 }
 
 /// Reverse-DNS cache; lookups run in background threads so the UI never waits for DNS. Both the cache and the
-/// number of lookups at once are bounded.
+/// number of lookups at once are bounded. Lookups can be turned off: then no address has a name.
 #[derive(Debug, Clone, Default)]
 pub struct NameCache {
+    /// Lookups are off: no new ones start and known names aren't given out.
+    off: Arc<AtomicBool>,
     /// Known addresses: `None` while the lookup runs or if it failed.
     names: Arc<Mutex<HashMap<IpAddr, Option<String>>>>,
     /// Lookups running now.
@@ -77,8 +79,17 @@ pub struct NameCache {
 }
 
 impl NameCache {
-    /// Name of `ip` if already known; the first call for an address starts its lookup and returns `None`.
+    /// Turns reverse lookups on or off.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.off.store(!enabled, Ordering::Relaxed);
+    }
+
+    /// Name of `ip` if already known; the first call for an address starts its lookup and returns `None`. Always
+    /// `None` while lookups are off.
     pub fn get(&self, ip: IpAddr) -> Option<String> {
+        if self.off.load(Ordering::Relaxed) {
+            return None;
+        }
         let mut names = lock(&self.names);
         if let Some(known) = names.get(&ip) {
             return known.clone();
@@ -120,6 +131,15 @@ mod tests {
     use super::*;
 
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn no_names_while_lookups_are_off() {
+        let names = NameCache::default();
+        names.set_enabled(false);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert_eq!(names.get(ip), None);
+        assert!(lock(&names.names).is_empty(), "no lookup started");
+    }
 
     #[test]
     fn ipv4_literal_resolves_to_itself() {

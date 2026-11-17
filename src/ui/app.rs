@@ -1228,6 +1228,7 @@ impl eframe::App for PingWatchApp {
             self.applied_language = Some(language);
         }
         self.settings.zones.apply(ctx);
+        self.names.set_enabled(self.settings.resolve_names);
         self.hide_instead_of_closing(ctx);
         self.track_window(ctx);
         self.track_tabs();

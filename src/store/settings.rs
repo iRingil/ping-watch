@@ -55,8 +55,10 @@ pub struct AppSettings {
     pub defaults: TraceSettings,
     /// How long a probe waits for its answer.
     pub timeout: Duration,
-    /// Largest TTL probed.
+    /// How many hops are shown; the first ones of a longer route are hidden.
     pub max_hops: u8,
+    /// Hop addresses are named by reverse DNS; off, no lookups are made and addresses are shown as they are.
+    pub resolve_names: bool,
     /// How long samples are kept.
     pub retention: Duration,
     /// Dark, light or following Windows.
@@ -87,6 +89,7 @@ impl Default for AppSettings {
             },
             timeout: Duration::from_secs(1),
             max_hops: 30,
+            resolve_names: true,
             // The longest period the timeline shows.
             retention: Duration::from_secs(7 * 24 * 60 * 60),
             theme: ThemeChoice::default(),
@@ -160,6 +163,7 @@ impl SettingsStore {
                 .and_then(|hops| u8::try_from(hops).ok())
                 .filter(|hops| MAX_HOPS.contains(hops))
                 .unwrap_or(fallback.max_hops),
+            resolve_names: self.get("resolve_names")?.map_or(fallback.resolve_names, |value| value == "1"),
             retention: number("retention_s")?
                 .map(Duration::from_secs)
                 .filter(|retention| RETENTIONS.contains(retention))
@@ -216,6 +220,7 @@ impl SettingsStore {
             ("probe", settings.defaults.probe.key()),
             ("timeout_ms", millis(settings.timeout)),
             ("max_hops", settings.max_hops.to_string()),
+            ("resolve_names", if settings.resolve_names { "1".to_owned() } else { "0".to_owned() }),
             ("retention_s", settings.retention.as_secs().to_string()),
             ("theme", settings.theme.key().to_owned()),
             ("check_updates", if settings.check_updates { "1".to_owned() } else { "0".to_owned() }),
@@ -261,6 +266,7 @@ mod tests {
             },
             timeout: Duration::from_secs(2),
             max_hops: 40,
+            resolve_names: false,
             retention: DAY,
             theme: ThemeChoice::Light,
             check_updates: false,

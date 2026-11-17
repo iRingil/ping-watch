@@ -210,7 +210,7 @@ impl SettingsWindow {
 }
 
 /// Tracing: what new targets start with (TCP probes only with administrator rights, `elevated`), probe timeout
-/// and hop limit (how many hops are shown), history retention. Returns whether the user asked to restart with administrator rights.
+/// hop limit (how many hops are shown) and names, history retention. Returns whether the user asked to restart with administrator rights.
 fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
     let language = ui.language();
     let mut restart_elevated = false;
@@ -244,6 +244,9 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
         choice(ui, "max-hops", &mut settings.max_hops, &MAX_HOPS, |hops| {
             trn!(language, u64::from(*hops), "{n} hop|{n} hops")
         });
+        ui.end_row();
+        ui.weak(tr!(ui, "Hop names"));
+        ui.checkbox(&mut settings.resolve_names, tr!(ui, "Look up by reverse DNS"));
         ui.end_row();
         // Said on hover: the page has no room for another line in every language.
         let applies = tr!(
