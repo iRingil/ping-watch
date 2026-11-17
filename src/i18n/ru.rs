@@ -240,8 +240,8 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Target", "Цель"),
     ("Targets", "Цели"),
     (
-        "Targets you traced before keep their own interval, focus, period and probe. Timeout and hop limit apply to traces started from now on.",
-        "Цели, которые вы уже трассировали, сохраняют свой интервал, фокус, период и протокол. Ожидание ответа и предел хопов действуют на трассировки, запущенные с этого момента.",
+        "Targets you traced before keep their own interval, focus, period and probe. The wait for an answer applies to traces started from now on.",
+        "Цели, которые вы уже трассировали, сохраняют свой интервал, фокус, период и протокол. Ожидание ответа действует на трассировки, запущенные с этого момента.",
     ),
     ("Tell me", "Сообщать"),
     ("The alert journal couldn't be written: {error}", "Не удалось записать журнал оповещений: {error}"),
@@ -319,6 +319,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("{ms} ms", "{ms} мс"),
     ("{name} above scale", "{name} выше шкалы"),
     ("{n} alert on|{n} alerts on", "{n} оповещение активно|{n} оповещения активны|{n} оповещений активно"),
+    (
+        "{n} hop hidden by the limit of {limit}|{n} hops hidden by the limit of {limit}",
+        "Скрыт {n} хоп из-за лимита в {limit}|Скрыто {n} хопа из-за лимита в {limit}|Скрыто {n} хопов из-за лимита в {limit}",
+    ),
     ("{n} hop|{n} hops", "{n} хоп|{n} хопа|{n} хопов"),
     ("{n} hour|{n} hours", "{n} ч|{n} ч|{n} ч"),
     ("{n} minute|{n} minutes", "{n} мин|{n} мин|{n} мин"),

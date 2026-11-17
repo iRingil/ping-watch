@@ -3,12 +3,12 @@
 
 use std::time::Duration;
 
-use eframe::egui::{Align, Align2, Color32, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{Align, Align2, Color32, Layout, Pos2, Rect, RichText, Sense, Stroke, TextStyle, Ui, Vec2};
 
 use crate::ui::theme::{self, Palette};
 use egui_extras::{TableBuilder, TableRow};
 
-use crate::i18n::{Lang, Language, n, tr};
+use crate::i18n::{self, Lang, Language, n, tr, trn};
 use crate::probe::names::NameCache;
 use crate::probe::route::{Hop, Route};
 use crate::probe::stats::HopStats;
@@ -82,22 +82,27 @@ impl LossLevel {
     }
 }
 
-/// Draws the hop table of `route` (just the header without one) with the latency bars; hop names come from
-/// `names`, the `selected` hop is highlighted, `focus` labels the period under the bars. Returns the TTL of the
-/// hop row clicked in this frame. The columns can be dragged wider or narrower; `columns` keeps their widths.
+/// Draws the hop table of `route` (just the header without one) with the latency bars; at most `limit` hops are
+/// shown, the first ones beyond it are folded into one row. Hop names come from `names`, the `selected` hop is
+/// highlighted, `focus` labels the period under the bars. Returns the TTL of the hop row clicked in this frame. The
+/// columns can be dragged wider or narrower; `columns` keeps their widths.
 pub fn show(
     ui: &mut Ui,
     route: Option<&Route>,
+    limit: u8,
     names: &NameCache,
     selected: Option<u8>,
     focus: Option<&str>,
     columns: &mut ColumnWidths,
 ) -> Option<u8> {
-    let hops = route.map_or(&[][..], Route::hops);
+    let hops = route.map_or(&[][..], |route| route.shown(limit));
+    let hidden = route.map_or(0, |route| route.hidden(limit));
     let target_hop = route.and_then(|route| hops.last().filter(|hop| hop.address == Some(route.target())));
     let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats), Zones::of(ui.ctx()));
     let mut averages: Vec<Pos2> = Vec::new();
     let mut clicked = None;
+    let mut hidden_cell = None;
+    let mut body_top = f32::NEG_INFINITY;
     // One table state for all tabs: a column dragged in one tab is that wide in the others.
     columns::scope(ui, "hop-table", |ui| {
         // Default widths: the latency bars get their share, Name gets whatever the fixed columns leave.
@@ -122,9 +127,15 @@ pub fn show(
                         header_cell(ui, index == 0, numeric, title, available);
                     });
                 }
-                header.col(|ui| latency_bars::header(ui, scale_ms));
+                header.col(|ui| {
+                    body_top = ui.max_rect().bottom();
+                    latency_bars::header(ui, scale_ms);
+                });
             })
             .body(|mut body| {
+                if hidden > 0 {
+                    body.row(ROW_HEIGHT, |mut row| hidden_cell = hidden_row(&mut row));
+                }
                 for hop in hops {
                     body.row(ROW_HEIGHT, |mut row| {
                         row.set_selected(selected == Some(hop.ttl));
@@ -139,6 +150,9 @@ pub fn show(
                 }
             });
         columns.take_header(&header_widths);
+        if let Some(cell) = hidden_cell {
+            paint_hidden(ui, cell, available, body_top, hidden, limit);
+        }
         latency_bars::connect(ui, &averages);
     });
     clicked
@@ -166,6 +180,42 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
     let mut average = None;
     row.col(|ui| average = latency_bars::cell(ui, &hop.stats, hop.address.is_some(), scale_ms));
     average
+}
+
+/// Takes the row standing for the hidden first hops of a route: empty cells, painted over by [`paint_hidden`]
+/// once the table is drawn. Returns where the row starts (its left top) and its height.
+fn hidden_row(row: &mut TableRow<'_, '_>) -> Option<Rect> {
+    let mut first = None;
+    row.col(|ui| first = Some(ui.max_rect()));
+    for _ in 0..RESIZABLE_COLUMNS {
+        row.col(|_| {});
+    }
+    first
+}
+
+/// Paints the row of the `hidden` first hops of a route longer than `limit` over `cell` (its first cell): one
+/// muted band across the whole row of width `row_width`, without column divisions, with the explanation in it.
+/// Painted after the table, as cells clip their own painting to themselves; nothing above `body_top` (the header's
+/// bottom), where the row goes when the table is scrolled.
+fn paint_hidden(ui: &Ui, cell: Rect, row_width: f32, body_top: f32, hidden: usize, limit: u8) {
+    let band = Rect::from_min_size(cell.min, Vec2::new(row_width, cell.height()));
+    let palette = theme::palette(ui);
+    let mut visible = band;
+    visible.min.y = visible.min.y.max(body_top);
+    let painter = ui.painter_at(visible);
+    painter.rect_filled(band, 0.0, palette.pane_header);
+    let count = u64::try_from(hidden).unwrap_or(u64::MAX);
+    let text = i18n::fill(
+        &trn!(ui, count, "{n} hop hidden by the limit of {limit}|{n} hops hidden by the limit of {limit}"),
+        &[("limit", limit.to_string())],
+    );
+    painter.text(
+        Pos2::new(band.left() + HEADER_INSET, band.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        TextStyle::Body.resolve(ui.style()),
+        palette.ink_muted,
+    );
 }
 
 /// Fills the summary row of the whole round trip (the target hop), with the focus period under the bars.
@@ -197,7 +247,7 @@ fn round_trip_row(row: &mut TableRow<'_, '_>, stats: &HopStats, focus: Option<&s
 pub fn header_cell(ui: &mut Ui, first: bool, numeric: bool, title: &str, row_width: f32) {
     let cell_rect = ui.max_rect();
     if first {
-        let row = eframe::egui::Rect::from_min_size(cell_rect.min, Vec2::new(row_width, cell_rect.height()));
+        let row = Rect::from_min_size(cell_rect.min, Vec2::new(row_width, cell_rect.height()));
         let mut painter = ui.painter().clone();
         painter.set_clip_rect(row.expand(1.0));
         painter.rect_filled(row, 0.0, theme::palette(ui).pane_header);

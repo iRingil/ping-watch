@@ -15,7 +15,7 @@ use eframe::egui::{
 use crate::alerts::WindowStats;
 use crate::i18n::{Lang, Language, n, tr, trf};
 use crate::probe::names::{NameCache, ResolveError, resolve};
-use crate::probe::route::{Hop, Route};
+use crate::probe::route::{self, Hop, Route};
 use crate::probe::tcp::TcpProber;
 use crate::probe::tracer::{Probe, ProbeError, TraceConfig, Tracer};
 use crate::snapshot::{AlertRow, Chart, HopRow, TargetReport};
@@ -129,8 +129,8 @@ pub struct Overview {
     pub status: String,
     /// Number of hops to the target, once it answered.
     pub hops: Option<usize>,
-    /// The hop standing for the target while tracing: the target itself once it answered, else the farthest probe
-    /// (all lost while the target is unreachable).
+    /// The hop standing for the target while tracing: the target itself once it answered, else the hop past the
+    /// farthest answer (all lost while the target is unreachable).
     pub target_hop: Option<Hop>,
     /// Whether the target itself answers at the end of the route.
     pub reached: bool,
@@ -428,12 +428,8 @@ impl Tab {
         if probe != self.probe {
             self.warning = Some(tr!(self.language, "TCP probes need administrator rights; probing by ICMP").to_owned());
         }
-        let config = TraceConfig {
-            interval: self.interval,
-            timeout: context.settings.timeout,
-            max_hops: context.settings.max_hops,
-            probe,
-        };
+        let config =
+            TraceConfig { interval: self.interval, timeout: context.settings.timeout, max_ttl: route::MAX_TTL, probe };
         match Tracer::start(target, config, recorder.as_ref().and_then(Recorder::sender), context.tcp) {
             Ok(tracer) => {
                 if std::mem::take(&mut self.start_paused) {
@@ -613,8 +609,8 @@ impl Tab {
     /// which has its own focus.
     pub fn overview_with(&self, focus: Focus, visible: (i64, i64)) -> Overview {
         let route = self.route_with(focus, visible);
-        // The last hop stands for the target: the target itself once it answered, otherwise the farthest probe,
-        // whose losses are the target's (an unreachable target is shown as lost, not as "no data").
+        // The last hop stands for the target: the target itself once it answered, otherwise the hop past the
+        // farthest answer, whose losses are the target's (an unreachable target is shown as lost, not as "no data").
         let target_hop = route.as_ref().and_then(|route| route.hops().last());
         let reached = route
             .as_ref()
@@ -655,17 +651,18 @@ impl Tab {
             .frame(toolbar_frame)
             .show(ui, |ui| self.toolbar(ui, context.targets, context.elevated))
             .inner;
-        // The clicked hop while it's still on the route, otherwise the target (last) hop.
+        // The clicked hop while it's still shown, otherwise the target (last) hop.
+        let limit = context.settings.max_hops;
         let mut ttl = route.as_ref().and_then(|route| {
             self.selected_ttl
-                .filter(|ttl| route.hops().iter().any(|hop| hop.ttl == *ttl))
+                .filter(|ttl| route.shown(limit).iter().any(|hop| hop.ttl == *ttl))
                 .or_else(|| route.hops().last().map(|hop| hop.ttl))
         });
         // Up and down arrows choose the hop too, unless a field or list has the keyboard.
         let typing = ui.ctx().memory(|memory| memory.focused().is_some());
         if let (Some(route), Some(current), false) = (&route, ttl, typing) {
             let (up, down) = ui.input(|input| (input.key_pressed(Key::ArrowUp), input.key_pressed(Key::ArrowDown)));
-            let hops: Vec<u8> = route.hops().iter().map(|hop| hop.ttl).collect();
+            let hops: Vec<u8> = route.shown(limit).iter().map(|hop| hop.ttl).collect();
             if let Some(position) = hops.iter().position(|hop| *hop == current) {
                 let moved = if up {
                     position.checked_sub(1)
@@ -687,7 +684,9 @@ impl Tab {
 
         pane(ui, table_rect, Margin::same(1), |ui| {
             let focus = route.as_ref().and_then(focus_range).map(|range| trf!(ui, "Focus {range}", range = range));
-            if let Some(clicked) = hop_table::show(ui, route.as_ref(), context.names, ttl, focus.as_deref(), columns) {
+            if let Some(clicked) =
+                hop_table::show(ui, route.as_ref(), limit, context.names, ttl, focus.as_deref(), columns)
+            {
                 self.selected_ttl = Some(clicked);
             }
         });

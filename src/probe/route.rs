@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use crate::probe::stats::HopStats;
 
+/// Largest TTL probed: routes up to this long are seen whole (how many hops are shown is a separate setting).
+pub const MAX_TTL: u8 = 40;
+
 /// How far back each hop keeps individual probes: the longest focus period that isn't "all".
 pub const RECENT_WINDOW: Duration = Duration::from_secs(60 * 60);
 
@@ -55,7 +58,7 @@ pub struct Hop {
 pub struct Route {
     /// Address being traced.
     target: IpAddr,
-    /// Hops up to the target, or all hops while the target hasn't answered yet.
+    /// Hops up to the target, or, while the target doesn't answer, up to one past the farthest hop that answered.
     hops: Vec<Hop>,
     /// Start of the period the statistics cover, Unix ms; `None` before the first probe.
     from_ms: Option<i64>,
@@ -69,9 +72,20 @@ impl Route {
         self.target
     }
 
-    /// Hops up to the target, or all hops while the target hasn't answered yet.
+    /// Hops up to the target, or, while the target doesn't answer, up to one past the farthest hop that answered.
     pub fn hops(&self) -> &[Hop] {
         &self.hops
+    }
+
+    /// How many hops at the start of the route are hidden so that at most `limit` are shown: the provider's first
+    /// hops matter less than the end of the route.
+    pub fn hidden(&self, limit: u8) -> usize {
+        self.hops.len().saturating_sub(usize::from(limit))
+    }
+
+    /// The hops shown under `limit`: the last `limit` of the route.
+    pub fn shown(&self, limit: u8) -> &[Hop] {
+        self.hops.get(self.hidden(limit)..).unwrap_or_default()
     }
 
     /// Start of the period the statistics cover, Unix ms; `None` before the first probe.
@@ -86,7 +100,7 @@ impl Route {
 }
 
 /// Live state of one hop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct HopState {
     /// Address that answered most recently.
     address: Option<IpAddr>,
@@ -101,7 +115,7 @@ struct HopState {
 pub struct RouteState {
     /// Address being traced.
     target: IpAddr,
-    /// One entry per TTL from 1 to the maximum hop count.
+    /// One entry per TTL from 1 to the largest probed.
     hops: Vec<HopState>,
     /// Smallest TTL at which the target itself answered: the route length.
     target_ttl: Option<u8>,
@@ -110,19 +124,32 @@ pub struct RouteState {
 }
 
 impl RouteState {
-    /// Creates an empty route to `target` that probes the TTLs from 1 to `max_hops`.
-    pub fn new(target: IpAddr, max_hops: u8) -> Self {
-        let hop = HopState { address: None, total: HopStats::default(), recent: VecDeque::new() };
-        Self { target, hops: vec![hop; usize::from(max_hops)], target_ttl: None, started_ms: None }
+    /// Creates an empty route to `target` that probes the TTLs from 1 to `max_ttl`.
+    pub fn new(target: IpAddr, max_ttl: u8) -> Self {
+        Self { target, hops: vec![HopState::default(); usize::from(max_ttl)], target_ttl: None, started_ms: None }
     }
 
-    /// Whether probes with `ttl` are the ones meant for the target: the route length, or, while the target hasn't
-    /// answered (unreachable), the farthest TTL, so the target's history records its losses.
+    /// Last TTL of the route: the target's once it answered; while it doesn't (unreachable since the trace
+    /// started), one past the farthest hop that answered — where the target would stand, as PingPlotter shows it,
+    /// instead of rows of silent TTLs up to the largest probed.
+    fn end(&self) -> u8 {
+        self.target_ttl.unwrap_or_else(|| {
+            // The farthest answering hop is at index `i`, TTL `i + 1`; the end is the TTL after it.
+            let end = self.hops.iter().rposition(|hop| hop.address.is_some()).map_or(1, |i| i.saturating_add(2));
+            u8::try_from(end.min(self.hops.len())).unwrap_or(u8::MAX)
+        })
+    }
+
+    /// Whether probes with `ttl` are the ones meant for the target: the route length, or, while the target doesn't
+    /// answer, the TTL standing for it ([`Self::end`]), so the target's history records its losses.
     pub fn is_target_ttl(&self, ttl: u8) -> bool {
-        match self.target_ttl {
-            Some(target_ttl) => target_ttl == ttl,
-            None => u8::try_from(self.hops.len()).ok() == Some(ttl),
-        }
+        self.end() == ttl
+    }
+
+    /// Whether `ttl` lies on the route as shown: its probes belong in the history; the silent TTLs past the end
+    /// are only noise.
+    pub fn in_route(&self, ttl: u8) -> bool {
+        ttl <= self.end()
     }
 
     /// Whether probes with `ttl` are still useful: TTLs beyond the target are not.
@@ -130,19 +157,28 @@ impl RouteState {
         self.target_ttl.is_none_or(|target_ttl| ttl <= target_ttl)
     }
 
-    /// Records the outcome of a probe sent with `ttl` at `at_ms` (Unix ms); TTLs outside the route are ignored.
+    /// Records the outcome of a probe sent with `ttl` at `at_ms` (Unix ms); TTLs outside the route and beyond the
+    /// target are ignored.
     pub fn record(&mut self, ttl: u8, at_ms: i64, outcome: ProbeOutcome) {
+        if self.target_ttl.is_some_and(|target_ttl| ttl > target_ttl) {
+            return;
+        }
         let Some(hop) = usize::from(ttl).checked_sub(1).and_then(|index| self.hops.get_mut(index)) else {
             return;
         };
         self.started_ms = Some(self.started_ms.map_or(at_ms, |started| started.min(at_ms)));
+        let mut cut = false;
         let rtt = match outcome {
             ProbeOutcome::Reply { from, rtt } => {
                 hop.address = Some(from);
                 hop.total.record_reply(rtt);
                 if from == self.target {
-                    // The target answered: the route is at most this long.
-                    self.target_ttl = Some(self.target_ttl.map_or(ttl, |known| known.min(ttl)));
+                    // The target answered: the route is at most this long. TTLs beyond it are forgotten (they
+                    // reached the target too), so they don't come back if the route gets longer.
+                    if self.target_ttl.is_none_or(|known| ttl < known) {
+                        self.target_ttl = Some(ttl);
+                        cut = true;
+                    }
                 } else if self.target_ttl == Some(ttl) {
                     // A router answers where the target used to: the route got longer.
                     self.target_ttl = None;
@@ -159,12 +195,15 @@ impl RouteState {
         while hop.recent.front().is_some_and(|(sent_ms, _)| *sent_ms < horizon) {
             hop.recent.pop_front();
         }
+        if cut {
+            self.hops.iter_mut().skip(usize::from(ttl)).for_each(|hop| *hop = HopState::default());
+        }
     }
 
     /// Snapshot with statistics over `focus` = `(from, to)` Unix ms, or since the start if `None`. Only the last
     /// [`RECENT_WINDOW`] of probes is kept, so an older range covers less.
     pub fn snapshot(&self, focus: Option<(i64, i64)>) -> Route {
-        let len = self.target_ttl.map_or(self.hops.len(), usize::from);
+        let len = usize::from(self.end());
         let since_ms = focus.map(|(from, _)| from);
         let until_ms = focus.map_or(i64::MAX, |(_, to)| to);
         let hops = self
@@ -226,11 +265,40 @@ mod tests {
     }
 
     #[test]
-    fn all_hops_visible_until_target_answers() {
+    fn unreachable_route_ends_one_past_the_farthest_answer() {
         let mut route = RouteState::new(TARGET, 30);
+        assert_eq!(all(&route).hops().len(), 1);
         route.record(1, 0, reply(ROUTER));
-        assert_eq!(all(&route).hops().len(), 30);
+        route.record(3, 0, reply(ROUTER));
+        route.record(2, 0, ProbeOutcome::Lost);
+        assert_eq!(all(&route).hops().len(), 4);
+        // Every TTL is still probed: a silent hop may hide routers and the target behind it.
         assert!(route.should_probe(30));
+        assert!(route.in_route(4));
+        assert!(!route.in_route(5));
+    }
+
+    #[test]
+    fn hops_beyond_the_target_are_forgotten() {
+        let mut route = RouteState::new(TARGET, 30);
+        route.record(9, 0, reply(TARGET));
+        route.record(5, 0, reply(TARGET));
+        route.record(7, 0, reply(TARGET));
+        // The route got longer: hop 5 is a router now; the old replies at 7 and 9 don't stretch it.
+        route.record(5, 0, reply(ROUTER));
+        assert_eq!(all(&route).hops().len(), 6);
+    }
+
+    #[test]
+    fn the_first_hops_are_hidden_beyond_the_limit() {
+        let mut route = RouteState::new(TARGET, 30);
+        route.record(22, 0, reply(TARGET));
+        let snapshot = all(&route);
+        assert_eq!(snapshot.hidden(20), 2);
+        assert_eq!(snapshot.shown(20).first().map(|hop| hop.ttl), Some(3));
+        assert_eq!(snapshot.shown(20).len(), 20);
+        assert_eq!(snapshot.hidden(30), 0);
+        assert_eq!(snapshot.shown(30).len(), 22);
     }
 
     #[test]
@@ -257,18 +325,20 @@ mod tests {
         let mut route = RouteState::new(TARGET, 30);
         route.record(5, 0, reply(TARGET));
         route.record(5, 0, reply(ROUTER));
-        assert_eq!(all(&route).hops().len(), 30);
+        assert_eq!(all(&route).hops().len(), 6);
         assert!(route.should_probe(30));
     }
 
     #[test]
-    fn the_target_ttl_is_the_farthest_until_the_target_answers() {
+    fn the_target_ttl_follows_the_farthest_answer_until_the_target_answers() {
         let mut route = RouteState::new(TARGET, 30);
-        assert!(route.is_target_ttl(30));
-        assert!(!route.is_target_ttl(5));
+        assert!(route.is_target_ttl(1));
+        route.record(3, 0, reply(ROUTER));
+        assert!(route.is_target_ttl(4));
+        assert!(!route.is_target_ttl(30));
         route.record(5, 0, reply(TARGET));
         assert!(route.is_target_ttl(5));
-        assert!(!route.is_target_ttl(30));
+        assert!(!route.is_target_ttl(4));
     }
 
     #[test]

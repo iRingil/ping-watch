@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::probe::icmp::{IcmpError, Pinger};
-use crate::probe::route::{ProbeOutcome, Route, RouteState, Sample};
+use crate::probe::route::{MAX_TTL, ProbeOutcome, Route, RouteState, Sample};
 use crate::probe::tcp::{self, TcpError, TcpProber};
 use crate::store::history::unix_ms;
 use crate::sync::lock;
@@ -54,14 +54,14 @@ pub struct TraceConfig {
     /// How long to wait for an answer before counting the probe as lost.
     pub timeout: Duration,
     /// Largest TTL probed.
-    pub max_hops: u8,
+    pub max_ttl: u8,
     /// What the hops are probed with.
     pub probe: Probe,
 }
 
 impl Default for TraceConfig {
     fn default() -> Self {
-        Self { interval: Duration::from_secs(1), timeout: Duration::from_secs(1), max_hops: 30, probe: Probe::Icmp }
+        Self { interval: Duration::from_secs(1), timeout: Duration::from_secs(1), max_ttl: MAX_TTL, probe: Probe::Icmp }
     }
 }
 
@@ -209,14 +209,14 @@ impl Tracer {
         tcp: &Arc<TcpProber>,
     ) -> Result<Self, TraceError> {
         let shared = Arc::new(Shared {
-            route: Mutex::new(RouteState::new(target, config.max_hops)),
+            route: Mutex::new(RouteState::new(target, config.max_ttl)),
             control: Mutex::new(Control { stop: false, paused: false, interval: config.interval }),
             wake: Condvar::new(),
             last_error: Mutex::new(None),
         });
         // Assigned before spawning, so that an early error drops (and stops) the already started workers.
         let mut tracer = Self { shared, workers: Vec::new() };
-        for ttl in 1..=config.max_hops {
+        for ttl in 1..=config.max_ttl {
             let prober = Prober::new(config.probe, target, tcp)?;
             let shared = Arc::clone(&tracer.shared);
             let history = history.clone();
@@ -296,10 +296,9 @@ fn probe_loop(
             let (in_route, at_target) = {
                 let mut route = lock(&shared.route);
                 route.record(ttl, at_ms, outcome);
-                (route.should_probe(ttl), route.is_target_ttl(ttl))
+                (route.in_route(ttl), route.is_target_ttl(ttl))
             };
-            // Before the route length is known every TTL is probed once; TTLs that turn out to lie beyond the
-            // target only add noise to the history.
+            // TTLs beyond the target, or past the end of an unreachable route, only add noise to the history.
             if in_route
                 && let Some(history) = history
                 && history.send(Sample { at_ms, ttl, outcome, at_target }).is_err()
@@ -338,7 +337,7 @@ mod tests {
         let config = TraceConfig {
             interval: Duration::from_millis(50),
             timeout: Duration::from_millis(200),
-            max_hops: 2,
+            max_ttl: 2,
             probe: Probe::Icmp,
         };
         let tcp = Arc::new(TcpProber::default());

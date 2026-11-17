@@ -243,8 +243,8 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Target", "Ziel"),
     ("Targets", "Ziele"),
     (
-        "Targets you traced before keep their own interval, focus, period and probe. Timeout and hop limit apply to traces started from now on.",
-        "Bereits gemessene Ziele behalten ihr eigenes Intervall, ihren Fokus, Zeitraum und ihr Protokoll. Wartezeit und Hop-Grenze gelten für ab jetzt gestartete Messungen.",
+        "Targets you traced before keep their own interval, focus, period and probe. The wait for an answer applies to traces started from now on.",
+        "Bereits gemessene Ziele behalten ihr eigenes Intervall, ihren Fokus, Zeitraum und ihr Protokoll. Die Wartezeit gilt für ab jetzt gestartete Messungen.",
     ),
     ("Tell me", "Benachrichtigen"),
     ("The alert journal couldn't be written: {error}", "Das Alarmjournal ließ sich nicht schreiben: {error}"),
@@ -322,6 +322,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("{ms} ms", "{ms} ms"),
     ("{name} above scale", "{name} über der Skala"),
     ("{n} alert on|{n} alerts on", "{n} Alarm aktiv|{n} Alarme aktiv"),
+    (
+        "{n} hop hidden by the limit of {limit}|{n} hops hidden by the limit of {limit}",
+        "{n} Hop ausgeblendet (Grenze {limit})|{n} Hops ausgeblendet (Grenze {limit})",
+    ),
     ("{n} hop|{n} hops", "{n} Hop|{n} Hops"),
     ("{n} hour|{n} hours", "{n} Stunde|{n} Stunden"),
     ("{n} minute|{n} minutes", "{n} Minute|{n} Minuten"),

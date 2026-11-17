@@ -240,8 +240,8 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Target", "Destino"),
     ("Targets", "Destinos"),
     (
-        "Targets you traced before keep their own interval, focus, period and probe. Timeout and hop limit apply to traces started from now on.",
-        "Los destinos ya trazados conservan su intervalo, enfoque, período y protocolo. El tiempo de espera y el límite de saltos se aplican a las trazas que empiecen a partir de ahora.",
+        "Targets you traced before keep their own interval, focus, period and probe. The wait for an answer applies to traces started from now on.",
+        "Los destinos ya trazados conservan su intervalo, enfoque, período y protocolo. El tiempo de espera se aplica a las trazas que empiecen a partir de ahora.",
     ),
     ("Tell me", "Avisarme"),
     ("The alert journal couldn't be written: {error}", "No se pudo escribir el registro de alertas: {error}"),
@@ -319,6 +319,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("{ms} ms", "{ms} ms"),
     ("{name} above scale", "{name} por encima de la escala"),
     ("{n} alert on|{n} alerts on", "{n} alerta activa|{n} alertas activas"),
+    (
+        "{n} hop hidden by the limit of {limit}|{n} hops hidden by the limit of {limit}",
+        "{n} salto oculto (límite {limit})|{n} saltos ocultos (límite {limit})",
+    ),
     ("{n} hop|{n} hops", "{n} salto|{n} saltos"),
     ("{n} hour|{n} hours", "{n} hora|{n} horas"),
     ("{n} minute|{n} minutes", "{n} minuto|{n} minutos"),

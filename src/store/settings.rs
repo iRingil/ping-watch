@@ -38,8 +38,8 @@ pub const INTERVALS: [Duration; 7] = [
 /// Probe timeouts offered.
 pub const TIMEOUTS: [Duration; 4] =
     [Duration::from_millis(500), Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(3)];
-/// Hop limits offered.
-pub const MAX_HOPS: [u8; 3] = [20, 30, 40];
+/// Hop limits offered: at most this many hops are shown, the first ones of a longer route are hidden.
+pub const MAX_HOPS: [u8; 4] = [10, 20, 30, 40];
 /// One day.
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// History retention periods offered.

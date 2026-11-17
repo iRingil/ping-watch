@@ -210,7 +210,7 @@ impl SettingsWindow {
 }
 
 /// Tracing: what new targets start with (TCP probes only with administrator rights, `elevated`), probe timeout
-/// and hop limit, history retention. Returns whether the user asked to restart with administrator rights.
+/// and hop limit (how many hops are shown), history retention. Returns whether the user asked to restart with administrator rights.
 fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
     let language = ui.language();
     let mut restart_elevated = false;
@@ -262,7 +262,7 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings, elevated: bool) -> bool {
     ui.add_space(10.0);
     ui.weak(tr!(
         ui,
-        "Targets you traced before keep their own interval, focus, period and probe. Timeout and hop limit apply to traces started from now on."
+        "Targets you traced before keep their own interval, focus, period and probe. The wait for an answer applies to traces started from now on."
     ));
     restart_elevated
 }
