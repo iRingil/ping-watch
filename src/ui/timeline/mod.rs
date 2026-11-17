@@ -543,7 +543,7 @@ fn draw_charts(
     let language = ui.language();
     let jitter = &shown.series.jitter;
     if !compact {
-        // The time axis is the latency chart's below; the pointer's time line shows here too, as on the others.
+        // The time axis is the latency chart's below; the pointer's timeline shows here too, as on the others.
         base("timeline-jitter", jitter.scale_ms, JITTER_HEIGHT).show_axes([false, true]).show(ui, |plot| {
             plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
             grid(plot, jitter.scale_ms, JITTER_HEIGHT);
