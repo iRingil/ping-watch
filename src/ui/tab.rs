@@ -655,14 +655,18 @@ impl Tab {
         let limit = context.settings.max_hops;
         let mut ttl = route.as_ref().and_then(|route| {
             self.selected_ttl
-                .filter(|ttl| route.shown(limit).iter().any(|hop| hop.ttl == *ttl))
+                .filter(|ttl| {
+                    let (head, tail) = route.shown(limit);
+                    head.iter().chain(tail).any(|hop| hop.ttl == *ttl)
+                })
                 .or_else(|| route.hops().last().map(|hop| hop.ttl))
         });
         // Up and down arrows choose the hop too, unless a field or list has the keyboard.
         let typing = ui.ctx().memory(|memory| memory.focused().is_some());
         if let (Some(route), Some(current), false) = (&route, ttl, typing) {
             let (up, down) = ui.input(|input| (input.key_pressed(Key::ArrowUp), input.key_pressed(Key::ArrowDown)));
-            let hops: Vec<u8> = route.shown(limit).iter().map(|hop| hop.ttl).collect();
+            let (head, tail) = route.shown(limit);
+            let hops: Vec<u8> = head.iter().chain(tail).map(|hop| hop.ttl).collect();
             if let Some(position) = hops.iter().position(|hop| *hop == current) {
                 let moved = if up {
                     position.checked_sub(1)

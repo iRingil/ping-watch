@@ -83,7 +83,7 @@ impl LossLevel {
 }
 
 /// Draws the hop table of `route` (just the header without one) with the latency bars; at most `limit` hops are
-/// shown, the first ones beyond it are folded into one row. Hop names come from `names`, the `selected` hop is
+/// shown, those after the first hop beyond it are folded into one row. Hop names come from `names`, the `selected` hop is
 /// highlighted, `focus` labels the period under the bars. Returns the TTL of the hop row clicked in this frame. The
 /// columns can be dragged wider or narrower; `columns` keeps their widths.
 pub fn show(
@@ -95,11 +95,13 @@ pub fn show(
     focus: Option<&str>,
     columns: &mut ColumnWidths,
 ) -> Option<u8> {
-    let hops = route.map_or(&[][..], |route| route.shown(limit));
+    let (head, tail) = route.map_or((&[][..], &[][..]), |route| route.shown(limit));
     let hidden = route.map_or(0, |route| route.hidden(limit));
-    let target_hop = route.and_then(|route| hops.last().filter(|hop| hop.address == Some(route.target())));
-    let scale_ms = latency_bars::scale_ms(hops.iter().map(|hop| &hop.stats), Zones::of(ui.ctx()));
+    let target_hop = route.and_then(|route| route.hops().last().filter(|hop| hop.address == Some(route.target())));
+    let scale_ms = latency_bars::scale_ms(head.iter().chain(tail).map(|hop| &hop.stats), Zones::of(ui.ctx()));
     let mut averages: Vec<Pos2> = Vec::new();
+    // Where the averages before the hidden row end: the line connecting them breaks there.
+    let mut break_at = None;
     let mut clicked = None;
     let mut hidden_cell = None;
     let mut body_top = f32::NEG_INFINITY;
@@ -133,10 +135,11 @@ pub fn show(
                 });
             })
             .body(|mut body| {
-                if hidden > 0 {
-                    body.row(ROW_HEIGHT, |mut row| hidden_cell = hidden_row(&mut row));
-                }
-                for hop in hops {
+                for (index, hop) in head.iter().chain(tail).enumerate() {
+                    if index == head.len() && hidden > 0 {
+                        body.row(ROW_HEIGHT, |mut row| hidden_cell = hidden_row(&mut row));
+                        break_at = Some(averages.len());
+                    }
                     body.row(ROW_HEIGHT, |mut row| {
                         row.set_selected(selected == Some(hop.ttl));
                         averages.extend(hop_row(&mut row, hop, names, scale_ms));
@@ -153,7 +156,9 @@ pub fn show(
         if let Some(cell) = hidden_cell {
             paint_hidden(ui, cell, available, body_top, hidden, limit);
         }
-        latency_bars::connect(ui, &averages);
+        let (before, after) = averages.split_at(break_at.unwrap_or(0));
+        latency_bars::connect(ui, before);
+        latency_bars::connect(ui, after);
     });
     clicked
 }
@@ -182,7 +187,7 @@ fn hop_row(row: &mut TableRow<'_, '_>, hop: &Hop, names: &NameCache, scale_ms: f
     average
 }
 
-/// Takes the row standing for the hidden first hops of a route: empty cells, painted over by [`paint_hidden`]
+/// Takes the row standing for the hidden hops of a route: empty cells, painted over by [`paint_hidden`]
 /// once the table is drawn. Returns where the row starts (its left top) and its height.
 fn hidden_row(row: &mut TableRow<'_, '_>) -> Option<Rect> {
     let mut first = None;
@@ -193,7 +198,7 @@ fn hidden_row(row: &mut TableRow<'_, '_>) -> Option<Rect> {
     first
 }
 
-/// Paints the row of the `hidden` first hops of a route longer than `limit` over `cell` (its first cell): one
+/// Paints the row of the `hidden` hops (after the first) of a route longer than `limit` over `cell` (its first cell): one
 /// muted band across the whole row of width `row_width`, without column divisions, with the explanation in it.
 /// Painted after the table, as cells clip their own painting to themselves; nothing above `body_top` (the header's
 /// bottom), where the row goes when the table is scrolled.

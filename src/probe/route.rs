@@ -77,15 +77,22 @@ impl Route {
         &self.hops
     }
 
-    /// How many hops at the start of the route are hidden so that at most `limit` are shown: the provider's first
-    /// hops matter less than the end of the route.
+    /// How many hops are hidden so that at most `limit` are shown: those right after the first hop (the router
+    /// telling whether we are online at all), as the provider's hops matter less than the end of the route.
     pub fn hidden(&self, limit: u8) -> usize {
-        self.hops.len().saturating_sub(usize::from(limit))
+        self.hops.len().saturating_sub(usize::from(limit.max(2)))
     }
 
-    /// The hops shown under `limit`: the last `limit` of the route.
-    pub fn shown(&self, limit: u8) -> &[Hop] {
-        self.hops.get(self.hidden(limit)..).unwrap_or_default()
+    /// The hops shown under `limit`, before and after the hidden ones: the first hop and the last `limit - 1`,
+    /// or the whole route and nothing if it fits.
+    pub fn shown(&self, limit: u8) -> (&[Hop], &[Hop]) {
+        let hidden = self.hidden(limit);
+        if hidden == 0 {
+            return (&self.hops, &[]);
+        }
+        let head = self.hops.get(..1).unwrap_or_default();
+        let tail = self.hops.get(hidden.saturating_add(1)..).unwrap_or_default();
+        (head, tail)
     }
 
     /// Start of the period the statistics cover, Unix ms; `None` before the first probe.
@@ -294,11 +301,14 @@ mod tests {
         let mut route = RouteState::new(TARGET, 30);
         route.record(22, 0, reply(TARGET));
         let snapshot = all(&route);
+        let ttls = |(head, tail): (&[Hop], &[Hop])| head.iter().chain(tail).map(|hop| hop.ttl).collect::<Vec<_>>();
         assert_eq!(snapshot.hidden(20), 2);
-        assert_eq!(snapshot.shown(20).first().map(|hop| hop.ttl), Some(3));
-        assert_eq!(snapshot.shown(20).len(), 20);
+        let shown = ttls(snapshot.shown(20));
+        assert_eq!(shown.len(), 20);
+        assert_eq!(shown.get(..2), Some(&[1, 4][..]), "the first hop stays, hops 2 and 3 are hidden");
+        assert_eq!(shown.last(), Some(&22));
         assert_eq!(snapshot.hidden(30), 0);
-        assert_eq!(snapshot.shown(30).len(), 22);
+        assert_eq!(ttls(snapshot.shown(30)).len(), 22);
     }
 
     #[test]
