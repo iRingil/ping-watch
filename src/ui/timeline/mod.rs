@@ -543,20 +543,18 @@ fn draw_charts(
     let language = ui.language();
     let jitter = &shown.series.jitter;
     if !compact {
-        base("timeline-jitter", jitter.scale_ms, JITTER_HEIGHT).show_x(false).show_axes([false, true]).show(
-            ui,
-            |plot| {
-                plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
-                grid(plot, jitter.scale_ms, JITTER_HEIGHT);
-                // The title in ink (the jitter color is too light for small text); the line keeps its color.
-                plot.add(
-                    Text::new("", PlotPoint::new(from_s, jitter.scale_ms), tr!(language, "Jitter (ms)"))
-                        .anchor(Align2::LEFT_TOP)
-                        .color(palette.ink),
-                );
-                add_trace(plot, tr!(language, "Jitter"), jitter, palette.jitter);
-            },
-        );
+        // The time axis is the latency chart's below; the pointer's time line shows here too, as on the others.
+        base("timeline-jitter", jitter.scale_ms, JITTER_HEIGHT).show_axes([false, true]).show(ui, |plot| {
+            plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, jitter.scale_ms]));
+            grid(plot, jitter.scale_ms, JITTER_HEIGHT);
+            // The title in ink (the jitter color is too light for small text); the line keeps its color.
+            plot.add(
+                Text::new("", PlotPoint::new(from_s, jitter.scale_ms), tr!(language, "Jitter (ms)"))
+                    .anchor(Align2::LEFT_TOP)
+                    .color(palette.ink),
+            );
+            add_trace(plot, tr!(language, "Jitter"), jitter, palette.jitter);
+        });
         // Room between the plots, so the jitter strip's "0" and the latency scale's top label don't overlap.
         ui.add_space(PLOT_GAP);
     }
