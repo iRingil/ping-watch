@@ -296,6 +296,8 @@ impl Tab {
             return;
         };
         chart.set_period(*period);
+        // A paused trace's chart stands still here too.
+        chart.set_end_ms(self.chart_end_ms);
         match (&self.state, route.as_ref().and_then(|route| route.hops().last())) {
             (State::Running(session), Some(_)) => {
                 chart.show(ui, history_path, session.target_id, HopKey::Target, &title, self.interval);
@@ -471,6 +473,7 @@ impl Tab {
             Ok(tracer) => {
                 if std::mem::take(&mut self.start_paused) {
                     tracer.set_paused(true);
+                    self.chart_end_ms = Some(history::unix_ms(SystemTime::now()));
                 }
                 self.state = State::Running(Session { target, probe, target_id, tracer, recorder });
             }
@@ -913,6 +916,9 @@ impl Tab {
         };
         if split.main.clicked() {
             session.tracer.set_paused(!paused);
+            // Paused, the charts stop where the probes stopped instead of scrolling on into an empty stretch;
+            // resumed, they follow the current time again.
+            self.chart_end_ms = (!paused).then(|| history::unix_ms(SystemTime::now()));
         }
         // Only actions on this trace; a new target is opened with "+".
         let items = [
