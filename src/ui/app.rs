@@ -267,7 +267,7 @@ impl PingWatchApp {
             table_share: tab::TABLE_SHARE,
         });
         let all_targets = AllTargets::new(window_store.as_ref());
-        let hop_columns = ColumnWidths::load("hop-table", hop_table::RESIZABLE_COLUMNS, window_store.as_ref());
+        let hop_columns = hop_table::column_set(window_store.as_ref());
         Self {
             all_targets,
             tabs,
@@ -478,22 +478,23 @@ impl PingWatchApp {
     fn save_snapshot(&mut self) {
         let journal = self.alert_store.as_ref().and_then(|store| store.journal().ok()).unwrap_or_default();
         let language = self.settings.language;
-        let snapshot = match self.page {
-            Page::Target(index) => {
-                let Some(report) =
-                    self.tabs.get(index).and_then(|tab| tab.snapshot(&self.names, self.reader.as_ref(), &journal))
-                else {
-                    self.notice = Some(Notice::problem(
-                        tr!(language, "Nothing to save yet: the snapshot needs a running trace").to_owned(),
-                    ));
-                    return;
-                };
-                Snapshot::Target(Box::new(report))
-            }
-            Page::AllTargets => {
-                self.all_targets.snapshot(&self.tabs, self.reader.as_ref(), &self.alerting_hosts(), language)
-            }
-        };
+        let snapshot =
+            match self.page {
+                Page::Target(index) => {
+                    let Some(report) = self.tabs.get(index).and_then(|tab| {
+                        tab.snapshot(&self.names, self.reader.as_ref(), &journal, self.settings.max_hops)
+                    }) else {
+                        self.notice = Some(Notice::problem(
+                            tr!(language, "Nothing to save yet: the snapshot needs a running trace").to_owned(),
+                        ));
+                        return;
+                    };
+                    Snapshot::Target(Box::new(report))
+                }
+                Page::AllTargets => {
+                    self.all_targets.snapshot(&self.tabs, self.reader.as_ref(), &self.alerting_hosts(), language)
+                }
+            };
         let now = chrono::Local::now();
         let html = snapshot::html(
             &snapshot,
@@ -1324,7 +1325,8 @@ impl eframe::App for PingWatchApp {
             self.apply(action);
         }
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
-        if self.settings_window.show(ui.ctx(), &mut self.settings, data_folder, self.elevated) {
+        let tables = settings::Tables { hops: &mut self.hop_columns, all_targets: self.all_targets.columns_mut() };
+        if self.settings_window.show(ui.ctx(), &mut self.settings, tables, data_folder, self.elevated) {
             self.restart_elevated();
         }
         if std::mem::take(&mut self.restarting) {
@@ -1337,6 +1339,7 @@ impl eframe::App for PingWatchApp {
         if self.alerts_window.show(ui.ctx(), self.alert_store.as_ref(), &self.alert_rules, &hosts) {
             self.reload_alert_rules();
         }
+        settings::open_links(ui.ctx());
         ui.ctx().request_repaint_after(REFRESH);
     }
 }

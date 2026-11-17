@@ -37,6 +37,11 @@ pub enum ResolveError {
     Invalid(String),
 }
 
+/// Whether `a` and `b` name the same host: letter case doesn't matter, in any script (not only ASCII).
+pub fn same_host(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
+}
+
 /// Resolves `host` (name or address) to its first IPv4 address, or its first IPv6 address if it has no IPv4 one.
 /// Blocks while DNS answers.
 ///
@@ -131,6 +136,13 @@ mod tests {
     use super::*;
 
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn host_names_match_in_any_case() {
+        assert!(same_host("GitHub.com", "github.com"));
+        assert!(same_host("ПРИМЕР.РФ", "пример.рф"));
+        assert!(!same_host("example.com", "example.org"));
+    }
 
     #[test]
     fn no_names_while_lookups_are_off() {

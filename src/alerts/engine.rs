@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use super::route_watch::{Path, RouteNote, RouteWatch};
 use super::rules::{Condition, Rule};
+use crate::probe::names::same_host;
 
 /// Fewest probes in the window before loss or latency is judged (a couple of probes say nothing).
 const MIN_PROBES: u64 = 3;
@@ -117,7 +118,7 @@ impl Engine {
 
     /// Whether an alert is on for `host`.
     pub fn is_alerting(&self, host: &str) -> bool {
-        self.active.keys().any(|(_, active_host)| active_host.eq_ignore_ascii_case(host))
+        self.active.keys().any(|(_, active_host)| same_host(active_host, host))
     }
 
     /// Checks `rules` against what `observe` sees at `now_ms`; returns what started, ended or changed.

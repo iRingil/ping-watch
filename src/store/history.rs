@@ -78,13 +78,14 @@ impl HopKey {
 /// Error of the history database.
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
-    /// SQLite failed.
-    #[error("history database: {0}")]
+    /// SQLite failed (its own text: it is shown inside a translated sentence).
+    #[error(transparent)]
     Db(#[from] rusqlite::Error),
-    /// The database folder or the recorder thread couldn't be created.
-    #[error("history: {0}")]
+    /// The database folder or the recorder thread couldn't be created (Windows' text).
+    #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// `%LOCALAPPDATA%` is not set, so there is nowhere to keep the database.
+    /// `%LOCALAPPDATA%` is not set, so there is nowhere to keep the database (only logged: the window then says
+    /// the history is off).
     #[error("history: LOCALAPPDATA is not set")]
     NoDataDir,
 }

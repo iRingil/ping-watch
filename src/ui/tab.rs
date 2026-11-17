@@ -14,10 +14,11 @@ use eframe::egui::{
 
 use crate::alerts::WindowStats;
 use crate::i18n::{Lang, Language, n, tr, trf};
+use crate::probe::names::same_host;
 use crate::probe::names::{NameCache, ResolveError, resolve};
 use crate::probe::route::{self, Hop, Route};
 use crate::probe::tcp::TcpProber;
-use crate::probe::tracer::{Probe, ProbeError, TraceConfig, Tracer};
+use crate::probe::tracer::{Probe, TraceConfig, Tracer};
 use crate::snapshot::{AlertRow, Chart, HopRow, TargetReport};
 use crate::store::alerts::JournalEntry;
 use crate::store::history::{self, HopKey, Recorder, Store};
@@ -437,7 +438,7 @@ impl Tab {
                 }
                 self.state = State::Running(Session { target, probe, target_id, tracer, recorder });
             }
-            Err(error) => self.fail(error.to_string()),
+            Err(error) => self.fail(error.message().show(self.language)),
         }
     }
 
@@ -482,14 +483,9 @@ impl Tab {
     pub fn problem(&self) -> Option<String> {
         match &self.state {
             State::Editing(Some(error)) => Some(error.clone()),
-            State::Running(session) => session
-                .tracer
-                .last_error()
-                .map(|error| match error {
-                    ProbeError::Known(text) => self.language.translate(text).to_owned(),
-                    ProbeError::Text(text) => text,
-                })
-                .or_else(|| self.warning.clone()),
+            State::Running(session) => {
+                session.tracer.last_error().map(|error| error.show(self.language)).or_else(|| self.warning.clone())
+            }
             State::Editing(None) | State::Resolving(_) => self.warning.clone(),
         }
     }
@@ -512,7 +508,9 @@ impl Tab {
         matches!(&self.state, State::Running(session) if !session.tracer.is_paused())
     }
 
-    /// The target's own probes (its last hop) over the last `window`, for the alerts; `None` unless watched.
+    /// The target's own probes (its last hop) over the last `window`, for the alerts; `None` unless watched. The
+    /// window counts as covered from the last hop's own first probe: a hop that has just become the last one (the
+    /// route got longer) has a few probes only, and one loss must not read as "no answer for the whole window".
     pub fn window_stats(&self, window: Duration) -> Option<WindowStats> {
         let State::Running(session) = &self.state else {
             return None;
@@ -524,7 +522,7 @@ impl Tab {
         let window_ms = i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
         let route = session.tracer.snapshot(Some((now_ms.saturating_sub(window_ms), now_ms)));
         let hop = route.hops().last()?;
-        let covered_ms = now_ms.saturating_sub(route.focus_start_ms()?);
+        let covered_ms = now_ms.saturating_sub(route.focus_start_ms()?.max(hop.since_ms?));
         Some(WindowStats {
             sent: hop.stats.sent(),
             received: hop.stats.received(),
@@ -547,21 +545,27 @@ impl Tab {
         names: &NameCache,
         reader: Option<&Store>,
         journal: &[JournalEntry],
+        limit: u8,
     ) -> Option<TargetReport> {
         let route = self.route()?;
         let label = self.label()?;
-        let hops = route.hops().iter().map(|hop| hop_row(hop, names)).collect();
+        // The hops the window shows under the hop `limit`.
+        let (head, tail) = route.shown(limit);
+        let hops = head.iter().chain(tail).map(|hop| hop_row(hop, names)).collect();
+        let hidden = Some(route.hidden(limit))
+            .filter(|hidden| *hidden > 0)
+            .map(|hidden| hop_table::hidden_text(self.language, hidden, limit));
         let focus = focus_range(&route).unwrap_or_else(|| tr!(self.language, "since the trace started").to_owned());
         let now_ms = history::unix_ms(SystemTime::now());
         let (from_ms, to_ms) = self.timeline.visible_range(now_ms);
         let alerts = journal
             .iter()
-            .filter(|entry| entry.host.eq_ignore_ascii_case(&self.host))
+            .filter(|entry| same_host(&entry.host, &self.host))
             .filter(|entry| entry.started_ms <= to_ms && entry.ended_ms.is_none_or(|ended| ended >= from_ms))
             .map(|entry| alert_row(entry, self.language))
             .collect();
         let chart = self.chart_over(reader, self.timeline.period(), to_ms);
-        Some(TargetReport { label, focus, hops, chart, alerts })
+        Some(TargetReport { label, focus, hops, hidden, chart, alerts })
     }
 
     /// The target's chart over `period` ending at `end_ms`, built as the window's timeline builds it (same buckets,
@@ -698,9 +702,12 @@ impl Tab {
             (State::Running(session), Some(route), Some(ttl)) => {
                 let title = hop_title(route, ttl, context.names, self.language);
                 // The target's line is read by target, not hop number, so it keeps its history when the route
-                // length changes.
-                let is_target =
-                    route.hops().last().is_some_and(|hop| hop.ttl == ttl && hop.address == Some(route.target()));
+                // length changes; so is the silent last row of a target that doesn't answer, which stands for it
+                // (its probes are recorded as the target's).
+                let is_target = route
+                    .hops()
+                    .last()
+                    .is_some_and(|hop| hop.ttl == ttl && hop.address.is_none_or(|address| address == route.target()));
                 let hop = if is_target { HopKey::Target } else { HopKey::Ttl(ttl) };
                 self.timeline.show(ui, context.history_path, session.target_id, hop, &title, self.interval);
             }
@@ -916,14 +923,17 @@ pub struct ProbeChoice {
 }
 
 /// Combo box choosing ICMP or TCP probes for `probe`, and the port of a TCP probe. Without administrator rights
-/// (`elevated` false) TCP can't be chosen; the list then offers to restart Ping Watch with them.
+/// (`elevated` false) TCP can't be chosen; the list then offers to restart Ping Watch with them, and a target saved
+/// with TCP shows "ICMP*", as ICMP stands in for it.
 pub fn probe_choice(ui: &mut Ui, probe: &mut Probe, elevated: bool) -> ProbeChoice {
     let mut choice = ProbeChoice::default();
-    let label = |probe: Probe| match probe {
-        Probe::Icmp => "ICMP".to_owned(),
-        Probe::Tcp(_) => "TCP".to_owned(),
+    let standing_in = !elevated && matches!(probe, Probe::Tcp(_));
+    let label = match *probe {
+        Probe::Icmp => "ICMP",
+        Probe::Tcp(_) if standing_in => "ICMP*",
+        Probe::Tcp(_) => "TCP",
     };
-    egui::ComboBox::from_id_salt("probe").selected_text(label(*probe)).width(70.0).show_ui(ui, |ui| {
+    let combo = egui::ComboBox::from_id_salt("probe").selected_text(label).width(70.0).show_ui(ui, |ui| {
         ui.selectable_value(probe, Probe::Icmp, "ICMP")
             .on_hover_text(tr!(ui, "Ping (ICMP echo), as tracert: works without administrator rights"));
         let tcp = match *probe {
@@ -943,7 +953,9 @@ pub fn probe_choice(ui: &mut Ui, probe: &mut Probe, elevated: bool) -> ProbeChoi
             }
         }
     });
-    if let Probe::Tcp(port) = probe {
+    if standing_in {
+        combo.response.on_hover_text(tr!(ui, "TCP probes need administrator rights; probing by ICMP"));
+    } else if let Probe::Tcp(port) = probe {
         let response = ui
             .add(egui::DragValue::new(port).range(1..=u16::MAX).speed(1.0))
             .on_hover_text(tr!(ui, "Port of the TCP probe: 443 for HTTPS, 80 for HTTP, 22 for SSH"));

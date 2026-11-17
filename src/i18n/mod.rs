@@ -179,6 +179,37 @@ pub fn fill(text: &str, values: &[(&str, String)]) -> String {
     filled
 }
 
+/// A text for the user made where the language isn't known (a probe thread, a store): a marked template (`n!`) with
+/// its `{name}` values, translated where it is shown. Values are not translated (addresses, Windows' own texts,
+/// which come in the language of Windows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// The English template, marked with `n!`.
+    template: &'static str,
+    /// Values of its placeholders.
+    values: Vec<(&'static str, String)>,
+}
+
+impl Message {
+    /// The message `template` (marked with `n!`), its placeholders not filled yet.
+    pub fn new(template: &'static str) -> Self {
+        Self { template, values: Vec::new() }
+    }
+
+    /// The message with placeholder `name` filled with `value`.
+    #[must_use]
+    pub fn with(mut self, name: &'static str, value: impl ToString) -> Self {
+        self.values.push((name, value.to_string()));
+        self
+    }
+
+    /// The message in the language of `lang`.
+    pub fn show(&self, lang: impl Lang) -> String {
+        let values: Vec<(&str, String)> = self.values.iter().map(|(name, value)| (*name, value.clone())).collect();
+        fill(lang.language().translate(self.template), &values)
+    }
+}
+
 /// A marked text in the language of `$lang` (a context, `Ui` or [`Language`]).
 macro_rules! tr {
     ($lang:expr, $text:literal) => {
@@ -332,6 +363,17 @@ mod tests {
             assert!(missing.is_empty(), "{name} misses {missing:#?}");
             assert!(unused.is_empty(), "{name} has texts nobody uses: {unused:#?}");
             assert_eq!(keys.len(), entries.len(), "{name} has a text twice");
+        }
+    }
+
+    #[test]
+    fn french_typography() {
+        for (_, text) in fr::ENTRIES {
+            // A plain space would let the line break before the mark; a straight apostrophe looks foreign.
+            for mark in [" :", " ;", " ?", " !"] {
+                assert!(!text.contains(mark), "{text:?}: a no-break space goes before {mark:?}");
+            }
+            assert!(!text.contains('\''), "{text:?}: typographic apostrophe expected");
         }
     }
 

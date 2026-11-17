@@ -115,7 +115,7 @@
 </header>
 
 <main class="wrap">
-    <img class="shot" src="main-window.webp" width="2182" height="1406"
+    <img class="shot" src="main-window.webp" width="1822" height="1196"
          alt="A target tab: the hops to OpenDNS with their latency and loss, the latency bars and the timeline of the last ten minutes">
 
     <h2>What it does</h2>
@@ -125,13 +125,13 @@
     <div class="features">
         <div class="card">
             <h3>Hop by hop</h3>
-            <p>Every router on the route with its latency, jitter and loss, and a bar over green, amber and red
-                zones whose limits you set.</p>
+            <p>Every router on the route with its latency, jitter and loss in percent and in lost probes, and a bar
+                over green, amber and red zones whose limits you set. Show or hide columns; long routes fold.</p>
         </div>
         <div class="card">
             <h3>ICMP or TCP</h3>
             <p>Pings, or TCP connection requests to a port for servers that ignore pings and firewalls that drop
-                them. TCP needs no packet driver, only administrator rights.</p>
+                them, over IPv4 and IPv6. TCP needs no packet driver, only administrator rights.</p>
         </div>
         <div class="card">
             <h3>History</h3>
@@ -159,7 +159,8 @@
         <div class="card">
             <h3>Private</h3>
             <p>No accounts, telemetry, ads or analytics. It sends the pings (or TCP probes) and DNS lookups tracing
-                needs, and asks GitHub for a new version once a day (can be turned off).</p>
+                needs (the reverse ones can be turned off), and asks GitHub for a new version once a day (can be turned
+                off too).</p>
         </div>
     </div>
 

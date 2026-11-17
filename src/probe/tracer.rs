@@ -2,15 +2,16 @@
 //! TCP SYN) and records the outcome into a shared [`Route`] (the UI reads snapshots of it) and, optionally, sends it
 //! to the history. The trace can be paused and its interval changed while it runs.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::i18n::{Message, n};
 use crate::probe::icmp::{IcmpError, Pinger};
 use crate::probe::route::{MAX_TTL, ProbeOutcome, Route, RouteState, Sample};
-use crate::probe::tcp::{self, TcpError, TcpProber};
+use crate::probe::tcp::TcpProber;
 use crate::store::history::unix_ms;
 use crate::sync::lock;
 
@@ -21,7 +22,7 @@ pub enum Probe {
     #[default]
     Icmp,
     /// A TCP SYN to this port, as a connection would start: passes firewalls that drop ICMP, and reaches servers
-    /// that don't answer ping. Needs administrator rights; IPv4 only.
+    /// that don't answer ping. Needs administrator rights.
     Tcp(u16),
 }
 
@@ -74,9 +75,16 @@ pub enum TraceError {
     /// A worker thread couldn't be started.
     #[error("cannot start probe thread: {0}")]
     Spawn(#[from] std::io::Error),
-    /// TCP probes were asked for an IPv6 target.
-    #[error("TCP probes trace IPv4 addresses only")]
-    TcpIpv6,
+}
+
+impl TraceError {
+    /// The error as shown to the user.
+    pub fn message(&self) -> Message {
+        match self {
+            Self::Icmp(error) => error.message(),
+            Self::Spawn(error) => Message::new(n!("Cannot start a probe thread: {error}")).with("error", error),
+        }
+    }
 }
 
 /// What a worker probes its hop with.
@@ -84,13 +92,11 @@ pub enum TraceError {
 enum Prober {
     /// Its own ICMP handle.
     Icmp(Pinger),
-    /// The app's TCP prober, for this target and port.
+    /// The app's TCP prober, for this port of the target.
     Tcp {
         /// Shared by all traces.
         prober: Arc<TcpProber>,
-        /// The target.
-        target: Ipv4Addr,
-        /// Its port.
+        /// The target's port.
         port: u16,
     },
 }
@@ -98,37 +104,19 @@ enum Prober {
 impl Prober {
     /// The prober of `probe` for `target`.
     fn new(probe: Probe, target: IpAddr, tcp: &Arc<TcpProber>) -> Result<Self, TraceError> {
-        match (probe, target) {
-            (Probe::Icmp, _) => Ok(Self::Icmp(Pinger::for_target(target)?)),
-            (Probe::Tcp(port), IpAddr::V4(target)) => Ok(Self::Tcp { prober: Arc::clone(tcp), target, port }),
-            (Probe::Tcp(_), IpAddr::V6(_)) => Err(TraceError::TcpIpv6),
+        match probe {
+            Probe::Icmp => Ok(Self::Icmp(Pinger::for_target(target)?)),
+            Probe::Tcp(port) => Ok(Self::Tcp { prober: Arc::clone(tcp), port }),
         }
     }
 
     /// Probes hop `ttl` towards `target`, waiting up to `timeout`; the error is shown to the user.
-    fn probe(&self, target: IpAddr, ttl: u8, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+    fn probe(&self, target: IpAddr, ttl: u8, timeout: Duration) -> Result<ProbeOutcome, Message> {
         match self {
-            Self::Icmp(pinger) => {
-                pinger.probe(target, ttl, timeout).map_err(|error| ProbeError::Text(error.to_string()))
-            }
-            Self::Tcp { prober, target, port } => {
-                prober.probe(*target, *port, ttl, timeout).map_err(|error| match error {
-                    TcpError::NotElevated => ProbeError::Known(tcp::NOT_ELEVATED),
-                    TcpError::Blocked => ProbeError::Known(tcp::BLOCKED),
-                    error => ProbeError::Text(error.to_string()),
-                })
-            }
+            Self::Icmp(pinger) => pinger.probe(target, ttl, timeout).map_err(|error| error.message()),
+            Self::Tcp { prober, port } => prober.probe(target, *port, ttl, timeout).map_err(|error| error.message()),
         }
     }
-}
-
-/// Why probes fail, as shown to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProbeError {
-    /// One of the app's own messages (marked for translation), shown in the user's language.
-    Known(&'static str),
-    /// A message from Windows, shown as it is.
-    Text(String),
 }
 
 /// Settings the workers follow, changeable while they run.
@@ -152,7 +140,7 @@ struct Shared {
     /// Wakes waiting workers when `control` changes.
     wake: Condvar,
     /// Error of the latest failed probe, cleared by the next answer.
-    last_error: Mutex<Option<ProbeError>>,
+    last_error: Mutex<Option<Message>>,
 }
 
 impl Shared {
@@ -234,7 +222,7 @@ impl Tracer {
     }
 
     /// Error of the latest failed probe (network down, ...), `None` once probes get answers again.
-    pub fn last_error(&self) -> Option<ProbeError> {
+    pub fn last_error(&self) -> Option<Message> {
         lock(&self.shared.last_error).clone()
     }
 
@@ -314,6 +302,8 @@ fn probe_loop(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
     #[test]

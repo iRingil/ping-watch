@@ -2,7 +2,9 @@ name: Build
 
 # Builds the installer and the portable zip on demand; the Release workflow publishes the latest successful run.
 # Actions are pinned to commit SHAs (Dependabot keeps them current), and Inno Setup is a fixed release checked by its
-# SHA-256: a re-pointed tag can't put foreign code into the build of the installer.
+# SHA-256: a re-pointed tag can't put foreign code into the build of the installer. No build cache: the files come
+# from a clean build. The release checks (audit, rustfmt, Clippy, tests) run here too, as Release publishes only
+# what Build made. The toolchain and the runner image are pinned: raise them by hand (rustc --version) together.
 on:
   workflow_dispatch:
 
@@ -11,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2025
     permissions:
       contents: read
       # Signed build provenance of the files (GitHub artifact attestations).
@@ -19,11 +21,23 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-audit@0.23.0
+      - name: cargo audit
+        run: cargo audit
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
       # Writes the third-party license notices shipped with the app (build.cmd runs it).

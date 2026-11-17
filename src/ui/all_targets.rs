@@ -9,6 +9,7 @@ use eframe::egui::{self, Align, Frame, Layout, Margin, RichText, ScrollArea, Sen
 use egui_extras::TableBuilder;
 
 use crate::i18n::{Lang, Language, n, tr, trf, trn};
+use crate::probe::names::same_host;
 use crate::probe::tracer::Probe;
 use crate::snapshot::{HopRow, Snapshot, SummaryRow};
 use crate::store::history;
@@ -105,7 +106,7 @@ impl AllTargets {
             settings: saved.unwrap_or(defaults),
             saved,
             selected: None,
-            columns: ColumnWidths::load("all-targets", RESIZABLE_COLUMNS, store),
+            columns: ColumnWidths::load("all-targets", &HEADERS.map(|(title, _, _)| title), &FIXED_COLUMNS, store),
         }
     }
 
@@ -126,7 +127,7 @@ impl AllTargets {
             .iter()
             .map(|tab| {
                 let overview = tab.overview_with(self.settings.trace.focus, visible);
-                let alert = alerting.iter().any(|host| host.eq_ignore_ascii_case(&overview.title));
+                let alert = alerting.iter().any(|host| same_host(host, &overview.title));
                 let numbers = overview.target_hop.as_ref().map(|hop| HopRow {
                     ttl: hop.ttl,
                     address: hop.address.map(|ip| ip.to_string()),
@@ -156,6 +157,11 @@ impl AllTargets {
             .filter_map(|tab| Some((tab.label()?, tab.chart_over(reader, self.settings.trace.period, now_ms)?)))
             .collect();
         Snapshot::AllTargets { focus, rows, charts }
+    }
+
+    /// The table's columns, for the Columns page of the settings.
+    pub fn columns_mut(&mut self) -> &mut ColumnWidths {
+        &mut self.columns
     }
 
     /// Interval for targets added on this page.
@@ -287,7 +293,6 @@ impl AllTargets {
         self.columns
             .columns(builder, defaults, row_width, LATENCY_MIN_WIDTH)
             .header(ROW_HEIGHT, |mut header| {
-                let titles = HEADERS.map(|(title, _, _)| title);
                 for (index, (title, numeric, hint)) in HEADERS.into_iter().enumerate() {
                     let cell = columns::cell(&mut header, &shown, index, |ui| {
                         header_widths.push(ui.max_rect().width());
@@ -296,11 +301,11 @@ impl AllTargets {
                     });
                     if let Some(response) = cell {
                         let response = response.on_hover_text(language.translate(hint));
-                        self.columns.menu(&response, &titles, &FIXED_COLUMNS);
+                        self.columns.menu(&response);
                     }
                 }
                 let (_, latency) = header.col(|ui| latency_bars::header(ui, scale_ms));
-                self.columns.menu(&latency, &titles, &FIXED_COLUMNS);
+                self.columns.menu(&latency);
             })
             .body(|mut body| {
                 for (index, overview) in overviews.iter().enumerate() {
@@ -314,7 +319,7 @@ impl AllTargets {
                                 toggle = Some(index);
                             }
                             ui.add_space(4.0);
-                            if alerting.iter().any(|host| host.eq_ignore_ascii_case(&overview.title)) {
+                            if alerting.iter().any(|host| same_host(host, &overview.title)) {
                                 ui.label(RichText::new(tr!(ui, "alert")).color(theme::palette(ui).bad));
                             } else {
                                 ui.label(RichText::new(&overview.status).color(theme::palette(ui).ink_muted));
@@ -349,7 +354,7 @@ impl AllTargets {
                             });
                         }
                         columns::cell(&mut row, &shown, 8, |ui| {
-                            let loss = stats.map(|stats| ui.language().decimal(stats.loss_percent()));
+                            let loss = stats.map(|stats| hop_table::loss_text(ui, stats.loss_percent()));
                             hop_table::cell(ui, true, loss.unwrap_or_default());
                         });
                         columns::cell(&mut row, &shown, 9, |ui| {

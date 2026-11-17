@@ -1,12 +1,13 @@
 //! Columns of a table that the user can drag and hide: until the user moves a column border the table keeps its
-//! default widths, which follow the window; after that the user's widths stay as they are. A right click on the
-//! header shows or hides columns. Widths and hidden columns are kept between runs. The target tabs share one set
-//! (one hop table look for all of them), the overview page has its own.
+//! default widths, which follow the window; after that the user's widths stay as they are, until the user asks for
+//! the defaults again. A right click on the header shows or hides columns; the Columns page of the settings does the
+//! same from the keyboard. Widths and hidden columns are kept between runs. The target tabs share one set (one hop
+//! table look for all of them), the overview page has its own.
 
-use eframe::egui::{Id, Response, Stroke, Ui, UiBuilder};
+use eframe::egui::{Button, Grid, Id, Response, Stroke, Ui, UiBuilder};
 use egui_extras::{Column, TableBuilder, TableRow};
 
-use crate::i18n::Lang;
+use crate::i18n::{Lang, tr};
 use crate::store::window_state::WindowStore;
 
 /// Narrowest a column can be dragged.
@@ -20,6 +21,10 @@ const TOLERANCE: f32 = 0.5;
 pub struct ColumnWidths {
     /// Name of the table in the store.
     name: &'static str,
+    /// Titles of the resizable columns (marked texts), by position.
+    titles: Vec<&'static str>,
+    /// Positions of the columns that can't be hidden.
+    fixed: &'static [usize],
     /// Number of resizable columns.
     count: usize,
     /// The user's widths of all resizable columns, hidden ones included; `None` while the defaults are used.
@@ -39,25 +44,40 @@ pub struct ColumnWidths {
 }
 
 impl ColumnWidths {
-    /// Columns of table `name` with `count` resizable columns, as stored in `store` (widths ignored unless they
-    /// fit).
-    pub fn load(name: &'static str, count: usize, store: Option<&WindowStore>) -> Self {
+    /// Columns of table `name` with resizable columns titled `titles` (marked texts), those at the `fixed`
+    /// positions always shown, as stored in `store` (widths ignored unless they fit).
+    pub fn load(
+        name: &'static str,
+        titles: &[&'static str],
+        fixed: &'static [usize],
+        store: Option<&WindowStore>,
+    ) -> Self {
         let stored = store.and_then(|store| store.load_columns(name).inspect_err(|error| log::warn!("{error}")).ok());
         let hidden = store
             .and_then(|store| store.load_hidden_columns(name).inspect_err(|error| log::warn!("{error}")).ok())
             .unwrap_or_default();
-        Self::new(name, count, stored, &hidden)
+        Self::new(name, titles, fixed, stored, &hidden)
     }
 
-    /// Columns of table `name` with `count` resizable columns, starting from `stored` widths if they fit, with the
-    /// columns at the `hidden` positions hidden.
-    fn new(name: &'static str, count: usize, stored: Option<Vec<f32>>, hidden: &[usize]) -> Self {
+    /// Columns of table `name` with resizable columns titled `titles`, starting from `stored` widths if they fit,
+    /// with the columns at the `hidden` positions hidden unless they are `fixed`.
+    fn new(
+        name: &'static str,
+        titles: &[&'static str],
+        fixed: &'static [usize],
+        stored: Option<Vec<f32>>,
+        hidden: &[usize],
+    ) -> Self {
+        let count = titles.len();
         let stored = stored.filter(|widths| {
             widths.len() == count && widths.iter().all(|width| width.is_finite() && *width >= MIN_WIDTH)
         });
-        let shown: Vec<bool> = (0..count).map(|position| !hidden.contains(&position)).collect();
+        let shown: Vec<bool> =
+            (0..count).map(|position| fixed.contains(&position) || !hidden.contains(&position)).collect();
         Self {
             name,
+            titles: titles.to_vec(),
+            fixed,
             count,
             widths: stored.clone(),
             saved: stored,
@@ -127,16 +147,39 @@ impl ColumnWidths {
         self.widths = Some(widths);
     }
 
-    /// The header's right-click menu on `response` (a header cell): a checkbox per resizable column, titled by
-    /// `titles` (marked texts, by position); the columns at the `fixed` positions can't be hidden.
-    pub fn menu(&mut self, response: &Response, titles: &[&'static str], fixed: &[usize]) {
-        response.context_menu(|ui| {
-            for (position, title) in titles.iter().enumerate().filter(|(position, _)| !fixed.contains(position)) {
-                if let Some(shown) = self.shown.get_mut(position) {
-                    ui.checkbox(shown, ui.language().translate(title));
+    /// The header's right-click menu on `response` (a header cell): the [`choices`](Self::choices) in one column.
+    pub fn menu(&mut self, response: &Response) {
+        response.context_menu(|ui| self.choices(ui, 1));
+    }
+
+    /// A checkbox per column that can be hidden, laid out in `across` columns, and a button bringing back the
+    /// default widths (enabled once the user has dragged a border).
+    pub fn choices(&mut self, ui: &mut Ui, across: usize) {
+        let positions: Vec<usize> = (0..self.count).filter(|position| !self.fixed.contains(position)).collect();
+        Grid::new(self.name).num_columns(across).show(ui, |ui| {
+            for row in positions.chunks(across.max(1)) {
+                for position in row {
+                    if let (Some(title), Some(shown)) = (self.titles.get(*position), self.shown.get_mut(*position)) {
+                        ui.checkbox(shown, ui.language().translate(title));
+                    }
                 }
+                ui.end_row();
             }
         });
+        ui.separator();
+        ui.horizontal(|ui| {
+            let reset = ui.add_enabled(self.widths.is_some(), Button::new(tr!(ui, "Default widths")));
+            if reset.on_hover_text(tr!(ui, "Column widths that follow the window again")).clicked() {
+                self.reset_widths();
+            }
+        });
+    }
+
+    /// Drops the user's widths: the defaults are used again, following the window, from the next frame.
+    fn reset_widths(&mut self) {
+        self.widths = None;
+        // A changed width makes `columns` reset the widths egui keeps.
+        self.available = f32::NAN;
     }
 
     /// Stores the user's widths and the hidden columns in `store` when they changed, the widths once `dragging`
@@ -154,10 +197,14 @@ impl ColumnWidths {
         if dragging || self.widths == self.saved {
             return;
         }
-        if let (Some(store), Some(widths)) = (store, &self.widths)
-            && let Err(error) = store.save_columns(self.name, widths)
-        {
-            log::warn!("cannot save the column widths: {error}");
+        if let Some(store) = store {
+            let saved = match &self.widths {
+                Some(widths) => store.save_columns(self.name, widths),
+                None => store.save_columns(self.name, &[]),
+            };
+            if let Err(error) = saved {
+                log::warn!("cannot save the column widths: {error}");
+            }
         }
         // One attempt per change, not one per frame.
         self.saved.clone_from(&self.widths);
@@ -193,17 +240,23 @@ pub fn scope<R>(ui: &mut Ui, id: &str, add_table: impl FnOnce(&mut Ui) -> R) -> 
 mod tests {
     use super::*;
 
+    /// Titles of the test columns.
+    const TITLES: [&str; 3] = ["A", "B", "C"];
+
     #[test]
     fn stored_widths_are_used_only_if_they_fit() {
-        assert_eq!(ColumnWidths::new("t", 2, Some(vec![50.0, 60.0]), &[]).widths, Some(vec![50.0, 60.0]));
-        assert_eq!(ColumnWidths::new("t", 3, Some(vec![50.0, 60.0]), &[]).widths, None);
-        assert_eq!(ColumnWidths::new("t", 2, Some(vec![50.0, f32::NAN]), &[]).widths, None);
-        assert_eq!(ColumnWidths::new("t", 2, Some(vec![50.0, 1.0]), &[]).widths, None);
+        assert_eq!(
+            ColumnWidths::new("t", &TITLES[..2], &[], Some(vec![50.0, 60.0]), &[]).widths,
+            Some(vec![50.0, 60.0])
+        );
+        assert_eq!(ColumnWidths::new("t", &TITLES[..3], &[], Some(vec![50.0, 60.0]), &[]).widths, None);
+        assert_eq!(ColumnWidths::new("t", &TITLES[..2], &[], Some(vec![50.0, f32::NAN]), &[]).widths, None);
+        assert_eq!(ColumnWidths::new("t", &TITLES[..2], &[], Some(vec![50.0, 1.0]), &[]).widths, None);
     }
 
     #[test]
     fn defaults_stay_until_the_header_differs() {
-        let mut columns = ColumnWidths::new("t", 2, None, &[]);
+        let mut columns = ColumnWidths::new("t", &TITLES[..2], &[], None, &[]);
         columns.defaults = vec![50.0, 60.0];
         columns.take_header(&[50.0, 60.2, 300.0]);
         assert_eq!(columns.widths, None);
@@ -216,7 +269,7 @@ mod tests {
 
     #[test]
     fn saved_once_dragging_ends() {
-        let mut columns = ColumnWidths::new("t", 1, None, &[]);
+        let mut columns = ColumnWidths::new("t", &TITLES[..1], &[], None, &[]);
         columns.defaults = vec![50.0];
         columns.take_header(&[70.0, 300.0]);
         columns.save(None, true);
@@ -227,7 +280,7 @@ mod tests {
 
     #[test]
     fn hidden_columns_keep_their_widths() {
-        let mut columns = ColumnWidths::new("t", 3, None, &[1]);
+        let mut columns = ColumnWidths::new("t", &TITLES[..3], &[], None, &[1]);
         assert_eq!(columns.shown(), &[true, false, true]);
         columns.defaults = vec![50.0, 60.0, 70.0];
         // The header has the shown columns only, then the last one.
@@ -235,5 +288,20 @@ mod tests {
         assert_eq!(columns.widths, None);
         columns.take_header(&[55.0, 70.0, 300.0]);
         assert_eq!(columns.widths, Some(vec![55.0, 60.0, 70.0]));
+    }
+
+    #[test]
+    fn fixed_columns_are_always_shown() {
+        let columns = ColumnWidths::new("t", &TITLES, &[0], None, &[0, 2]);
+        assert_eq!(columns.shown(), &[true, true, false]);
+    }
+
+    #[test]
+    fn default_widths_come_back_and_are_stored_as_none() {
+        let mut columns = ColumnWidths::new("t", &TITLES[..1], &[], Some(vec![70.0]), &[]);
+        columns.reset_widths();
+        assert_eq!(columns.widths, None);
+        columns.save(None, false);
+        assert_eq!(columns.saved, None);
     }
 }

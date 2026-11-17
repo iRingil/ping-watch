@@ -347,14 +347,21 @@ pub(crate) fn entries_of_target(
     if !has_tables(connection)? {
         return Ok(Vec::new());
     }
+    let name: Option<String> = connection
+        .query_row("SELECT name FROM targets WHERE id = ?1", [target_id], |row| row.get(0))
+        .optional()?;
+    let Some(name) = name else {
+        return Ok(Vec::new());
+    };
     let mut statement = connection.prepare(&format!(
         "SELECT {ENTRY_COLUMNS} FROM alert_events
-         WHERE lower(host) = (SELECT name FROM targets WHERE id = ?1)
-           AND started_ms <= ?3 AND (ended_ms IS NULL OR ended_ms >= ?2)
+         WHERE started_ms <= ?2 AND (ended_ms IS NULL OR ended_ms >= ?1)
          ORDER BY started_ms, id"
     ))?;
-    let rows = statement.query_map(params![target_id, from_ms, to_ms], entry_of)?;
-    Ok(rows.filter_map(Result::transpose).collect::<Result<_, _>>()?)
+    let rows = statement.query_map(params![from_ms, to_ms], entry_of)?;
+    let entries: Vec<JournalEntry> = rows.filter_map(Result::transpose).collect::<Result<_, _>>()?;
+    // The host is matched here, not by SQLite's `lower`, which only knows ASCII letters.
+    Ok(entries.into_iter().filter(|entry| entry.host.to_lowercase() == name).collect())
 }
 
 /// Deletes the journal rows of the host stored as `name` (lowercase) that ended before `before_ms`; none if the
@@ -367,10 +374,21 @@ pub(crate) fn forget_target(connection: &Connection, name: &str, before_ms: i64)
     if !has_tables(connection)? {
         return Ok(0);
     }
-    Ok(connection.execute(
-        "DELETE FROM alert_events WHERE lower(host) = ?1 AND ended_ms IS NOT NULL AND ended_ms < ?2",
-        params![name, before_ms],
-    )?)
+    // The host is matched here, not by SQLite's `lower`, which only knows ASCII letters.
+    let mut statement =
+        connection.prepare("SELECT id, host FROM alert_events WHERE ended_ms IS NOT NULL AND ended_ms < ?1")?;
+    let rows = statement.query_map([before_ms], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+    let ids: Vec<i64> = rows
+        .filter_map(|row| match row {
+            Ok((id, host)) => (host.to_lowercase() == name).then_some(Ok(id)),
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<_, _>>()?;
+    let mut forgotten = 0_usize;
+    for id in ids {
+        forgotten = forgotten.saturating_add(connection.execute("DELETE FROM alert_events WHERE id = ?1", [id])?);
+    }
+    Ok(forgotten)
 }
 
 /// Deletes the journal rows that ended before `before_ms` (with their timeline marks); none if the alert tables
@@ -585,5 +603,14 @@ mod tests {
         assert_eq!(prune_journal(&store.connection, 2_000).ok(), Some(1), "the route change ended before 2 s");
         store.clear_journal().expect("cleared");
         assert_eq!(store.journal().map(|journal| journal.len()).ok(), Some(0));
+    }
+
+    #[test]
+    fn a_host_with_capital_non_ascii_letters_is_forgotten() {
+        let store = AlertStore::open_in_memory().expect("store opens");
+        let loss = Condition::Loss { percent: 10.0, window: Duration::from_secs(120) };
+        store.start(2, "ПРИМЕР.РФ", &loss, 1_000, 20.0).expect("started");
+        store.end(2, "ПРИМЕР.РФ", 2_000, 20.0, true).expect("ended");
+        assert_eq!(forget_target(&store.connection, "пример.рф", 3_000).ok(), Some(1));
     }
 }

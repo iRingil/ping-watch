@@ -51,6 +51,9 @@ pub struct Hop {
     pub address: Option<IpAddr>,
     /// Statistics over the snapshot's focus period.
     pub stats: HopStats,
+    /// Send time of the hop's first probe still counted, Unix ms: since the trace started, or since the hop was
+    /// forgotten as lying past the target; `None` before its first probe.
+    pub since_ms: Option<i64>,
 }
 
 /// Snapshot of a route for display.
@@ -115,6 +118,8 @@ struct HopState {
     total: HopStats,
     /// Probes of the last [`RECENT_WINDOW`]: send time (Unix ms) and round trip, `None` if lost. Oldest first.
     recent: VecDeque<(i64, Option<Duration>)>,
+    /// Send time of the first probe recorded in this state, Unix ms.
+    since_ms: Option<i64>,
 }
 
 /// Live state of the route to one target, built from probe outcomes.
@@ -153,10 +158,12 @@ impl RouteState {
         self.end() == ttl
     }
 
-    /// Whether `ttl` lies on the route as shown: its probes belong in the history; the silent TTLs past the end
-    /// are only noise.
+    /// Whether `ttl` lies on the route as shown and every TTL before it has been probed: its probes belong in the
+    /// history. The silent TTLs past the end are only noise; so is a target's answer at a far TTL in the first
+    /// round, before the nearer TTLs (one of which the target will answer too) are heard from.
     pub fn in_route(&self, ttl: u8) -> bool {
-        ttl <= self.end()
+        let before = usize::from(ttl).saturating_sub(1);
+        ttl <= self.end() && self.hops.iter().take(before).all(|hop| hop.total.sent() > 0)
     }
 
     /// Whether probes with `ttl` are still useful: TTLs beyond the target are not.
@@ -174,6 +181,7 @@ impl RouteState {
             return;
         };
         self.started_ms = Some(self.started_ms.map_or(at_ms, |started| started.min(at_ms)));
+        hop.since_ms = Some(hop.since_ms.map_or(at_ms, |since| since.min(at_ms)));
         let mut cut = false;
         let rtt = match outcome {
             ProbeOutcome::Reply { from, rtt } => {
@@ -228,7 +236,7 @@ impl RouteState {
                             .map(|(_, rtt)| *rtt),
                     ),
                 };
-                Hop { ttl, address: hop.address, stats }
+                Hop { ttl, address: hop.address, stats, since_ms: hop.since_ms }
             })
             .collect();
         let from_ms = match (since_ms, self.started_ms) {
@@ -286,6 +294,20 @@ mod tests {
     }
 
     #[test]
+    fn a_far_answer_of_the_target_waits_for_the_nearer_hops() {
+        let mut route = RouteState::new(TARGET, 30);
+        // The first round: the target answers at 27 before the TTLs below it report.
+        route.record(27, 0, reply(TARGET));
+        assert!(!route.in_route(27), "not in the history yet");
+        for ttl in 1..10 {
+            route.record(ttl, 0, reply(ROUTER));
+        }
+        route.record(10, 0, reply(TARGET));
+        assert!(route.in_route(10));
+        assert!(!route.in_route(27), "past the route");
+    }
+
+    #[test]
     fn hops_beyond_the_target_are_forgotten() {
         let mut route = RouteState::new(TARGET, 30);
         route.record(9, 0, reply(TARGET));
@@ -294,6 +316,20 @@ mod tests {
         // The route got longer: hop 5 is a router now; the old replies at 7 and 9 don't stretch it.
         route.record(5, 0, reply(ROUTER));
         assert_eq!(all(&route).hops().len(), 6);
+    }
+
+    #[test]
+    fn a_forgotten_hop_counts_from_its_next_probe() {
+        let mut route = RouteState::new(TARGET, 30);
+        route.record(6, 1_000, ProbeOutcome::Lost);
+        route.record(5, 2_000, reply(TARGET));
+        // The route got longer again: hop 6 starts afresh, not at the trace's start.
+        route.record(5, 60_000, reply(ROUTER));
+        route.record(6, 61_000, ProbeOutcome::Lost);
+        let snapshot = all(&route);
+        let since = |ttl: usize| snapshot.hops().get(ttl - 1).and_then(|hop| hop.since_ms);
+        assert_eq!(since(5), Some(2_000));
+        assert_eq!(since(6), Some(61_000));
     }
 
     #[test]

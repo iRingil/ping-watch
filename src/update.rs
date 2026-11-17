@@ -59,7 +59,7 @@ impl Check {
             }
         });
         if let Err(error) = spawned {
-            sender.send(Err(UpdateError::Network(format!("cannot start the check: {error}")))).ok();
+            sender.send(Err(UpdateError::Network(error.to_string()))).ok();
         }
         Self { receiver }
     }
@@ -175,13 +175,14 @@ mod tests {
         assert_eq!(newer_url("https://github.com/other/r/releases/tag/v9.0.0"), fallback);
     }
 
-    /// Asks the real GitHub (run with `cargo test -- --ignored`): a repository with releases and this one.
+    /// Asks the real GitHub (run with `cargo test -- --ignored`): a repository with releases, and this one, whose
+    /// latest release is never newer than the version being built.
     #[test]
     #[ignore = "needs the internet"]
     fn real_github() {
         let found = check("iRingil/gamepreset-peek", "1.0.0");
         assert!(matches!(found, Ok(Outcome::Newer { .. })), "{found:?}");
-        let found = check(REPOSITORY, "1.0.0");
+        let found = check(REPOSITORY, env!("CARGO_PKG_VERSION"));
         assert!(matches!(found, Ok(Outcome::NoReleases | Outcome::UpToDate)), "{found:?}");
     }
 }

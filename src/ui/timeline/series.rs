@@ -133,6 +133,16 @@ impl Period {
     }
 }
 
+/// Share of the time axis at each end where no label is written: a label is centered on its mark, so one there
+/// would run into the value axis's "0" on the left or be cut off on the right.
+const AXIS_EDGE: f64 = 0.04;
+
+/// Whether the time axis label of the mark at `value` fits inside the axis `from..=to`.
+pub fn axis_label_fits(value: f64, from: f64, to: f64) -> bool {
+    let margin = (to - from) * AXIS_EDGE;
+    value >= from + margin && value <= to - margin
+}
+
 /// Time range of a history query and its bucket size, all in Unix milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
@@ -460,6 +470,14 @@ mod tests {
         assert_eq!(Period::Minutes10.axis_format(120.0), "%H:%M");
         assert_eq!(Period::Minute.axis_format(15.0), "%H:%M:%S");
         assert_eq!(Period::Days7.axis_format(86_400.0), "%d.%m %H:%M");
+    }
+
+    #[test]
+    fn labels_at_the_ends_of_the_axis_are_left_out() {
+        assert!(!axis_label_fits(0.0, 0.0, 100.0));
+        assert!(!axis_label_fits(99.0, 0.0, 100.0));
+        assert!(axis_label_fits(50.0, 0.0, 100.0));
+        assert!(axis_label_fits(5.0, 0.0, 100.0));
     }
 
     #[test]

@@ -7,9 +7,10 @@ use std::time::Duration;
 use eframe::egui::{self, Align, DragValue, Grid, Layout, RichText, Ui};
 
 use crate::APP_NAME;
-use crate::i18n::{Lang, Language, n, tr, trf, trn};
+use crate::i18n::{Lang, Language, Message, n, tr, trf, trn};
 use crate::store::autostart;
 use crate::store::settings::{AppSettings, MAX_HOPS, RETENTIONS, TIMEOUTS};
+use crate::ui::columns::ColumnWidths;
 use crate::ui::icons::{self, Icon};
 use crate::ui::latency_bars::{self, Zones};
 use crate::ui::tab;
@@ -20,8 +21,8 @@ use crate::update::{Check, Outcome, REPOSITORY, UpdateError};
 /// Width of the window's content: the widest page in any language (About in Spanish, 604 points, measured
 /// 2026-11-15), so the window is the same size on every page.
 const WIDTH: f32 = 610.0;
-/// Height of a page: the tallest one (About, 305 points), so switching pages doesn't make the window jump.
-const PAGE_HEIGHT: f32 = 310.0;
+/// Height of a page: the tallest one (Trace, about 343 points), so switching pages doesn't make the window jump.
+const PAGE_HEIGHT: f32 = 345.0;
 /// Side of the logo on the About page.
 const LOGO_SIZE: f32 = 96.0;
 /// The project's source code.
@@ -53,6 +54,8 @@ enum Page {
     Tracing,
     /// Theme.
     Appearance,
+    /// Columns of the tables shown, and their widths.
+    Columns,
     /// Interface language.
     Language,
     /// Version, data folder, licenses.
@@ -61,7 +64,7 @@ enum Page {
 
 impl Page {
     /// All pages in tab order.
-    const ALL: [Self; 5] = [Self::General, Self::Tracing, Self::Appearance, Self::Language, Self::About];
+    const ALL: [Self; 6] = [Self::General, Self::Tracing, Self::Appearance, Self::Columns, Self::Language, Self::About];
 
     /// Tab title.
     fn title(self) -> &'static str {
@@ -69,10 +72,20 @@ impl Page {
             Self::General => n!("General"),
             Self::Tracing => n!("Tracing"),
             Self::Appearance => n!("Appearance"),
+            Self::Columns => n!("Columns"),
             Self::Language => n!("Language"),
             Self::About => n!("About"),
         }
     }
+}
+
+/// The tables whose columns the Columns page shows or hides.
+#[derive(Debug)]
+pub struct Tables<'a> {
+    /// The hop table of the target tabs.
+    pub hops: &'a mut ColumnWidths,
+    /// The table of the "All targets" page.
+    pub all_targets: &'a mut ColumnWidths,
 }
 
 /// State of the Settings window.
@@ -85,7 +98,7 @@ pub struct SettingsWindow {
     /// Whether Windows starts the app, read from the registry when the window opens.
     autostart: bool,
     /// Why reading or changing autostart failed.
-    autostart_error: Option<String>,
+    autostart_error: Option<Message>,
     /// The app logo for the About page, loaded on first show.
     logo: Option<egui::TextureHandle>,
     /// The update check: running, or its last result.
@@ -128,7 +141,10 @@ impl SettingsWindow {
                 self.autostart = enabled;
                 self.autostart_error = None;
             }
-            Err(error) => self.autostart_error = Some(error.to_string()),
+            Err(error) => {
+                self.autostart_error =
+                    Some(Message::new(n!("Starting with Windows couldn't be read: {error}")).with("error", error));
+            }
         }
     }
 
@@ -139,6 +155,7 @@ impl SettingsWindow {
         &mut self,
         ctx: &egui::Context,
         settings: &mut AppSettings,
+        tables: Tables<'_>,
         data_folder: Option<&Path>,
         elevated: bool,
     ) -> bool {
@@ -169,6 +186,7 @@ impl SettingsWindow {
                     Page::General => self.general(ui, settings),
                     Page::Tracing => restart_elevated = tracing(ui, settings, elevated),
                     Page::Appearance => appearance(ui, settings),
+                    Page::Columns => columns(ui, tables),
                     Page::Language => language(ui, settings),
                     Page::About => self.about(ui, data_folder),
                 }
@@ -198,10 +216,13 @@ impl SettingsWindow {
             ui.weak(tr!(ui, "Windows sign-in"));
             ui.vertical(|ui| {
                 if ui.checkbox(&mut self.autostart, tr!(ui, "Start Ping Watch")).changed() {
-                    self.autostart_error = autostart::set_enabled(self.autostart).err().map(|error| error.to_string());
+                    self.autostart_error = autostart::set_enabled(self.autostart).err().map(|error| {
+                        Message::new(n!("Starting with Windows couldn't be changed: {error}")).with("error", error)
+                    });
                 }
                 if let Some(error) = &self.autostart_error {
-                    ui.colored_label(theme::palette(ui).bad, error);
+                    let text = error.show(&*ui);
+                    ui.colored_label(theme::palette(ui).bad, text);
                 }
             });
             ui.end_row();
@@ -525,6 +546,53 @@ fn explorer() -> std::path::PathBuf {
         .join("explorer.exe")
 }
 
+/// Opens the links clicked this frame (`hyperlink_to`) through Windows Explorer instead of eframe: Explorer
+/// already runs with ordinary rights and hands the link to the default browser, so a browser it starts doesn't
+/// inherit the administrator rights of a Ping Watch restarted with them. Only web links are passed on — Explorer
+/// would open a local path or program too.
+pub fn open_links(ctx: &egui::Context) {
+    let urls = ctx.output_mut(|output| {
+        let mut urls = Vec::new();
+        output.commands.retain(|command| match command {
+            egui::OutputCommand::OpenUrl(open) => {
+                urls.push(open.url.clone());
+                false
+            }
+            _ => true,
+        });
+        urls
+    });
+    for url in urls {
+        if !is_web_link(&url) {
+            log::warn!("not opening {url:?}: not a web link");
+            continue;
+        }
+        if let Err(error) = std::process::Command::new(explorer()).arg(&url).spawn() {
+            log::warn!("cannot open {url}: {error}");
+        }
+    }
+}
+
+/// Whether `url` is an `https` link with nothing Explorer could read as more arguments.
+fn is_web_link(url: &str) -> bool {
+    url.starts_with("https://") && !url.chars().any(|c| c.is_whitespace() || c == '"')
+}
+
+/// Columns: which columns the two tables show, and their default widths back; the same as the right-click menu
+/// of a table's header, which this page also points to.
+fn columns(ui: &mut Ui, tables: Tables<'_>) {
+    ui.weak(tr!(ui, "Also with a right click on a table's header."));
+    ui.add_space(8.0);
+    ui.columns(2, |halves| {
+        if let [left, right] = halves {
+            left.label(RichText::new(tr!(left, "Target tabs")).strong());
+            tables.hops.choices(left, 2);
+            right.label(RichText::new(tr!(right, "All targets")).strong());
+            tables.all_targets.choices(right, 2);
+        }
+    });
+}
+
 /// `THIRD-PARTY.html` next to the exe, if it is there.
 fn third_party_notices() -> Option<std::path::PathBuf> {
     let path = std::env::current_exe().ok()?.parent()?.join("THIRD-PARTY.html");
@@ -652,4 +720,19 @@ fn update_error(error: &UpdateError, language: Language) -> String {
 /// "1 day", "7 days".
 fn days(duration: Duration, language: Language) -> String {
     trn!(language, duration.as_secs() / (24 * 60 * 60), "1 day|{n} days")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_web_links_go_to_explorer() {
+        assert!(is_web_link("https://github.com/iRingil/ping-watch/releases/tag/v1.2.0"));
+        assert!(!is_web_link("http://example.com"));
+        assert!(!is_web_link(r"C:\Windows\System32\calc.exe"));
+        assert!(!is_web_link("file:///C:/Windows/System32/calc.exe"));
+        assert!(!is_web_link("https://example.com\" /select,calc"));
+        assert!(!is_web_link("https://example.com x"));
+    }
 }

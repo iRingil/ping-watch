@@ -12,6 +12,7 @@ use crate::i18n::{self, Lang, Language, n, tr, trn};
 use crate::probe::names::NameCache;
 use crate::probe::route::{Hop, Route};
 use crate::probe::stats::HopStats;
+use crate::store::window_state::WindowStore;
 use crate::ui::columns::{self, ColumnWidths};
 use crate::ui::latency_bars::{self, Zones};
 
@@ -21,8 +22,6 @@ const ROW_HEIGHT: f32 = 22.0;
 const LATENCY_SHARE: f32 = 0.3;
 /// Narrowest the latency bars get.
 const LATENCY_MIN_WIDTH: f32 = 200.0;
-/// Number of columns that can be dragged: all but the latency bars.
-pub const RESIZABLE_COLUMNS: usize = HEADERS.len();
 /// Inset of a header title from its cell's edges.
 const HEADER_INSET: f32 = 4.0;
 /// Height of the header row.
@@ -49,6 +48,11 @@ const HEADERS: [(&str, bool, &str); 11] = [
     (n!("PL%"), true, n!("Packet loss: share of probes without an answer, %")),
     (n!("PL pcs"), true, n!("Packet loss: number of probes without an answer")),
 ];
+/// The hop table's columns as stored in `store`: all but the latency bars can be dragged, all but Hop hidden.
+pub fn column_set(store: Option<&WindowStore>) -> ColumnWidths {
+    ColumnWidths::load("hop-table", &HEADERS.map(|(title, _, _)| title), &FIXED_COLUMNS, store)
+}
+
 /// Position of the Name column, which takes the room the others leave by default.
 const NAME_COLUMN: usize = 3;
 /// Columns that can't be hidden: Hop (it also paints the header band).
@@ -144,19 +148,20 @@ pub fn show(
                     });
                     if let Some(response) = cell {
                         let response = response.on_hover_text(language.translate(hint));
-                        columns.menu(&response, &HEADERS.map(|(title, _, _)| title), &FIXED_COLUMNS);
+                        columns.menu(&response);
                     }
                 }
                 let (_, latency) = header.col(|ui| {
                     body_top = ui.max_rect().bottom();
                     latency_bars::header(ui, scale_ms);
                 });
-                columns.menu(&latency, &HEADERS.map(|(title, _, _)| title), &FIXED_COLUMNS);
+                columns.menu(&latency);
             })
             .body(|mut body| {
                 for (index, hop) in head.iter().chain(tail).enumerate() {
                     if index == head.len() && hidden > 0 {
-                        body.row(ROW_HEIGHT, |mut row| hidden_cell = hidden_row(&mut row, &shown));
+                        let text = hidden_text(language, hidden, limit);
+                        body.row(ROW_HEIGHT, |mut row| hidden_cell = hidden_row(&mut row, &shown, &text));
                         break_at = Some(averages.len());
                     }
                     body.row(ROW_HEIGHT, |mut row| {
@@ -209,11 +214,22 @@ fn hop_row(row: &mut TableRow<'_, '_>, shown: &[bool], hop: &Hop, names: &NameCa
     average
 }
 
+/// The text of the row standing for the `hidden` hops of a route longer than `limit`.
+pub fn hidden_text(language: Language, hidden: usize, limit: u8) -> String {
+    let count = u64::try_from(hidden).unwrap_or(u64::MAX);
+    i18n::fill(
+        &trn!(language, count, "{n} hop hidden by the limit of {limit}|{n} hops hidden by the limit of {limit}"),
+        &[("limit", limit.to_string())],
+    )
+}
+
 /// Takes the row standing for the hidden hops of a route: empty cells in the `shown` columns, painted over by
-/// [`paint_hidden`] once the table is drawn. Returns the rect of its first cell.
-fn hidden_row(row: &mut TableRow<'_, '_>, shown: &[bool]) -> Option<Rect> {
+/// [`paint_hidden`] once the table is drawn; its first cell carries `text` for screen readers, as the painted text
+/// is only pixels. Returns the rect of its first cell.
+fn hidden_row(row: &mut TableRow<'_, '_>, shown: &[bool], text: &str) -> Option<Rect> {
     let mut first = None;
-    row.col(|ui| first = Some(ui.max_rect()));
+    let (_, response) = row.col(|ui| first = Some(ui.max_rect()));
+    response.widget_info(|| eframe::egui::WidgetInfo::labeled(eframe::egui::Role::Label, true, text));
     // The first (Hop) column is always shown; the latency column too.
     for _ in shown.iter().skip(1).filter(|shown| **shown) {
         row.col(|_| {});
@@ -233,11 +249,7 @@ fn paint_hidden(ui: &Ui, cell: Rect, row_width: f32, body_top: f32, hidden: usiz
     visible.min.y = visible.min.y.max(body_top);
     let painter = ui.painter_at(visible);
     painter.rect_filled(band, 0.0, palette.pane_header);
-    let count = u64::try_from(hidden).unwrap_or(u64::MAX);
-    let text = i18n::fill(
-        &trn!(ui, count, "{n} hop hidden by the limit of {limit}|{n} hops hidden by the limit of {limit}"),
-        &[("limit", limit.to_string())],
-    );
+    let text = hidden_text(ui.language(), hidden, limit);
     painter.text(
         Pos2::new(band.left() + HEADER_INSET, band.center().y),
         Align2::LEFT_CENTER,
@@ -342,13 +354,10 @@ fn stat_cols(row: &mut TableRow<'_, '_>, shown: &[bool], stats: &HopStats, summa
         cell(ui, true, format_ms(stats.jitter(), ui.language()));
     });
     let loss = stats.loss_percent();
-    let colored = |ui: &Ui, text: String| {
-        let text = RichText::new(text);
-        if loss > 0.0 { text.color(LossLevel::of(loss).color(theme::palette(ui))) } else { text }
-    };
+    let colored = |ui: &Ui, text: String| loss_colored(ui, loss, text);
     columns::cell(row, shown, 9, |ui| {
         band(ui);
-        let text = colored(ui, ui.language().decimal(loss));
+        let text = loss_text(ui, loss);
         cell(ui, true, text);
     });
     columns::cell(row, shown, 10, |ui| {
@@ -394,6 +403,17 @@ pub fn cell(ui: &mut Ui, numeric: bool, text: impl Into<RichText>) {
         ui.add_space(HEADER_INSET);
         ui.label(text.into());
     }
+}
+
+/// `loss` (percent) as a table shows it, colored by how bad it is.
+pub fn loss_text(ui: &Ui, loss: f64) -> RichText {
+    loss_colored(ui, loss, ui.language().decimal(loss))
+}
+
+/// `text` about a `loss` (percent), colored by how bad that loss is; plain without loss.
+fn loss_colored(ui: &Ui, loss: f64, text: String) -> RichText {
+    let text = RichText::new(text);
+    if loss > 0.0 { text.color(LossLevel::of(loss).color(theme::palette(ui))) } else { text }
 }
 
 /// Formats a duration as milliseconds with one decimal in `language`'s way, `-` for none.

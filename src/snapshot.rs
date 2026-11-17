@@ -87,8 +87,10 @@ pub struct TargetReport {
     pub label: String,
     /// Period of the table, as shown ("12:43:25 – 12:53:25").
     pub focus: String,
-    /// The hops.
+    /// The hops shown under the hop limit, as the window shows them.
     pub hops: Vec<HopRow>,
+    /// The row standing for the hops the limit hides (after the first hop), if it hides any.
+    pub hidden: Option<String>,
     /// The target's chart over the timeline's period.
     pub chart: Option<Chart>,
     /// Alerts of the chart's period.
@@ -182,7 +184,7 @@ h1{{margin:0;font-size:22px;font-weight:600}}h2{{margin:28px 0 8px;font-size:16p
 table{{border-collapse:collapse;width:100%;background:{pane};border:1px solid {rule}}}\
 th{{background:{header};color:{muted};font-weight:500;text-align:left;padding:5px 8px;border-bottom:1px solid {rule}}}\
 td{{padding:4px 8px;border-top:1px solid {stripe};white-space:nowrap}}\
-.num{{text-align:right;font-variant-numeric:tabular-nums}}.bad{{color:{bad}}}.lost td{{color:{muted}}}\
+.num{{text-align:right;font-variant-numeric:tabular-nums}}.bad{{color:{bad}}}.lost td,.hidden td{{color:{muted}}}\
 svg{{display:block}}.chart{{background:{pane};border:1px solid {rule};margin-top:6px}}\
 @media print{{body{{margin:0}}table,.chart{{break-inside:avoid}}}}\
 </style></head><body>",
@@ -217,7 +219,13 @@ fn write_target(page: &mut String, header: &str, report: &TargetReport, language
         escape(tr!(language, "Name"))
     );
     write_number_titles(page, scale, language);
-    for hop in &report.hops {
+    for (index, hop) in report.hops.iter().enumerate() {
+        if index == 1
+            && let Some(hidden) = &report.hidden
+        {
+            // Hop, Count, IP, Name, the seven numbers and the bar.
+            let _ = write!(page, "<tr class=\"hidden\"><td colspan=\"12\">{}</td></tr>", escape(hidden));
+        }
         let lost = hop.address.is_none();
         let _ = write!(
             page,
@@ -660,6 +668,7 @@ mod tests {
             label: "1.1.1.1 / a/b:c".to_owned(),
             focus: String::new(),
             hops: Vec::new(),
+            hidden: None,
             chart: None,
             alerts: Vec::new(),
         };
@@ -699,6 +708,7 @@ mod tests {
             label: "1.1.1.1 / Cloudflare".to_owned(),
             focus: "15:00 – 15:10".to_owned(),
             hops: vec![hop(1, 2.0, 0.0), hop(2, 30.0, 5.0)],
+            hidden: Some("3 hops hidden by the limit of 10".to_owned()),
             chart: Some(chart),
             alerts: vec![AlertRow {
                 started: "15.11 15:05".to_owned(),
@@ -712,6 +722,7 @@ mod tests {
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("1.1.1.1 / Cloudflare"));
         assert!(page.contains("10.0.0.2"));
+        assert!(page.contains("<td colspan=\"12\">3 hops hidden by the limit of 10</td>"), "after the first hop");
         assert!(page.contains("<polyline"), "the latency steps");
         assert!(page.contains("Jitter (ms)"), "the jitter strip");
         assert!(page.contains("Route changed &lt;here&gt;"), "marks are escaped");

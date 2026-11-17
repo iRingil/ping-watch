@@ -12,8 +12,8 @@
     <a href="https://crates.io/crates/egui_plot/0.38.0">
         <img src="https://img.shields.io/badge/egui__plot-v0.38.0-informational" alt="egui_plot version">
     </a>
-    <a href="https://crates.io/crates/rusqlite/0.42.0">
-        <img src="https://img.shields.io/badge/rusqlite-v0.42.0-informational" alt="rusqlite version">
+    <a href="https://crates.io/crates/rusqlite/0.43.0">
+        <img src="https://img.shields.io/badge/rusqlite-v0.43.0-informational" alt="rusqlite version">
     </a>
     <a href="https://crates.io/crates/windows/0.62.2">
         <img src="https://img.shields.io/badge/windows-v0.62.2-informational" alt="windows version">
@@ -67,11 +67,15 @@ stands out at once. It keeps the history, so you can look back at what happened 
 ## Features
 
 - **Hop by hop.** Each router on the route gets a row: its address and name, the average, best, worst and current
-  latency, the jitter and the packet loss, with a bar that shows the spread over green, amber and red zones (their
-  limits are yours to set). The columns can be made wider or narrower.
+  latency, the jitter and the packet loss in percent and in lost probes, with a bar that shows the spread over green,
+  amber and red zones (their limits are yours to set). Hover a column title to see what it means. Columns can be made
+  wider or narrower, and shown or hidden with a right click on the header or in Settings → Columns.
+- **Long routes fold.** The hop limit (Settings → Tracing) keeps the table short: the first hop, a row telling how
+  many are hidden, then the last hops. Tracing itself always goes up to 40 hops.
 - **ICMP or TCP.** Hops are probed with pings, or, for a server that ignores pings or a network whose firewall drops
-  them, with TCP connection requests to a port of your choice (443 by default). TCP needs no packet driver, only
-  administrator rights: without them it is greyed out, with a button that restarts Ping Watch as administrator.
+  them, with TCP connection requests to a port of your choice (443 by default), over IPv4 and IPv6. TCP needs no
+  packet driver, only administrator rights: without them it is greyed out, with a button that restarts Ping Watch as
+  administrator. The whole app then runs as administrator.
 - **History.** Every probe is stored on this PC. The timeline shows latency, jitter and loss of any hop over the
   last minute to the last seven days; a slider goes back in time, and comments can be pinned to a moment.
 - **Several targets.** Each target has its own tab. "All targets" shows them side by side, each with its latency bar,
@@ -100,8 +104,8 @@ Download the latest version from [Releases](https://github.com/iRingil/ping-watc
 - `PingWatch-<version>-portable.zip` is the portable copy: unpack it anywhere and run `PingWatch.exe`.
 
 The app is not code-signed yet, so Windows SmartScreen may warn about it: click **More info → Run anyway**. To be
-sure the file is the one GitHub built, check its build provenance with
-`gh attestation verify PingWatch-<version>-setup.exe -R iRingil/ping-watch`.
+sure the file is the one GitHub built, compare its SHA-256 with `SHA256SUMS.txt` of the release, or check its build
+provenance with `gh attestation verify PingWatch-<version>-setup.exe -R iRingil/ping-watch`.
 
 ### Where the app keeps its files
 
@@ -127,10 +131,12 @@ as well.
 Ping Watch has no accounts, telemetry, ads or analytics. It sends only what tracing needs, and one request you ask
 for:
 
-- **ICMP echo requests** (pings) to the targets you enter and, with growing hop limits, to the routers on the way.
-- **TCP connection requests** (SYN) instead, for the targets you set to TCP probes: to the port you choose, with
-  growing hop limits. Each is closed (reset) once answered; no data is sent.
-- **DNS lookups**: the address of a target given by name, and the names of the routers on the route.
+- **ICMP echo requests** (pings) to the targets you enter, sent with a TTL of 1, 2, 3 and so on up to 40, so that
+  each router on the way answers the one that expires at it.
+- **TCP connection requests** (SYN) instead, for the targets you set to TCP probes: to the port you choose, with the
+  same TTLs. Each is closed (reset) once answered; no data is sent.
+- **DNS lookups**: the address of a target given by name, and the names of the routers on the route (reverse DNS;
+  Settings → Tracing → Hop names turns these off).
 - **GitHub** (`api.github.com`): once a day, a request for the latest release of this repository, to tell you when a
   new version is out (Settings → General → Updates turns it off), and when you click About → Check for updates.
 
@@ -153,7 +159,7 @@ cargo fmt                                             # format
 cargo clippy --all-targets                            # lint
 cargo test                                            # tests
 cargo audit                                           # advisories (cargo install cargo-audit)
-infrastructure\inno\build.cmd                         # release build, installer and portable zip (needs Inno Setup 6.6 or 7
+infrastructure\inno\build.cmd                         # release build, installer and portable zip (needs Inno Setup 7
                                                       # and cargo install cargo-about --locked --features cli)
 ```
 
@@ -167,6 +173,7 @@ for any noncommercial purpose. It is built with these third-party components:
 - [rusqlite](https://github.com/rusqlite/rusqlite): MIT; [SQLite](https://sqlite.org): public domain
 - [windows, windows-registry](https://github.com/microsoft/windows-rs): MIT or Apache-2.0
 - [tray-icon](https://github.com/tauri-apps/tray-icon): MIT or Apache-2.0
+- [socket2](https://github.com/rust-lang/socket2): MIT or Apache-2.0
 - [dns-lookup](https://github.com/keeperofdakeys/dns-lookup), [chrono](https://github.com/chronotope/chrono),
   [ctrlc](https://github.com/Detegr/rust-ctrlc): MIT or Apache-2.0
 - [tauri-winrt-notification](https://github.com/tauri-apps/winrt-notification): MIT or Apache-2.0

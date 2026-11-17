@@ -95,17 +95,27 @@ fn main() -> anyhow::Result<()> {
                 .ok();
             // Ctrl+C, Ctrl+Break, a closed console, logoff and shutdown (an IDE's Stop button sends Ctrl+C) close
             // the window like its close button: tabs and history are saved and the process exits normally.
+            let quit = Arc::new(AtomicBool::new(false));
             if let Some(first) = first_instance {
                 let context = creation.egui_ctx.clone();
-                first.on_show(move || {
-                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    context.request_repaint();
-                });
+                let quit_context = creation.egui_ctx.clone();
+                let quit_on_request = Arc::clone(&quit);
+                first.watch(
+                    move || {
+                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        context.request_repaint();
+                    },
+                    // The installer replaces the program: quit as the tray's Exit does, saving tabs and history.
+                    move || {
+                        quit_on_request.store(true, Ordering::Relaxed);
+                        quit_context.send_viewport_cmd(egui::ViewportCommand::Close);
+                        quit_context.request_repaint();
+                    },
+                );
             }
             let context = creation.egui_ctx.clone();
-            let quit = Arc::new(AtomicBool::new(false));
             let quit_on_signal = Arc::clone(&quit);
             if let Err(error) = ctrlc::set_handler(move || {
                 quit_on_signal.store(true, Ordering::Relaxed);

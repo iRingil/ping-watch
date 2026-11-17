@@ -41,7 +41,8 @@ OutputDir=..\..\build
 OutputBaseFilename=PingWatch-{#AppVersion}-setup
 Compression=lzma2/max
 SolidCompression=yes
-; A running Ping Watch is closed before its files are replaced.
+; A running Ping Watch is asked to quit before its files are replaced (PrepareToInstall below); the Restart
+; Manager stays as a fallback for other programs holding the files.
 CloseApplications=yes
 ; Light or dark as Windows is set, like the program itself.
 WizardStyle=modern dynamic
@@ -66,26 +67,31 @@ en.ModeDescription=How should {#AppName} be installed?
 en.ModeNormal=Normal: for this Windows user, with a Start menu shortcut and an uninstaller
 en.ModePortable=Portable: into any folder (a USB stick, for example); settings and history stay in that folder
 en.DeleteUserData=Delete the settings and the history of {#AppName} as well?
+en.StillRunning={#AppName} is still running and couldn't be closed. Quit it (its icon in the notification area → Exit), then run this again.
 ru.ModeCaption=Тип установки
 ru.ModeDescription=Как установить {#AppName}?
 ru.ModeNormal=Обычная: для этого пользователя Windows, с ярлыком в меню «Пуск» и деинсталлятором
 ru.ModePortable=Портативная: в любую папку (например, на флешку); настройки и история остаются в этой папке
 ru.DeleteUserData=Удалить также настройки и историю {#AppName}?
+ru.StillRunning={#AppName} всё ещё работает, и закрыть его не удалось. Закройте его (значок в области уведомлений → «Выход») и запустите это снова.
 de.ModeCaption=Installationsart
 de.ModeDescription=Wie soll {#AppName} installiert werden?
 de.ModeNormal=Normal: für diesen Windows-Benutzer, mit Startmenü-Verknüpfung und Deinstallationsprogramm
 de.ModePortable=Portabel: in einen beliebigen Ordner (z. B. einen USB-Stick); Einstellungen und Verlauf bleiben dort
 de.DeleteUserData=Auch die Einstellungen und den Verlauf von {#AppName} löschen?
+de.StillRunning={#AppName} läuft noch und konnte nicht geschlossen werden. Beenden Sie es (Symbol im Infobereich → Beenden) und starten Sie dies dann erneut.
 fr.ModeCaption=Type d'installation
 fr.ModeDescription=Comment installer {#AppName} ?
 fr.ModeNormal=Normale : pour cet utilisateur Windows, avec un raccourci dans le menu Démarrer et un programme de désinstallation
 fr.ModePortable=Portable : dans n'importe quel dossier (une clé USB, par exemple) ; réglages et historique restent dans ce dossier
 fr.DeleteUserData=Supprimer aussi les réglages et l'historique de {#AppName} ?
+fr.StillRunning={#AppName} est toujours en cours d’exécution et n’a pas pu être fermé. Quittez-le (son icône dans la zone de notification → Quitter), puis relancez ceci.
 es.ModeCaption=Tipo de instalación
 es.ModeDescription=¿Cómo instalar {#AppName}?
 es.ModeNormal=Normal: para este usuario de Windows, con acceso directo en el menú Inicio y desinstalador
 es.ModePortable=Portátil: en cualquier carpeta (una memoria USB, por ejemplo); la configuración y el historial se quedan en ella
 es.DeleteUserData=¿Eliminar también la configuración y el historial de {#AppName}?
+es.StillRunning={#AppName} sigue en ejecución y no se pudo cerrar. Ciérrelo (su icono en el área de notificación → Salir) y vuelva a ejecutar esto.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; Check: not IsPortable
@@ -108,6 +114,65 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(
 [Code]
 var
   ModePage: TInputOptionWizardPage;
+
+const
+  EVENT_MODIFY_STATE = $0002;
+  // Named objects of a running Ping Watch (src/ui/single_instance.rs): the mutex it holds while it runs, and the
+  // event that asks it to quit. They are open to the user's own processes, with or without administrator rights.
+  RunningMark = 'Local\iRingil.PingWatch.Running';
+  QuitEvent = 'Local\iRingil.PingWatch.Quit';
+
+function OpenEvent(DesiredAccess: Cardinal; InheritHandle: Boolean; Name: String): THandle;
+  external 'OpenEventW@kernel32.dll stdcall';
+function SetEvent(Event: THandle): Boolean;
+  external 'SetEvent@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+// Asks a running Ping Watch to quit (as its tray menu's Exit does: tabs and history are saved) and waits for it;
+// Windows' Restart Manager can't close its window, nor touch it when it runs as administrator. True when no Ping
+// Watch runs any more.
+function QuitPingWatch: Boolean;
+var
+  Event: THandle;
+  Waited: Integer;
+begin
+  Result := not CheckForMutexes(RunningMark);
+  if Result then
+    Exit;
+  Event := OpenEvent(EVENT_MODIFY_STATE, False, QuitEvent);
+  if Event <> 0 then
+  begin
+    SetEvent(Event);
+    CloseHandle(Event);
+  end;
+  // It stops its traces first: up to a probe timeout per target.
+  for Waited := 1 to 75 do
+  begin
+    Sleep(200);
+    if not CheckForMutexes(RunningMark) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+  Log('Ping Watch did not quit');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  if QuitPingWatch then
+    Result := ''
+  else
+    Result := CustomMessage('StillRunning');
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  Result := QuitPingWatch;
+  if not Result then
+    SuppressibleMsgBox(CustomMessage('StillRunning'), mbError, MB_OK, IDOK);
+end;
 
 function IsPortable: Boolean;
 begin

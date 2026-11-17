@@ -530,7 +530,13 @@ fn draw_charts(ui: &mut Ui, shown: &Shown, period: Period, compact: bool) -> (Re
     let slider_row = if compact { 0.0 } else { ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 };
     let height = (ui.available_height() - slider_row).max(60.0);
     let response = base("timeline", scale, height)
-        .x_axis_formatter(move |mark, _| clock(millis_of(mark.value), period.axis_format(mark.step_size)))
+        .x_axis_formatter(move |mark, _| {
+            if series::axis_label_fits(mark.value, from_s, to_s) {
+                clock(millis_of(mark.value), period.axis_format(mark.step_size))
+            } else {
+                String::new()
+            }
+        })
         .show(ui, |plot| {
             plot.set_plot_bounds(PlotBounds::from_min_max([from_s, 0.0], [to_s, scale]));
             // Zones are painted only where there is data, as in PingPlotter; time before the first sample stays plain.

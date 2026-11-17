@@ -7,6 +7,8 @@ on:
 permissions:
   contents: write
   actions: read
+  # Reads the build provenance of the files to check it.
+  attestations: read
 
 jobs:
   release:
@@ -57,6 +59,17 @@ jobs:
           for file in "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip"; do
             if [ ! -f "dist/$file" ]; then echo "::error::Build run $RUN_ID has no $file"; exit 1; fi
           done
+      # The files must be the ones Build of this repository made (its signed provenance), not just any artifact.
+      - name: Check the files' provenance and write their checksums
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd dist
+          for file in "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip"; do
+            gh attestation verify "$file" -R "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yml"
+          done
+          sha256sum "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       # The texts come from main as it is now: a fix to them needs no new build.
       - name: Write the release notes
         env:
@@ -85,4 +98,4 @@ jobs:
         run: |
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$SHA" --title "Ping Watch $VERSION" \
             --notes-file notes.md --latest \
-            "dist/PingWatch-$VERSION-setup.exe" "dist/PingWatch-$VERSION-portable.zip"
+            "dist/PingWatch-$VERSION-setup.exe" "dist/PingWatch-$VERSION-portable.zip" dist/SHA256SUMS.txt

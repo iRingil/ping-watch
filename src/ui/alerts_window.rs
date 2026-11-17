@@ -8,6 +8,7 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::alerts::{Condition, ConditionKind, Rule, Targets};
 use crate::i18n::{Lang, n, tr, trf};
+use crate::probe::names::same_host;
 use crate::store::alerts::AlertStore;
 use crate::ui::icons::{self, Icon, Style};
 use crate::ui::settings::{centered_row, close_mark, label_first_row, page_tabs, settings_grid};
@@ -361,7 +362,7 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
         // The open targets, plus any the rule names that aren't open now.
         let mut choices: Vec<String> = hosts.to_vec();
         for host in &draft.hosts {
-            if !choices.iter().any(|choice| choice.eq_ignore_ascii_case(host)) {
+            if !choices.iter().any(|choice| same_host(choice, host)) {
                 choices.push(host.clone());
             }
         }
@@ -386,12 +387,12 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
                         ui.vertical(|ui| {
                             ui.set_width(TARGET_COLUMN_WIDTH);
                             for host in column {
-                                let mut chosen = draft.hosts.iter().any(|listed| listed.eq_ignore_ascii_case(host));
+                                let mut chosen = draft.hosts.iter().any(|listed| same_host(listed, host));
                                 if ui.checkbox(&mut chosen, host).changed() {
                                     if chosen {
                                         draft.hosts.push(host.clone());
                                     } else {
-                                        draft.hosts.retain(|listed| !listed.eq_ignore_ascii_case(host));
+                                        draft.hosts.retain(|listed| !same_host(listed, host));
                                     }
                                 }
                             }

@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use crate::i18n::{Language, n, tr, trf, trn};
+use crate::probe::names::same_host;
 
 /// Kind of condition, without its numbers (for menus and storage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,7 +171,7 @@ impl Targets {
     pub fn contains(&self, host: &str) -> bool {
         match self {
             Self::All => true,
-            Self::Only(hosts) => hosts.iter().any(|listed| listed.eq_ignore_ascii_case(host)),
+            Self::Only(hosts) => hosts.iter().any(|listed| same_host(listed, host)),
         }
     }
 }

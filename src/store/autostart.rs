@@ -8,11 +8,11 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// Error reading or changing the autostart entry.
 #[derive(Debug, thiserror::Error)]
 pub enum AutostartError {
-    /// The registry refused (its message).
-    #[error("registry: {0}")]
+    /// The registry refused (Windows' text: it is shown inside a translated sentence).
+    #[error("{0}")]
     Registry(String),
-    /// The executable's own path is unknown.
-    #[error("cannot find the program file: {0}")]
+    /// The executable's own path is unknown (Windows' text).
+    #[error(transparent)]
     Exe(#[from] std::io::Error),
 }
 

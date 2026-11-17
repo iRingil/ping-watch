@@ -13,6 +13,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::Networking::WinSock::{AF_INET6, IN6_ADDR, IN6_ADDR_0, SOCKADDR_IN6};
 
+use crate::i18n::{Message, n};
 use crate::probe::route::ProbeOutcome;
 
 /// Payload sent in every echo request.
@@ -41,6 +42,23 @@ pub enum IcmpError {
     /// The target's address family doesn't match the handle's.
     #[error("{0} doesn't match the ICMP handle's address family")]
     Family(IpAddr),
+}
+
+impl IcmpError {
+    /// The error as shown to the user; Windows' own text stays as Windows wrote it.
+    pub fn message(&self) -> Message {
+        match self {
+            Self::Open(error) => {
+                Message::new(n!("Cannot open the ICMP handle: {error}")).with("error", error.message())
+            }
+            Self::Send { code, message } => {
+                Message::new(n!("ICMP error {code}: {message}")).with("code", code).with("message", message)
+            }
+            Self::Family(address) => {
+                Message::new(n!("{address} doesn't match the ICMP handle's address family")).with("address", address)
+            }
+        }
+    }
 }
 
 /// Open ICMP handle for one address family; one per thread, as probes on it are blocking.
