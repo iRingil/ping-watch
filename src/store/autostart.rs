@@ -1,4 +1,5 @@
-//! Starting with Windows: a value under the current user's `Run` registry key pointing at this executable.
+//! Starting with Windows: a value under the current user's `Run` registry key pointing at this executable, which
+//! then starts hidden to the tray.
 
 use crate::APP_NAME;
 
@@ -50,7 +51,7 @@ pub fn set_enabled(enabled: bool) -> Result<(), AutostartError> {
     Ok(())
 }
 
-/// The command Windows runs: this executable, quoted (the path may contain spaces).
+/// The command Windows runs: this executable, quoted (the path may contain spaces), started hidden to the tray.
 fn command_line() -> Result<String, std::io::Error> {
-    Ok(format!("\"{}\"", std::env::current_exe()?.display()))
+    Ok(format!("\"{}\" {}", std::env::current_exe()?.display(), crate::ui::tray::START_OPTION))
 }

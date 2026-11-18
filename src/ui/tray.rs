@@ -7,6 +7,16 @@ use eframe::egui;
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+/// Command-line option: start with the window hidden to the tray (how Windows starts Ping Watch at sign-in).
+pub const START_OPTION: &str = "--tray";
+
+/// Takes [`START_OPTION`] out of `args`; returns whether it was there.
+pub fn take_start_option(args: &mut Vec<String>) -> bool {
+    let count = args.len();
+    args.retain(|arg| arg != START_OPTION);
+    args.len() != count
+}
+
 /// What the user asked for through the tray icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -106,5 +116,19 @@ impl Tray {
 fn forward(sender: &mpsc::Sender<TrayCommand>, ctx: &egui::Context, command: TrayCommand) {
     if sender.send(command).is_ok() {
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_start_option_is_taken_out() {
+        let mut args = vec!["--tray".to_owned(), "1.1.1.1".to_owned()];
+        assert!(take_start_option(&mut args));
+        assert_eq!(args, ["1.1.1.1"]);
+        assert!(!take_start_option(&mut args), "only once");
+        assert_eq!(args, ["1.1.1.1"]);
     }
 }

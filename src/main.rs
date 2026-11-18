@@ -1,7 +1,8 @@
 //! Ping Watch — traceroute monitor in the style of PingPlotter. (`ping-watch` is only the project / executable
 //! name; everything the user sees says "Ping Watch".)
 //!
-//! Usage: `ping-watch [host...]` — opens the window with one tab per given host, each tracing right away.
+//! Usage: `ping-watch [--tray] [host...]` — opens the window with one tab per given host, each tracing right away;
+//! with `--tray` (as Windows starts it at sign-in) the window starts hidden to the tray.
 // Release builds are GUI-only; debug builds keep the console for `RUST_LOG` output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -68,7 +69,8 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     load_dlls_from_system32();
     // An instance started to replace this one with administrator rights waits until the old one is gone.
-    let hosts = elevation::wait_for_replaced(std::env::args().skip(1).collect());
+    let mut hosts = elevation::wait_for_replaced(std::env::args().skip(1).collect());
+    let in_tray = ui::tray::take_start_option(&mut hosts);
     // A second start shows the running window instead (its hosts, if any, are not opened).
     let first_instance = match ui::single_instance::claim() {
         ui::single_instance::Claim::First(first) => Some(first),
@@ -139,7 +141,7 @@ fn main() -> anyhow::Result<()> {
             }) {
                 log::warn!("cannot handle Ctrl+C: {error}");
             }
-            Ok(Box::new(PingWatchApp::new(hosts, tray, window_store, saved_window, quit)))
+            Ok(Box::new(PingWatchApp::new(hosts, in_tray, tray, window_store, saved_window, quit)))
         }),
     )
     // `eframe::Error` isn't `Send + Sync`, so it can't go into `anyhow` directly.

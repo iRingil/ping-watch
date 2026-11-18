@@ -145,8 +145,12 @@ pub struct PingWatchApp {
     window_saved: Option<WindowState>,
     /// When the window state was last stored.
     window_saved_at: Instant,
-    /// Minimize the window on the first frame (it was left minimized).
+    /// Minimize the window on the first frame (it was left minimized, and the app wasn't started in the tray).
     start_minimized: bool,
+    /// Started hidden to the tray (`--tray`, as at sign-in): the window stays hidden until asked for.
+    started_in_tray: bool,
+    /// The first frame has been handled.
+    started: bool,
     /// The open tabs as last stored.
     tabs_saved: Vec<SavedTab>,
     /// The overview page.
@@ -206,11 +210,13 @@ pub struct PingWatchApp {
 }
 
 impl PingWatchApp {
-    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab. It gets the
-    /// `tray` icon and the window state as stored in `window_store`. The caller has already applied `saved_window`
-    /// to the window's geometry. `quit` is set by whoever wants the app to quit for good (Ctrl+C).
+    /// Creates the app with one tab per host in `hosts` (all tracing right away), or one empty tab; `in_tray` if
+    /// the window starts hidden to the tray. It gets the `tray` icon and the window state as stored in
+    /// `window_store`. The caller has already applied `saved_window` to the window's geometry. `quit` is set by
+    /// whoever wants the app to quit for good (Ctrl+C).
     pub fn new(
         hosts: Vec<String>,
+        in_tray: bool,
         tray: Option<Tray>,
         window_store: Option<WindowStore>,
         saved_window: Option<WindowState>,
@@ -288,7 +294,10 @@ impl PingWatchApp {
             window,
             window_saved: saved_window,
             window_saved_at: Instant::now(),
-            start_minimized: saved_window.is_some_and(|state| state.minimized),
+            // Shown from the tray later, the window comes back restored, as after the close button.
+            start_minimized: !in_tray && saved_window.is_some_and(|state| state.minimized),
+            started_in_tray: in_tray,
+            started: false,
             settings,
             settings_saved: settings,
             settings_store,
@@ -615,15 +624,30 @@ impl PingWatchApp {
                     self.close(index);
                 }
             }
-            Action::RestartElevated => self.restart_elevated(),
+            Action::RestartElevated => self.restart_elevated(false),
         }
     }
 
-    /// Starts Ping Watch again with administrator rights (after the UAC prompt) and quits this one, which saves the
-    /// tabs for the new one to restore. Nothing happens if the user says no.
-    fn restart_elevated(&mut self) {
-        if crate::elevation::restart_elevated() {
+    /// Starts Ping Watch again with administrator rights (after the UAC prompt), hidden to the tray if `in_tray`,
+    /// and quits this one, which saves the tabs for the new one to restore. Nothing happens if the user says no.
+    fn restart_elevated(&mut self, in_tray: bool) {
+        if crate::elevation::restart_elevated(in_tray) {
             self.restarting = true;
+        }
+    }
+
+    /// A target traced by TCP before, now without administrator rights (say, started with Windows): their prompt
+    /// comes at once, once per run, also while the window is hidden to the tray, and the new instance starts hidden
+    /// too; said no to, the tabs tell what is missing. Quits once a restart was started.
+    fn ask_rights_and_restart(&mut self, ctx: &egui::Context) {
+        if !self.rights_asked && self.rights == Rights::CanElevate && self.tabs.iter().any(Tab::needs_rights) {
+            self.rights_asked = true;
+            // Asked on the first frames: a window started in the tray hasn't been shown yet.
+            self.restart_elevated(self.started_in_tray);
+        }
+        if std::mem::take(&mut self.restarting) {
+            self.quit.store(true, Ordering::Relaxed);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -1245,6 +1269,12 @@ impl eframe::App for PingWatchApp {
         self.check_updates_daily();
         self.prune_history();
         self.take_snapshot_results();
+        self.ask_rights_and_restart(ctx);
+        // eframe shows the window after its first frame whatever the viewport says, so it is hidden from here; not
+        // without a tray icon, as nothing could bring it back then.
+        if !std::mem::replace(&mut self.started, true) && self.started_in_tray && self.tray.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
         let Some(tray) = &self.tray else {
             return;
         };
@@ -1313,7 +1343,7 @@ impl eframe::App for PingWatchApp {
                 });
                 match request {
                     Some(Request::Open(index)) => self.page = Page::Target(index),
-                    Some(Request::RestartElevated) => self.restart_elevated(),
+                    Some(Request::RestartElevated) => self.restart_elevated(false),
                     Some(Request::Add(host)) => {
                         let defaults =
                             TraceSettings { interval: self.all_targets.interval(), ..self.settings.defaults };
@@ -1333,17 +1363,7 @@ impl eframe::App for PingWatchApp {
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
         let tables = settings::Tables { hops: &mut self.hop_columns, all_targets: self.all_targets.columns_mut() };
         if self.settings_window.show(ui.ctx(), &mut self.settings, tables, data_folder, self.rights) {
-            self.restart_elevated();
-        }
-        // A target traced by TCP before, now without administrator rights (say, started with Windows): their
-        // prompt comes at once, once per run; said no to, the tabs tell what is missing.
-        if !self.rights_asked && self.rights == Rights::CanElevate && self.tabs.iter().any(Tab::needs_rights) {
-            self.rights_asked = true;
-            self.restart_elevated();
-        }
-        if std::mem::take(&mut self.restarting) {
-            self.quit.store(true, Ordering::Relaxed);
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            self.restart_elevated(false);
         }
         self.reset_dialog(ui.ctx());
         let hosts: Vec<String> =

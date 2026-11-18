@@ -106,14 +106,19 @@ fn token_information<T>(token: HANDLE, class: TOKEN_INFORMATION_CLASS, value: &m
 }
 
 /// Starts Ping Watch again with administrator rights (Windows shows its UAC prompt); the new instance waits for
-/// this one to close. Returns `false` if it didn't start (the user said no, or it failed).
-pub fn restart_elevated() -> bool {
+/// this one to close, hidden to the tray if `in_tray`. Returns `false` if it didn't start (the user said no, or it
+/// failed).
+pub fn restart_elevated(in_tray: bool) -> bool {
     let Ok(exe) = std::env::current_exe() else {
         log::warn!("cannot find the program to restart");
         return false;
     };
     // SAFETY: no preconditions.
-    let parameters = HSTRING::from(format!("{AFTER_OPTION} {}", unsafe { GetCurrentProcessId() }));
+    let mut parameters = format!("{AFTER_OPTION} {}", unsafe { GetCurrentProcessId() });
+    if in_tray {
+        parameters = format!("{parameters} {}", crate::ui::tray::START_OPTION);
+    }
+    let parameters = HSTRING::from(parameters);
     let file = HSTRING::from(exe.as_os_str());
     // SAFETY: all strings are NUL-terminated and live across the call; no window owns the prompt.
     let result = unsafe { ShellExecuteW(None, w!("runas"), &file, &parameters, None, SW_SHOWNORMAL) };

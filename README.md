@@ -93,7 +93,7 @@ stands out at once. It keeps the history, so you can look back at what happened 
   latency and loss chart and the alerts of the period, ready to send to your provider or to print.
 - **IPv4 and IPv6**, host names or addresses, with a list of public DNS servers to start from.
 - **In the background.** The close button can hide Ping Watch to the notification area, where it keeps tracing, and
-  it can start with Windows.
+  it can start with Windows, hidden there.
 - **Five languages.** English, Russian, German, French and Spanish.
 - **Light and dark themes**, or the one Windows uses.
 - **Normal or portable installation**: for one Windows user, or into any folder such as a USB stick.
