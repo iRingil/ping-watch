@@ -12,6 +12,8 @@ permissions:
 
 jobs:
   release:
+    # Only main's own copy of this workflow publishes.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
@@ -62,11 +64,14 @@ jobs:
       # The files must be the ones Build of this repository made (its signed provenance), not just any artifact.
       - name: Check the files' provenance and write their checksums
         env:
+          SHA: ${{ steps.build.outputs.sha }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd dist
           for file in "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip"; do
-            gh attestation verify "$file" -R "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yml"
+            gh attestation verify "$file" -R "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yml" \
+              --source-ref refs/heads/main --source-digest "$SHA"
           done
           sha256sum "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip" > SHA256SUMS.txt
           cat SHA256SUMS.txt

@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 
 use crate::probe::route::{ProbeOutcome, Sample};
 use crate::store::alerts::JournalEntry;
@@ -317,21 +317,29 @@ impl Store {
     /// Deletes the history of the target called `name` from before `before_ms`: its samples, comments and ended
     /// alert journal rows (the timeline marks). Returns how many samples.
     ///
+    /// The samples go hop by hop, each a short statement of its own, as in [`Self::prune`]: one transaction for
+    /// all of them would hold the write lock while days of samples are deleted, and the window's own writes (the
+    /// trace starting again) wait for that lock.
+    ///
     /// # Errors
     ///
-    /// [`HistoryError::Db`] if SQLite fails; then nothing is deleted.
+    /// [`HistoryError::Db`] if SQLite fails; what was deleted until then stays deleted.
     pub fn forget(&self, name: &str, before_ms: i64) -> Result<usize, HistoryError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        let samples = transaction.execute(
-            "DELETE FROM samples WHERE target_id = (SELECT id FROM targets WHERE name = ?1) AND ts_ms < ?2",
-            params![name, before_ms],
-        )?;
-        transaction.execute(
-            "DELETE FROM comments WHERE target_id = (SELECT id FROM targets WHERE name = ?1) AND ts_ms < ?2",
-            params![name, before_ms],
-        )?;
-        crate::store::alerts::forget_target(&transaction, name, before_ms)?;
-        transaction.commit()?;
+        let target: Option<i64> = self
+            .connection
+            .query_row("SELECT id FROM targets WHERE name = ?1", [name], |row| row.get(0))
+            .optional()?;
+        let mut samples = 0_usize;
+        if let Some(target) = target {
+            let mut delete =
+                self.connection.prepare("DELETE FROM samples WHERE target_id = ?1 AND ttl = ?2 AND ts_ms < ?3")?;
+            for ttl in 1..=u8::MAX {
+                samples = samples.saturating_add(delete.execute(params![target, ttl, before_ms])?);
+            }
+            self.connection
+                .execute("DELETE FROM comments WHERE target_id = ?1 AND ts_ms < ?2", params![target, before_ms])?;
+        }
+        crate::store::alerts::forget_target(&self.connection, name, before_ms)?;
         Ok(samples)
     }
 

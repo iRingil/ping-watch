@@ -215,6 +215,10 @@ pub struct Tab {
     name: Option<String>,
     /// Reverse-DNS name of the traced address, once known.
     reverse: Option<String>,
+    /// When the host's lookup, which failed, is tried again; `None` if no retry waits.
+    retry_at: Option<Instant>,
+    /// The wait before that retry: longer after each failure in a row, zero before the first.
+    retry_delay: Duration,
 }
 
 impl Tab {
@@ -241,6 +245,8 @@ impl Tab {
             reverse: None,
             language: Language::English,
             traced_since: None,
+            retry_at: None,
+            retry_delay: Duration::ZERO,
         }
     }
 
@@ -272,6 +278,8 @@ impl Tab {
             State::Resolving(_) => !self.start_paused,
             // Restored with administrator rights, it traces.
             State::NeedsRights(_) => true,
+            // Its lookup failed and is tried again (no network yet): still meant to trace.
+            State::Editing(_) if self.retry_at.is_some() => !self.start_paused,
             State::Editing(_) => false,
         };
         Some(SavedTab { host: self.host.clone(), tracing, charted: self.is_charted(), shown: false })
@@ -389,10 +397,12 @@ impl Tab {
     fn begin(&mut self, host: String) {
         self.state = State::Editing(None);
         self.traced_since = None;
+        self.retry_at = None;
         let changed = self.host != host.trim();
         self.host = host.trim().to_owned();
         self.selected_ttl = None;
         if changed {
+            self.retry_delay = Duration::ZERO;
             // Another target: its own hops, starting with the target's chart.
             self.charts = vec![HopChart::new(ChartedHop::Target)];
             self.chart_end_ms = None;
@@ -445,13 +455,25 @@ impl Tab {
         // Here and not only while the tab is shown: an interval set for all targets on the overview page is
         // stored for the tabs nobody opens, too.
         self.save_settings(context.targets);
+        // A lookup that failed (started with Windows before the network was up) is tried again, unless the user
+        // is typing another host meanwhile.
+        if self.retry_at.is_some_and(|at| Instant::now() >= at) {
+            self.retry_at = None;
+            if matches!(self.state, State::Editing(Some(_))) && self.entry.text().trim() == self.host {
+                let host = self.host.clone();
+                self.begin(host);
+            }
+        }
         let State::Resolving(receiver) = &self.state else {
             return;
         };
         let target = match receiver.try_recv() {
             Ok(Ok(target)) => target,
             Ok(Err(ResolveError::Lookup { host, source })) => {
-                return self.fail(lookup_message(&host, &source, self.language));
+                self.fail(lookup_message(&host, &source, self.language));
+                self.retry_delay = next_retry_delay(self.retry_delay);
+                self.retry_at = Instant::now().checked_add(self.retry_delay);
+                return;
             }
             Ok(Err(ResolveError::NoAddress(host))) => {
                 return self.fail(trf!(self.language, "{host} has no address", host = host));
@@ -467,6 +489,7 @@ impl Tab {
                 return self.fail(trf!(self.language, "Cannot resolve {host}", host = self.host));
             }
         };
+        self.retry_delay = Duration::ZERO;
         if let Some(targets) = context.targets
             && let Err(error) = targets.remember(&self.host, target)
         {
@@ -1282,6 +1305,16 @@ fn lookup_message(host: &str, error: &std::io::Error, language: Language) -> Str
     }
 }
 
+/// The wait before a failed lookup is tried again, after one of `previous` (zero before the first): 5 s, then
+/// twice as long each time, a minute at most.
+fn next_retry_delay(previous: Duration) -> Duration {
+    /// The first wait.
+    const FIRST: Duration = Duration::from_secs(5);
+    /// The longest wait.
+    const LONGEST: Duration = Duration::from_secs(60);
+    if previous.is_zero() { FIRST } else { previous.saturating_mul(2).min(LONGEST) }
+}
+
 /// Name under which a host's history is stored.
 fn history_key(host: &str) -> String {
     host.to_lowercase()
@@ -1359,6 +1392,26 @@ fn hop_title(route: &Route, ttl: u8, names: &NameCache, language: Language) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_lookup_is_retried_after_longer_and_longer_waits() {
+        let waits: Vec<u64> = std::iter::successors(Some(Duration::ZERO), |wait| Some(next_retry_delay(*wait)))
+            .skip(1)
+            .take(6)
+            .map(|wait| wait.as_secs())
+            .collect();
+        assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+    }
+
+    #[test]
+    fn a_tab_waiting_to_retry_its_lookup_is_remembered_as_tracing() {
+        let mut tab = Tab::new(AppSettings::default().defaults);
+        tab.host = "example.com".to_owned();
+        tab.state = State::Editing(Some("no network".to_owned()));
+        assert_eq!(tab.remembered().map(|saved| saved.tracing), Some(false), "a failed start nobody retries");
+        tab.retry_at = Some(Instant::now());
+        assert_eq!(tab.remembered().map(|saved| saved.tracing), Some(true));
+    }
 
     #[test]
     fn target_label_is_address_and_one_description() {

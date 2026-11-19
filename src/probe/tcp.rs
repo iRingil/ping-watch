@@ -247,7 +247,7 @@ impl TcpProber {
                     // A firewall on this computer refused the connection: no SYN left at all.
                     Ok(Some(error)) if error.raw_os_error() == Some(WSAEACCES) => Err(TcpError::Blocked),
                     _ => {
-                        target_hidden = socket.peer_addr().is_ok();
+                        target_hidden = is_connected(&socket);
                         Ok(ProbeOutcome::Lost)
                     }
                 },
@@ -401,6 +401,13 @@ impl Listener {
             }
         }
     }
+}
+
+/// Whether the non-blocking `connect()` of `socket` was answered: Windows made the connection. Sending nothing
+/// tells: it succeeds on a connection and fails ("not connected") while the SYN is unanswered — the peer's address
+/// doesn't, Windows gives it as soon as `connect()` is called.
+fn is_connected(socket: &Socket) -> bool {
+    socket.send(&[]).is_ok()
 }
 
 /// Keeps Windows from sending the SYN of `socket` again when no answer comes: one probe, one SYN.
@@ -854,6 +861,33 @@ mod live {
         assert!(!open(&prober), "closed while idle");
         assert!(matches!(prober.probe(target, 443, 64, Duration::from_secs(3)), Ok(ProbeOutcome::Reply { .. })));
         assert!(open(&prober));
+    }
+
+    #[test]
+    #[ignore = "needs administrator rights, the network, a firewall that lets the test program connect, and 5 s"]
+    fn lost_probes_of_a_silent_target_are_not_hidden_answers() {
+        let prober = TcpProber::default();
+        // TEST-NET-1: routed nowhere, nobody answers.
+        let target = Ipv4Addr::new(192, 0, 2, 1).into();
+        for _ in 0..5 {
+            let outcome = prober.probe(target, 443, 64, Duration::from_secs(1));
+            assert!(matches!(outcome, Ok(ProbeOutcome::Lost)), "{outcome:?}");
+        }
+        assert!(!prober.answers_blocked(target), "silence isn't a firewall");
+    }
+
+    #[test]
+    #[ignore = "needs the network"]
+    fn only_an_answered_connect_is_connected() {
+        let connecting = |target: SocketAddr| {
+            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("a socket");
+            socket.set_nonblocking(true).expect("non-blocking");
+            socket.connect(&target.into()).ok();
+            thread::sleep(Duration::from_secs(1));
+            socket
+        };
+        assert!(is_connected(&connecting(SocketAddr::from(([1, 1, 1, 1], 443)))));
+        assert!(!is_connected(&connecting(SocketAddr::from(([192, 0, 2, 1], 443)))));
     }
 
     #[test]

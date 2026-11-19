@@ -1,7 +1,7 @@
 //! Main window: a tab bar ("All targets", one tab per target, "+"), the overview page or the active target tab,
 //! and the status bar. Keyboard shortcuts act on the active tab.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -226,8 +226,10 @@ pub struct PingWatchApp {
     update_available: bool,
     /// The status bar's notice, if one is shown.
     notice: Option<Notice>,
-    /// When the last notification of each rule and target was shown.
+    /// When the last notification of an alert starting (or of a route change) was shown, by rule and target.
     notified: HashMap<(i64, String), Instant>,
+    /// The alerts going on whose start was notified: their end is told too, whenever it comes.
+    announced: HashSet<(i64, String)>,
     /// The retention the history was last pruned with, and when.
     pruned: Option<(Duration, Instant)>,
     /// Where the snapshot thread reports the file it saved (or why it couldn't).
@@ -350,6 +352,7 @@ impl PingWatchApp {
             update_available: false,
             notice: add_rules.then(|| added_rules_notice(settings.language)).flatten(),
             notified: HashMap::new(),
+            announced: HashSet::new(),
             pruned: None,
             snapshot_results: mpsc::channel(),
         }
@@ -369,7 +372,8 @@ impl PingWatchApp {
     }
 
     /// Acts on one alert event: the journal (which the timelines draw their alert marks from) and a notification
-    /// if the rule asks — at most one per rule and target every [`NOTIFY_INTERVAL`].
+    /// if the rule asks — a start or a route change at most once per rule and target every [`NOTIFY_INTERVAL`], an
+    /// end whenever its start was notified.
     fn on_alert(&mut self, event: Event, now_ms: i64) {
         let language = self.settings.language;
         let journal = self.alert_store.as_ref();
@@ -429,11 +433,24 @@ impl PingWatchApp {
             | Event::Ended { rule_id, host, .. }
             | Event::RouteChanged { rule_id, host, .. } => (*rule_id, host.clone()),
         };
+        let key = (rule_id, host);
+        if let Event::Ended { .. } = &event {
+            // The end of an alert whose start was told is always told, and doesn't hold back the next start: the
+            // user must not be left thinking the target is still down, nor miss it going down again.
+            if self.announced.remove(&key)
+                && let Some((title, text)) = toast
+            {
+                self.notifier.show(&title, &text);
+            }
+            return;
+        }
         if let Some((title, text)) = toast {
-            let key = (rule_id, host);
             if self.notified.get(&key).is_none_or(|at| at.elapsed() >= NOTIFY_INTERVAL) {
                 self.notifier.show(&title, &text);
-                self.notified.insert(key, Instant::now());
+                self.notified.insert(key.clone(), Instant::now());
+                if let Event::Started { .. } = &event {
+                    self.announced.insert(key);
+                }
             } else {
                 log::info!("notification held back, one came lately: {title}");
             }
