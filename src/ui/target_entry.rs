@@ -85,8 +85,8 @@ impl TargetEntry {
         let mut start = input.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
 
         // The arrow is a button set into the field's right end: own face, a divider, a hover state.
-        let arrow_rect =
-            Rect::from_min_max(pos2(input.rect.right() - ARROW_WIDTH, input.rect.top()), input.rect.max).shrink(2.0);
+        let arrow_rect = Rect::from_min_max(pos2(input.rect.right() - ARROW_WIDTH, input.rect.top()), input.rect.max)
+            .shrink2(egui::vec2(2.0, 1.0));
         let arrow = ui
             .interact(arrow_rect, input.id.with("target-list"), Sense::click())
             .on_hover_text(tr!(ui, "Saved targets"));
@@ -164,7 +164,7 @@ impl TargetEntry {
             return;
         };
         let mut close = false;
-        egui::Modal::new(egui::Id::unique("edit-target")).show(ctx, |ui| {
+        let dialog = egui::Modal::new(egui::Id::unique("edit-target")).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.label(RichText::new(tr!(ui, "Edit target")).font(theme::heading_font(17.0)));
             ui.add_space(6.0);
@@ -184,7 +184,11 @@ impl TargetEntry {
             ui.add_space(6.0);
             crate::ui::settings::centered_row(ui, |ui| {
                 let can_save = !draft.address.trim().is_empty();
-                if ui.add_enabled(can_save, primary_button(ui, tr!(ui, "Save"))).clicked() {
+                let save = ui.add_enabled(can_save, primary_button(ui, tr!(ui, "Save")));
+                icons::focus_ring(ui, &save, save.rect);
+                // Enter in either field saves, as the button does.
+                let entered = can_save && ui.input(|input| input.key_pressed(Key::Enter));
+                if save.clicked() || entered {
                     match targets.update(draft.id, &draft.address, &draft.name) {
                         Ok(()) => close = true,
                         Err(error) if is_duplicate(&error) => {
@@ -198,7 +202,8 @@ impl TargetEntry {
                 }
             });
         });
-        if close {
+        // Esc and a click outside cancel, as in the other dialogs.
+        if close || dialog.should_close() {
             self.editing = None;
         }
     }

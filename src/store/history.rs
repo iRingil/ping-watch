@@ -4,6 +4,8 @@
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,6 +27,13 @@ macro_rules! jitter_window_preceding {
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a query waits for another connection's write lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Most of the write-ahead log file kept between its uses, bytes.
+const WAL_KEPT: u32 = 32 * 1024 * 1024;
+/// Pages given back to the file system per statement after pruning, so the write lock is held briefly each time.
+const VACUUM_PAGES: u32 = 2_000;
+/// Most samples a recorder holds while they can't be written (the database is busy, the disk is full): about ten
+/// minutes of a long route probed every half second. Older ones are dropped beyond that.
+const MAX_UNWRITTEN: usize = 50_000;
 
 /// Database schema; safe to run on every open.
 const SCHEMA: &str = "
@@ -189,6 +198,8 @@ pub(crate) fn connect(path: &Path) -> Result<Connection, HistoryError> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     // Takes effect only while the file is still empty: a new database gives pages back after pruning.
     connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")?;
+    // The write-ahead log grows while a pruning rewrites much of the file; it shrinks back afterward.
+    connection.execute_batch(&format!("PRAGMA journal_size_limit = {WAL_KEPT};"))?;
     Ok(connection)
 }
 
@@ -258,16 +269,49 @@ impl Store {
     /// Deletes everything older than `before_ms`: samples, comments and the alert journal (with the timeline marks
     /// made from it), then gives the freed pages back to the file system. Returns how many samples were deleted.
     ///
+    /// The samples go hop by hop, each a short statement of its own along the table's key: one statement for all
+    /// of them would read the whole table with the write lock held, and the recorders write every second.
+    ///
     /// # Errors
     ///
     /// [`HistoryError::Db`] if SQLite fails.
     pub fn prune(&self, before_ms: i64) -> Result<usize, HistoryError> {
-        let samples = self.connection.execute("DELETE FROM samples WHERE ts_ms < ?1", [before_ms])?;
+        let targets: Vec<i64> = self
+            .connection
+            .prepare("SELECT id FROM targets")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut delete =
+            self.connection.prepare("DELETE FROM samples WHERE target_id = ?1 AND ttl = ?2 AND ts_ms < ?3")?;
+        let mut samples = 0_usize;
+        for target in targets {
+            for ttl in 1..=u8::MAX {
+                samples = samples.saturating_add(delete.execute(params![target, ttl, before_ms])?);
+            }
+        }
         self.connection.execute("DELETE FROM comments WHERE ts_ms < ?1", [before_ms])?;
         crate::store::alerts::prune_journal(&self.connection, before_ms)?;
         // Only shrinks a database made with auto_vacuum = INCREMENTAL (see `connect`); a no-op otherwise.
-        self.connection.execute_batch("PRAGMA incremental_vacuum;")?;
+        loop {
+            let free = self.free_pages()?;
+            if free == 0 {
+                break;
+            }
+            // Stepped to its end: every step gives one page back, and one step alone would be all of it.
+            let mut vacuum = self.connection.prepare(&format!("PRAGMA incremental_vacuum({VACUUM_PAGES})"))?;
+            let mut pages = vacuum.query([])?;
+            while pages.next()?.is_some() {}
+            // A database without incremental auto-vacuum keeps its free pages: nothing more to do.
+            if self.free_pages()? >= free {
+                break;
+            }
+        }
         Ok(samples)
+    }
+
+    /// Pages of the file that hold nothing anymore.
+    fn free_pages(&self) -> Result<i64, HistoryError> {
+        Ok(self.connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?)
     }
 
     /// Deletes the history of the target called `name` from before `before_ms`: its samples, comments and ended
@@ -445,6 +489,8 @@ pub struct Recorder {
     sender: Sender<Record>,
     /// Writer thread; `None` only while dropping.
     worker: Option<JoinHandle<()>>,
+    /// Set while the latest samples couldn't be written.
+    failing: Arc<AtomicBool>,
 }
 
 impl Recorder {
@@ -457,10 +503,18 @@ impl Recorder {
         let store = Store::open(path)?;
         let target_id = store.target_id(target)?;
         let (sender, receiver) = mpsc::channel();
+        let failing = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&failing);
         let worker = thread::Builder::new()
             .name("history".to_owned())
-            .spawn(move || record_loop(store, target_id, &receiver))?;
-        Ok(Self { sender, worker: Some(worker) })
+            .spawn(move || record_loop(store, target_id, &receiver, &flag))?;
+        Ok(Self { sender, worker: Some(worker), failing })
+    }
+
+    /// Whether the latest samples couldn't be written (the database is busy for long, the disk is full); they
+    /// are kept and tried again.
+    pub fn is_failing(&self) -> bool {
+        self.failing.load(Ordering::Relaxed)
     }
 
     /// A sender for the tracer's workers.
@@ -483,8 +537,10 @@ impl Drop for Recorder {
     }
 }
 
-/// Writer body: collects samples and writes them every [`FLUSH_INTERVAL`], until [`Record::Stop`].
-fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Record>) {
+/// Writer body: collects samples and writes them every [`FLUSH_INTERVAL`], until [`Record::Stop`]. Samples that
+/// can't be written (another connection holds the database too long, the disk is full) are kept for the next
+/// time, up to [`MAX_UNWRITTEN`].
+fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Record>, failing: &AtomicBool) {
     let mut batch = Vec::new();
     let mut connected = true;
     while connected {
@@ -501,10 +557,18 @@ fn record_loop(mut store: Store, target_id: i64, receiver: &Receiver<Record>) {
             }
         }
         if !batch.is_empty() {
-            if let Err(error) = store.insert(target_id, &batch) {
-                log::error!("cannot save {} samples: {error}", batch.len());
+            match store.insert(target_id, &batch) {
+                Ok(()) => {
+                    batch.clear();
+                    failing.store(false, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    failing.store(true, Ordering::Relaxed);
+                    log::error!("cannot save {} samples yet: {error}", batch.len());
+                    let extra = batch.len().saturating_sub(MAX_UNWRITTEN);
+                    batch.drain(..extra);
+                }
             }
-            batch.clear();
         }
     }
 }

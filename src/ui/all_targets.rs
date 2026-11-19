@@ -29,8 +29,8 @@ use crate::ui::timeline::Period;
 
 /// Height of a table row.
 const ROW_HEIGHT: f32 = 24.0;
-/// Width of the Status column (checkbox and state).
-const STATUS_WIDTH: f32 = 128.0;
+/// Width of the Status column (checkbox and state, with the port of a TCP trace).
+const STATUS_WIDTH: f32 = 176.0;
 /// Widest the Target column gets.
 const TARGET_WIDTH: f32 = 208.0;
 /// Widest the IP column gets (room for most IPv6 addresses).
@@ -280,22 +280,24 @@ impl AllTargets {
         // Default widths: in a narrow window Target and IP give up room (clipped), so the numbers and the bars stay
         // in view.
         let shown = self.columns.shown().to_vec();
-        let numbers: f32 = (3..RESIZABLE_COLUMNS)
-            .filter(|position| self.columns.is_shown(*position))
-            .map(|_| NUMBER_WIDTH)
-            .sum();
+        let language = ui.language();
+        let number = |position: usize| {
+            let title = HEADERS.get(position).map_or("", |(title, ..)| language.translate(title));
+            hop_table::number_width(ui, title, NUMBER_WIDTH)
+        };
+        let numbers: f32 = (3..RESIZABLE_COLUMNS).filter(|position| self.columns.is_shown(*position)).map(number).sum();
         let ip = if self.columns.is_shown(2) { IP_WIDTH } else { 0.0 };
         let fixed = STATUS_WIDTH + numbers + LATENCY_MIN_WIDTH;
         let squeeze = ((row_width - fixed) / (TARGET_WIDTH + ip)).clamp(0.3, 1.0);
         let mut defaults = vec![STATUS_WIDTH, TARGET_WIDTH * squeeze, IP_WIDTH * squeeze];
-        defaults.extend([NUMBER_WIDTH; RESIZABLE_COLUMNS - 3]);
+        defaults.extend((3..RESIZABLE_COLUMNS).map(number));
         let mut request = None;
         let mut toggle = None;
         let mut header_widths = Vec::new();
         let language = ui.language();
         let builder = TableBuilder::new(ui)
             .striped(true)
-            .sense(Sense::click())
+            .sense(Sense::CLICK)
             .cell_layout(Layout::left_to_right(Align::Center));
         self.columns
             .columns(builder, defaults, row_width, LATENCY_MIN_WIDTH)

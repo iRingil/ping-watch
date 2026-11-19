@@ -15,6 +15,10 @@ pub const MAX_TTL: u8 = 40;
 /// interval; the farther ones take turns, one per interval, so a silent target isn't sent every TTL each time.
 pub const NEAR_EXTRA: u8 = 3;
 
+/// Lost probes in a row at the target's TTL after which the TTLs just past it are probed again: the route may have
+/// got longer behind a router that doesn't answer, and then nothing at the old length would ever tell.
+const SILENT_PROBES: usize = 3;
+
 /// How far back each hop keeps individual probes: the longest focus period that isn't "all".
 pub const RECENT_WINDOW: Duration = Duration::from_secs(60 * 60);
 
@@ -55,8 +59,8 @@ pub struct Hop {
     pub address: Option<IpAddr>,
     /// Statistics over the snapshot's focus period.
     pub stats: HopStats,
-    /// Send time of the hop's first probe still counted, Unix ms: since the trace started, or since the hop was
-    /// forgotten as lying past the target; `None` before its first probe.
+    /// Send time of the first probe counted in `stats`, Unix ms: the hop's first since the trace started (or since
+    /// it was forgotten as lying past the target), or its first within the focus period; `None` if there is none.
     pub since_ms: Option<i64>,
 }
 
@@ -185,18 +189,36 @@ impl RouteState {
         self.end() == ttl
     }
 
+    /// Whether the target's TTL is known and its last [`SILENT_PROBES`] probes were all lost.
+    fn target_silent(&self) -> bool {
+        let Some(hop) = self.target_ttl.and_then(|ttl| self.hops.get(usize::from(ttl).checked_sub(1)?)) else {
+            return false;
+        };
+        hop.recent.len() >= SILENT_PROBES && hop.recent.iter().rev().take(SILENT_PROBES).all(|(_, rtt)| rtt.is_none())
+    }
+
+    /// Whether a worker for `ttl` is needed at all: every TTL until the target answers, then those up to
+    /// [`NEAR_EXTRA`] past it (probed when the target goes silent, see [`Self::take_turn`]).
+    pub fn wanted(&self, ttl: u8) -> bool {
+        match self.target_ttl {
+            None => ttl <= self.max_ttl(),
+            Some(target_ttl) => ttl <= target_ttl.saturating_add(NEAR_EXTRA).min(self.max_ttl()),
+        }
+    }
+
     /// Whether every TTL before `ttl` has been probed: only then is it known whether `ttl` lies on the route.
     fn heard_before(&self, ttl: u8) -> bool {
         self.hops.iter().take(usize::from(ttl).saturating_sub(1)).all(|hop| hop.total.sent() > 0)
     }
 
     /// Whether the worker of `ttl` probes now, at `at_ms` (Unix ms), with `interval_ms` between its probes. TTLs
-    /// beyond the target are not probed. While the target doesn't answer, every TTL is probed once (the first
+    /// beyond the target are not probed, unless it has gone silent: then those up to [`NEAR_EXTRA`] past it are,
+    /// to find a route that got longer. While the target doesn't answer, every TTL is probed once (the first
     /// round), then those up to [`NEAR_EXTRA`] past the farthest answer every interval and the farther ones in
     /// turns, one per interval: a silent hop may hide routers and the target behind it, and a turn finds them.
     pub fn take_turn(&mut self, ttl: u8, at_ms: i64, interval_ms: i64) -> bool {
         if let Some(target_ttl) = self.target_ttl {
-            return ttl <= target_ttl;
+            return ttl <= target_ttl || (ttl <= target_ttl.saturating_add(NEAR_EXTRA) && self.target_silent());
         }
         let Some(hop) = usize::from(ttl).checked_sub(1).and_then(|index| self.hops.get(index)) else {
             return false;
@@ -220,10 +242,19 @@ impl RouteState {
     /// in the history: those on the route as shown, once every TTL before them has been probed. The silent TTLs
     /// past the end are only noise; so is a target's answer at a far TTL in the first round, before the nearer
     /// TTLs (one of which the target will answer too) are heard from. TTLs outside the route and beyond the target
-    /// are ignored.
+    /// are ignored — but an answer past a target gone silent means the route got longer, and reopens it.
     pub fn record(&mut self, ttl: u8, at_ms: i64, outcome: ProbeOutcome) -> Vec<Sample> {
-        if self.target_ttl.is_some_and(|target_ttl| ttl > target_ttl) {
-            return Vec::new();
+        if let Some(target_ttl) = self.target_ttl
+            && ttl > target_ttl
+        {
+            if !(self.target_silent() && matches!(outcome, ProbeOutcome::Reply { .. })) {
+                return Vec::new();
+            }
+            // Someone answers past the silent hop where the target used to be: it is a router now.
+            self.target_ttl = None;
+            if let Some(old) = usize::from(target_ttl).checked_sub(1).and_then(|index| self.hops.get_mut(index)) {
+                old.address = None;
+            }
         }
         let Some(hop) = usize::from(ttl).checked_sub(1).and_then(|index| self.hops.get_mut(index)) else {
             return Vec::new();
@@ -293,16 +324,16 @@ impl RouteState {
             .take(len)
             .zip(1..)
             .map(|(hop, ttl)| {
-                let stats = match since_ms {
-                    None => hop.total.clone(),
-                    Some(since) => HopStats::from_probes(
-                        hop.recent
-                            .iter()
-                            .filter(|(sent_ms, _)| (since..=until_ms).contains(sent_ms))
-                            .map(|(_, rtt)| *rtt),
+                let focused =
+                    |since: i64| hop.recent.iter().filter(move |(sent_ms, _)| (since..=until_ms).contains(sent_ms));
+                let (stats, first_ms) = match since_ms {
+                    None => (hop.total.clone(), hop.since_ms),
+                    Some(since) => (
+                        HopStats::from_probes(focused(since).map(|(_, rtt)| *rtt)),
+                        focused(since).next().map(|(sent_ms, _)| *sent_ms),
                     ),
                 };
-                Hop { ttl, address: hop.address, stats, since_ms: hop.since_ms }
+                Hop { ttl, address: hop.address, stats, since_ms: first_ms }
             })
             .collect();
         let from_ms = match (since_ms, self.started_ms) {
@@ -481,6 +512,26 @@ mod tests {
         route.record(5, 0, reply(ROUTER));
         assert_eq!(all(&route).hops().len(), 6);
         assert!(route.take_turn(30, 0, 1_000), "not probed since it was forgotten");
+    }
+
+    #[test]
+    fn a_longer_route_behind_a_silent_hop_is_found() {
+        let mut route = RouteState::new(TARGET, 8);
+        route.record(1, 0, reply(ROUTER));
+        route.record(2, 0, reply(TARGET));
+        assert!(!route.take_turn(3, 1, 1000), "nothing past a target that answers");
+        // The route gets a hop longer, and the router now at TTL 2 doesn't answer.
+        for at_ms in 1..=3 {
+            route.record(2, at_ms, ProbeOutcome::Lost);
+        }
+        assert!(route.take_turn(3, 4, 1000));
+        assert!(route.wanted(5) && !route.wanted(6));
+        assert!(route.record(3, 4, ProbeOutcome::Lost).is_empty(), "silence there says nothing");
+        route.record(3, 5, reply(TARGET));
+        let hops = all(&route);
+        assert_eq!(hops.hops().len(), 3);
+        assert_eq!(hops.hops().get(1).and_then(|hop| hop.address), None);
+        assert_eq!(hops.hops().last().and_then(|hop| hop.address), Some(TARGET));
     }
 
     #[test]

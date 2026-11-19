@@ -198,6 +198,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Later tabs", "Nächste Tabs"),
     ("License", "Lizenz"),
     ("Light", "Hell"),
+    ("Link-local addresses (fe80::…) can't be traced", "Link-Local-Adressen (fe80::…) können nicht gemessen werden"),
     ("Loading history…", "Verlauf wird geladen…"),
     ("Look up by reverse DNS", "Per Reverse-DNS ermitteln"),
     ("Loss", "Verlust"),
@@ -210,7 +211,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Name of the address by reverse DNS", "Name der Adresse per Reverse-DNS"),
     ("New rule", "Neue Regel"),
     ("New target", "Neues Ziel"),
-    ("New target (Ctrl+N)", "Neues Ziel (Strg+N)"),
+    ("New target (Ctrl+N)", "Neues Ziel (Ctrl+N)"),
     ("New targets: chart period", "Neue Ziele: Diagrammzeitraum"),
     ("New targets: focus", "Neue Ziele: Fokus"),
     ("New targets: interval", "Neue Ziele: Intervall"),
@@ -221,6 +222,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("No answer for {value} s", "Keine Antwort seit {value} s"),
     ("No releases are published yet.", "Noch keine Versionen veröffentlicht."),
     ("No response", "Keine Antwort"),
+    (
+        "No route to {address}: no network connection for this address",
+        "Keine Route zu {address}: keine Netzwerkverbindung für diese Adresse",
+    ),
     ("No route to {address}: {error}", "Keine Route zu {address}: {error}"),
     (
         "No rules. Add one to be told when a target slows down or drops packets.",
@@ -344,6 +349,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ),
     ("The comment wasn't saved: {error}", "Der Kommentar wurde nicht gespeichert: {error}"),
     (
+        "The history isn't being saved: the database is busy or the disk is full",
+        "Der Verlauf wird nicht gespeichert: Die Datenbank ist belegt oder der Datenträger ist voll",
+    ),
+    (
         "The history period applies at once: older probes, comments and alert journal entries are deleted.",
         "Die Aufbewahrungsdauer gilt sofort: Ältere Messwerte, Kommentare und Einträge im Alarmjournal werden gelöscht.",
     ),
@@ -460,4 +469,6 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("{n} second|{n} seconds", "{n} Sekunde|{n} Sekunden"),
     ("{n} target|{n} targets", "{n} Ziel|{n} Ziele"),
     ("{seconds} seconds", "{seconds} Sekunden"),
+    ("{subject}: {text}", "{subject}: {text}"),
+    ("{target} is already traced in another tab", "{target} wird bereits in einem anderen Tab gemessen"),
 ];

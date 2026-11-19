@@ -26,7 +26,7 @@ pub struct Palette {
     pub well: Color32,
     /// Hairlines: pane borders, separators, the tab outlines.
     pub rule: Color32,
-    /// Borders of input fields, check boxes and lists: at least 3:1 against what they stand on (WCAG 1.4.11),
+    /// Borders of input fields, check boxes and lists: seen against what they stand on (APCA Lc 15 at least),
     /// unlike the quiet hairlines.
     pub field: Color32,
     /// Primary text and the latency line.
@@ -101,7 +101,7 @@ pub const DARK: Palette = Palette {
     bad_zone: Color32::from_rgb(0x55, 0x28, 0x36),
     good: Color32::from_rgb(0x52, 0xb0, 0x94),
     warn: Color32::from_rgb(0xe2, 0xa1, 0x3e),
-    bad: Color32::from_rgb(0xe2, 0x6a, 0x7d),
+    bad: Color32::from_rgb(0xe5, 0x7c, 0x8d),
     lost: Color32::from_rgb(0x69, 0x2b, 0x3c),
     range: Color32::from_rgb(0xa9, 0xae, 0xb8),
     jitter: Color32::from_rgb(0xff, 0x8a, 0x65),
@@ -297,51 +297,74 @@ pub fn pane_frame(ui: &Ui) -> egui::Frame {
 mod tests {
     use super::*;
 
-    /// Relative luminance of `color` (WCAG 2.2).
+    /// Luminance of a color as APCA takes it: a plain 2.4 power per channel, with very dark colors lifted a little
+    /// (the eye tells little apart down there).
     fn luminance(color: Color32) -> f64 {
-        let channel = |value: u8| {
-            let value = f64::from(value) / 255.0;
-            if value <= 0.040_45 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
-        };
-        0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+        let channel = |value: u8| (f64::from(value) / 255.0).powf(2.4);
+        let y = 0.212_672_9 * channel(color.r()) + 0.715_152_2 * channel(color.g()) + 0.072_175 * channel(color.b());
+        if y < 0.022 { y + (0.022 - y).powf(1.414) } else { y }
     }
 
-    /// Contrast ratio of two colors.
-    fn contrast(one: Color32, other: Color32) -> f64 {
-        let (one, other) = (luminance(one), luminance(other));
-        (one.max(other) + 0.05) / (one.min(other) + 0.05)
+    /// Perceptual contrast Lc of `text` on `ground` by APCA (the method of the WCAG 3 draft, version 0.0.98G), as a
+    /// magnitude: about 0 for no contrast, 106 for black on white. Unlike a luminance ratio it follows how the
+    /// colors are seen: which of the two is the light one matters, and so does how dark both are.
+    fn contrast(text: Color32, ground: Color32) -> f64 {
+        let (text, ground) = (luminance(text), luminance(ground));
+        if (ground - text).abs() < 0.000_5 {
+            return 0.0;
+        }
+        let lightness = if ground > text {
+            // Dark text on a light ground.
+            (ground.powf(0.56) - text.powf(0.57)) * 1.14
+        } else {
+            // Light text on a dark ground.
+            (ground.powf(0.65) - text.powf(0.62)) * 1.14
+        };
+        if lightness.abs() < 0.1 { 0.0 } else { (lightness.abs() - 0.027) * 100.0 }
     }
+
+    #[test]
+    fn the_contrast_measure_matches_the_reference_values() {
+        // Values of the APCA reference implementation.
+        let near = |lc: f64, expected: f64| (lc - expected).abs() < 0.2;
+        assert!(near(contrast(Color32::BLACK, Color32::WHITE), 106.0));
+        assert!(near(contrast(Color32::WHITE, Color32::BLACK), 107.9));
+        assert!(near(contrast(Color32::from_rgb(0x88, 0x88, 0x88), Color32::WHITE), 63.1));
+        assert!(near(contrast(Color32::WHITE, Color32::from_rgb(0x88, 0x88, 0x88)), 68.5));
+    }
+
+    /// APCA level of the text that is read at length: the tables, the labels of the settings.
+    const BODY: f64 = 75.0;
+    /// APCA level of text over the colored latency zones.
+    const CONTENT: f64 = 60.0;
+    /// APCA level of short texts told apart by color too: muted labels, links, the state words and loss numbers.
+    const SPOT: f64 = 45.0;
+    /// APCA level of the marks drawn on the charts.
+    const MARK: f64 = 30.0;
+    /// APCA level of outlines: seen, not read.
+    const OUTLINE: f64 = 15.0;
 
     #[test]
     fn texts_and_marks_have_enough_contrast() {
         for (name, palette) in [("dark", &DARK), ("light", &LIGHT)] {
             let p = palette;
-            // Text: 4.5:1 (WCAG 1.4.3).
-            let texts = [
-                ("ink", p.ink, vec![p.pane, p.chassis, p.bar, p.well, p.good_zone, p.warn_zone, p.bad_zone]),
-                ("ink_muted", p.ink_muted, vec![p.pane, p.chassis, p.bar, p.pane_header, p.tab_idle]),
-                ("signal", p.signal, vec![p.pane, p.chassis]),
-                ("good", p.good, vec![p.pane, p.bar]),
-                ("warn", p.warn, vec![p.pane, p.bar]),
-                ("bad", p.bad, vec![p.pane, p.bar]),
-                ("comment", p.comment, vec![p.well, p.good_zone, p.warn_zone, p.bad_zone]),
+            let pairs = [
+                ("ink", p.ink, BODY, vec![p.pane, p.chassis, p.bar, p.well]),
+                ("ink", p.ink, CONTENT, vec![p.good_zone, p.warn_zone, p.bad_zone]),
+                ("comment", p.comment, CONTENT, vec![p.well, p.good_zone, p.warn_zone, p.bad_zone]),
+                ("ink_muted", p.ink_muted, SPOT, vec![p.pane, p.chassis, p.bar, p.pane_header, p.tab_idle]),
+                ("signal", p.signal, SPOT, vec![p.pane, p.chassis]),
+                ("good", p.good, SPOT, vec![p.pane, p.bar]),
+                ("warn", p.warn, SPOT, vec![p.pane, p.bar]),
+                ("bad", p.bad, SPOT, vec![p.pane, p.bar]),
+                ("loss", p.loss, MARK, vec![p.good_zone, p.bad_zone, p.well]),
+                ("jitter", p.jitter, MARK, vec![p.well]),
+                ("field", p.field, OUTLINE, vec![p.pane, p.chassis, p.well]),
             ];
-            for (role, color, grounds) in texts {
+            for (role, color, level, grounds) in pairs {
                 for ground in grounds {
-                    let ratio = contrast(color, ground);
-                    assert!(ratio >= 4.5, "{name} {role} on {ground:?}: {ratio:.2}");
-                }
-            }
-            // Parts of the interface: 3:1 (WCAG 1.4.11).
-            let parts = [
-                ("field", p.field, vec![p.pane, p.chassis, p.well]),
-                ("loss", p.loss, vec![p.good_zone, p.bad_zone, p.well]),
-                ("jitter", p.jitter, vec![p.well]),
-            ];
-            for (role, color, grounds) in parts {
-                for ground in grounds {
-                    let ratio = contrast(color, ground);
-                    assert!(ratio >= 3.0, "{name} {role} on {ground:?}: {ratio:.2}");
+                    let lc = contrast(color, ground);
+                    assert!(lc >= level, "{name} {role} on {ground:?}: Lc {lc:.1}, needs {level}");
                 }
             }
         }

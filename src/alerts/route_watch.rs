@@ -1,5 +1,6 @@
 //! Route change detection: the answering hops of a target are compared from check to check, and a different route
-//! counts only once it has held for [`STABLE_CHECKS`] checks in a row. Some providers balance traffic over several
+//! counts only once it has held for [`STABLE_CHECKS`] checks in a row, and for a few probes of every hop (a hop
+//! probed once a minute shows a stray answer for a minute). Some providers balance traffic over several
 //! routers, so a hop answers from two addresses in turn, each for longer than that; a route seen before (one of the
 //! last [`KNOWN_ROUTES`]) is therefore no change either. A hop that didn't answer on one of the routes compared is
 //! not compared at all.
@@ -10,6 +11,14 @@ use crate::i18n::{Language, tr, trf};
 
 /// Checks (one a second) a new route must hold before it counts.
 pub const STABLE_CHECKS: u32 = 10;
+/// Probes of every hop a new route must hold for, however far apart the probes are.
+const STABLE_PROBES: u32 = 3;
+
+/// Checks (one a second) a new route must hold when its hops are probed every `interval`.
+pub fn stable_checks(interval: std::time::Duration) -> u32 {
+    let probes = interval.saturating_mul(STABLE_PROBES).as_secs().saturating_add(1);
+    STABLE_CHECKS.max(u32::try_from(probes).unwrap_or(u32::MAX))
+}
 /// Routes remembered per target; a return to one of them is load balancing, not a change.
 const KNOWN_ROUTES: usize = 8;
 
@@ -119,8 +128,8 @@ pub struct RouteWatch {
 
 impl RouteWatch {
     /// Takes the route seen at this check; returns the change once a different route, not seen lately, has held
-    /// long enough. An empty path (nothing answers) is ignored: that is the "no answer" condition's business.
-    pub fn check(&mut self, path: Path) -> Option<RouteChange> {
+    /// for `hold` checks. An empty path (nothing answers) is ignored: that is the "no answer" condition's business.
+    pub fn check(&mut self, path: Path, hold: u32) -> Option<RouteChange> {
         if path.is_empty() {
             return None;
         }
@@ -143,7 +152,7 @@ impl RouteWatch {
             Some((candidate, held)) if !differs(candidate, &path) => held.saturating_add(1),
             _ => 1,
         };
-        if held < STABLE_CHECKS {
+        if held < hold {
             self.candidate = Some((path, held));
             return None;
         }
@@ -163,6 +172,7 @@ impl RouteWatch {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     use super::*;
 
@@ -178,35 +188,47 @@ mod tests {
 
     /// Feeds `route` to `watch` for STABLE_CHECKS checks; returns the change reported, if any.
     fn hold(watch: &mut RouteWatch, route: &[u8]) -> Option<RouteChange> {
-        (0..STABLE_CHECKS).filter_map(|_| watch.check(path(route))).last()
+        (0..STABLE_CHECKS).filter_map(|_| watch.check(path(route), STABLE_CHECKS)).last()
+    }
+
+    #[test]
+    fn a_route_holds_for_a_few_probes_of_slow_traces() {
+        assert_eq!(stable_checks(Duration::from_millis(2_500)), STABLE_CHECKS);
+        assert_eq!(stable_checks(Duration::from_secs(60)), 181);
+        // One stray answer of a hop probed every 30 s shows for 30 checks: not a change.
+        let mut watch = RouteWatch::default();
+        let hold = stable_checks(Duration::from_secs(30));
+        watch.check(path(&[1, 2, 3]), hold);
+        assert!((0..30).all(|_| watch.check(path(&[1, 5, 3]), hold).is_none()));
+        assert!((0..30).all(|_| watch.check(path(&[1, 2, 3]), hold).is_none()));
     }
 
     #[test]
     fn a_new_route_counts_once_it_holds() {
         let mut watch = RouteWatch::default();
-        assert_eq!(watch.check(path(&[1, 2, 3])), None, "the first route is just remembered");
+        assert_eq!(watch.check(path(&[1, 2, 3]), STABLE_CHECKS), None, "the first route is just remembered");
         for _ in 1..STABLE_CHECKS {
-            assert_eq!(watch.check(path(&[1, 5, 3])), None);
+            assert_eq!(watch.check(path(&[1, 5, 3]), STABLE_CHECKS), None);
         }
-        let change = watch.check(path(&[1, 5, 3])).expect("held long enough");
+        let change = watch.check(path(&[1, 5, 3]), STABLE_CHECKS).expect("held long enough");
         assert_eq!(change.note().describe(Language::English), "hop 2 10.0.0.2 \u{2192} 10.0.0.5");
-        assert_eq!(watch.check(path(&[1, 5, 3])), None, "reported once");
+        assert_eq!(watch.check(path(&[1, 5, 3]), STABLE_CHECKS), None, "reported once");
     }
 
     #[test]
     fn alternating_routers_are_not_a_change() {
         let mut watch = RouteWatch::default();
-        watch.check(path(&[1, 2, 3]));
+        watch.check(path(&[1, 2, 3]), STABLE_CHECKS);
         for round in 0..(STABLE_CHECKS * 3) {
             let hop2 = if round % 2 == 0 { 5 } else { 2 };
-            assert_eq!(watch.check(path(&[1, hop2, 3])), None);
+            assert_eq!(watch.check(path(&[1, hop2, 3]), STABLE_CHECKS), None);
         }
     }
 
     #[test]
     fn a_return_to_a_known_route_is_load_balancing() {
         let mut watch = RouteWatch::default();
-        watch.check(path(&[1, 2, 3]));
+        watch.check(path(&[1, 2, 3]), STABLE_CHECKS);
         assert!(hold(&mut watch, &[1, 5, 3]).is_some(), "a new route");
         assert_eq!(hold(&mut watch, &[1, 2, 3]), None, "back to the first one");
         assert_eq!(hold(&mut watch, &[1, 5, 3]), None, "and again");
@@ -216,7 +238,7 @@ mod tests {
     #[test]
     fn a_hop_that_starts_or_stops_answering_is_not_compared() {
         let mut watch = RouteWatch::default();
-        watch.check(vec![(1, ip(1)), (3, ip(3))]);
+        watch.check(vec![(1, ip(1)), (3, ip(3))], STABLE_CHECKS);
         assert_eq!(hold(&mut watch, &[1, 2, 3]), None, "hop 2 answers now");
         assert_eq!(hold(&mut watch, &[1, 9, 3]).map(|change| change.note().hop), Some(Some((2, ip(2), ip(9)))));
     }
@@ -224,8 +246,8 @@ mod tests {
     #[test]
     fn silence_and_shorter_routes() {
         let mut watch = RouteWatch::default();
-        watch.check(path(&[1, 2, 3, 4]));
-        assert_eq!(watch.check(Vec::new()), None, "nothing answering is no route");
+        watch.check(path(&[1, 2, 3, 4]), STABLE_CHECKS);
+        assert_eq!(watch.check(Vec::new(), STABLE_CHECKS), None, "nothing answering is no route");
         let change = hold(&mut watch, &[1, 2, 4]);
         assert_eq!(
             change.map(|change| change.note().describe(Language::English)),

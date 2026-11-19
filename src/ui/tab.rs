@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{
     self, Align, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Popup, Rect, RichText, Stroke, Ui, pos2,
@@ -108,7 +108,6 @@ struct Session {
     /// recorder can flush everything the tracer sent.
     tracer: Tracer,
     /// History writer, `None` if the database is unavailable.
-    #[expect(dead_code, reason = "held only to keep recording until the session is dropped")]
     recorder: Option<Recorder>,
 }
 
@@ -194,6 +193,8 @@ pub struct Tab {
     chart_period: Period,
     /// Right end of the charts, Unix ms; `None` follows the current time.
     chart_end_ms: Option<i64>,
+    /// Since when this tab knows its target's address (traces it, or waits for the rights to); `None` before.
+    traced_since: Option<Instant>,
     /// Probe interval.
     interval: Duration,
     /// Period the hop table summarizes.
@@ -239,6 +240,7 @@ impl Tab {
             name: None,
             reverse: None,
             language: Language::English,
+            traced_since: None,
         }
     }
 
@@ -368,6 +370,11 @@ impl Tab {
         }
     }
 
+    /// Since when this tab knows the address it traces: of two tabs with one address, the later one is the new one.
+    pub fn traced_since(&self) -> Option<Instant> {
+        self.traced_since
+    }
+
     /// Whether the tab waits for administrator rights to trace by TCP.
     pub fn needs_rights(&self) -> bool {
         matches!(self.state, State::NeedsRights(_))
@@ -381,6 +388,7 @@ impl Tab {
     /// Starts resolving `host` in the background (stopping any running trace); tracing begins once it resolves.
     fn begin(&mut self, host: String) {
         self.state = State::Editing(None);
+        self.traced_since = None;
         let changed = self.host != host.trim();
         self.host = host.trim().to_owned();
         self.selected_ttl = None;
@@ -434,6 +442,9 @@ impl Tab {
     pub fn poll(&mut self, context: Context<'_>) {
         self.language = context.settings.language;
         self.refresh_names(context);
+        // Here and not only while the tab is shown: an interval set for all targets on the overview page is
+        // stored for the tabs nobody opens, too.
+        self.save_settings(context.targets);
         let State::Resolving(receiver) = &self.state else {
             return;
         };
@@ -444,6 +455,9 @@ impl Tab {
             }
             Ok(Err(ResolveError::NoAddress(host))) => {
                 return self.fail(trf!(self.language, "{host} has no address", host = host));
+            }
+            Ok(Err(ResolveError::LinkLocal(_))) => {
+                return self.fail(tr!(self.language, "Link-local addresses (fe80::…) can't be traced").to_owned());
             }
             Ok(Err(ResolveError::Invalid(_))) => {
                 return self.fail(tr!(self.language, "This is not a host name or an IP address").to_owned());
@@ -483,6 +497,7 @@ impl Tab {
         }
         let recorder = recorder.map_err(|warning| self.warning = Some(warning)).ok();
         let probe = self.probe;
+        self.traced_since = Some(Instant::now());
         if matches!(probe, Probe::Tcp(_)) && !context.rights.elevated() {
             self.state = State::NeedsRights(target);
             return;
@@ -657,7 +672,14 @@ impl Tab {
                 .last_error()
                 .map(|error| error.show(self.language))
                 .or_else(|| self.answers_blocked().then(|| self.language.translate(firewall::BLOCKED).to_owned()))
-                .or_else(|| self.warning.clone()),
+                .or_else(|| self.warning.clone())
+                .or_else(|| {
+                    let failing = session.recorder.as_ref().is_some_and(Recorder::is_failing);
+                    failing.then(|| {
+                        tr!(self.language, "The history isn't being saved: the database is busy or the disk is full")
+                            .to_owned()
+                    })
+                }),
             State::Editing(None) | State::Resolving(_) | State::NeedsRights(_) => self.warning.clone(),
         }
     }
@@ -681,14 +703,16 @@ impl Tab {
         }
     }
 
-    /// Whether the alerts watch this tab: it traces and isn't paused.
+    /// Whether the alerts watch this tab: it traces, paused or not (a pause keeps its alerts as they are).
     pub fn is_watched(&self) -> bool {
-        matches!(&self.state, State::Running(session) if !session.tracer.is_paused())
+        matches!(&self.state, State::Running(_))
     }
 
-    /// The target's own probes (its last hop) over the last `window`, for the alerts; `None` unless watched. The
-    /// window counts as covered from the last hop's own first probe: a hop that has just become the last one (the
-    /// route got longer) has a few probes only, and one loss must not read as "no answer for the whole window".
+    /// The target's own probes (its last hop) over the last `window`, for the alerts; `None` unless it traces and
+    /// isn't paused. The window counts as covered from the last hop's first probe inside it (and the interval
+    /// before that probe): after a pause, the computer's sleep, or when a hop has just become the last one (the
+    /// route got longer), the window holds a few probes only, and one loss must not read as "no answer for the
+    /// whole window".
     pub fn window_stats(&self, window: Duration) -> Option<WindowStats> {
         let State::Running(session) = &self.state else {
             return None;
@@ -701,7 +725,8 @@ impl Tab {
         let window_ms = i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
         let route = session.tracer.snapshot(Some((now_ms.saturating_sub(window_ms), now_ms)));
         let hop = route.hops().last()?;
-        let covered_ms = now_ms.saturating_sub(route.focus_start_ms()?.max(hop.since_ms?));
+        let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
+        let covered_ms = now_ms.saturating_sub(hop.since_ms?).saturating_add(interval_ms).min(window_ms);
         Some(WindowStats {
             sent: hop.stats.sent(),
             received: hop.stats.received(),
@@ -1059,7 +1084,7 @@ pub fn split(area: Rect, table_share: f32) -> (Rect, Rect, Rect) {
 /// The bar between the panes: dragging it moves the border; it lights up under the pointer.
 pub fn splitter(ui: &mut Ui, rect: Rect, area: Rect, table_share: &mut f32) {
     let response = ui
-        .interact(rect, ui.scope_id().with("pane-splitter"), egui::Sense::drag())
+        .interact(rect, ui.scope_id().with("pane-splitter"), egui::Sense::DRAG)
         .on_hover_cursor(egui::CursorIcon::ResizeVertical);
     let usable = (area.height() - SPLITTER_HEIGHT).max(1.0);
     if response.dragged() {

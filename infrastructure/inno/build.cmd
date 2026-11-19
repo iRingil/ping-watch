@@ -16,7 +16,7 @@ set "BUILT_EXE=target\release\ping-watch.exe"
 
 :: The license notices of the crates in the build (cargo install cargo-about --locked --features cli).
 if not exist "build" mkdir "build"
-cargo about generate about.hbs -o "build\THIRD-PARTY.html"
+cargo about generate --locked about.hbs -o "build\THIRD-PARTY.html"
 if %errorlevel% neq 0 (
     echo ERROR: cargo about failed with error code %errorlevel% - is cargo-about installed?
     exit /b %errorlevel%

@@ -4,7 +4,7 @@
 //! same from the keyboard. Widths and hidden columns are kept between runs. The target tabs share one set (one hop
 //! table look for all of them), the overview page has its own.
 
-use eframe::egui::{Button, Grid, Id, Response, Stroke, Ui, UiBuilder};
+use eframe::egui::{self, Button, Grid, Id, Response, Stroke, Ui, UiBuilder};
 use egui_extras::{Column, TableBuilder, TableRow};
 
 use crate::i18n::{Lang, tr};
@@ -248,9 +248,32 @@ pub fn scope<R>(ui: &mut Ui, id: &str, add_table: impl FnOnce(&mut Ui) -> R) -> 
         // right click on a header title opens the column menu like one beside it.
         ui.style_mut().interaction.selectable_labels = false;
         ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
+        pass_focus_on(ui);
         add_table(ui)
     })
     .inner
+}
+
+/// Widest a column border's own area gets (the table widget makes it a few points wide); any real control is wider.
+const BORDER_WIDTH: f32 = 12.0;
+
+/// The borders between a table's columns take the keyboard focus like buttons (the table widget makes them so),
+/// but show none and do nothing with keys: Tab would stop on each of them, unseen. When one of the table in `ui`
+/// had the focus last frame — a focused sliver of the table's height or so, far narrower than any control — the
+/// focus is passed on in the direction Tab was going. Called before the table is added: egui hands the focus on
+/// as the widgets of the frame are made, one border a frame.
+fn pass_focus_on(ui: &Ui) {
+    let table = ui.max_rect();
+    let border_focused = ui
+        .memory(|memory| memory.focused())
+        .and_then(|id| ui.ctx().read_response(id))
+        .is_some_and(|focused| focused.rect.width() <= BORDER_WIDTH && table.intersects(focused.rect));
+    if border_focused {
+        let back = ui.input(|input| input.modifiers.shift);
+        let direction = if back { egui::FocusDirection::Previous } else { egui::FocusDirection::Next };
+        ui.memory_mut(|memory| memory.move_focus(direction));
+        ui.ctx().request_repaint();
+    }
 }
 
 #[cfg(test)]

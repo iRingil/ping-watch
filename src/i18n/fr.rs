@@ -201,6 +201,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Later tabs", "Onglets suivants"),
     ("License", "Licence"),
     ("Light", "Clair"),
+    (
+        "Link-local addresses (fe80::…) can't be traced",
+        "Les adresses de liaison locale (fe80::…) ne peuvent pas être tracées",
+    ),
     ("Loading history…", "Chargement de l’historique…"),
     ("Look up by reverse DNS", "Résoudre par DNS inverse"),
     ("Loss", "Pertes"),
@@ -224,6 +228,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("No answer for {value} s", "Pas de réponse depuis {value} s"),
     ("No releases are published yet.", "Aucune version publiée pour l’instant."),
     ("No response", "Pas de réponse"),
+    (
+        "No route to {address}: no network connection for this address",
+        "Aucune route vers {address}\u{a0}: pas de connexion réseau pour cette adresse",
+    ),
     ("No route to {address}: {error}", "Aucune route vers {address}\u{a0}: {error}"),
     (
         "No rules. Add one to be told when a target slows down or drops packets.",
@@ -347,6 +355,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ),
     ("The comment wasn't saved: {error}", "Le commentaire n’a pas été enregistré\u{a0}: {error}"),
     (
+        "The history isn't being saved: the database is busy or the disk is full",
+        "L’historique n’est pas enregistré\u{a0}: la base de données est occupée ou le disque est plein",
+    ),
+    (
         "The history period applies at once: older probes, comments and alert journal entries are deleted.",
         "La durée de conservation s’applique tout de suite\u{a0}: les mesures, commentaires et entrées du journal des alertes plus anciens sont supprimés.",
     ),
@@ -463,4 +475,6 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("{n} second|{n} seconds", "{n} seconde|{n} secondes"),
     ("{n} target|{n} targets", "{n} cible|{n} cibles"),
     ("{seconds} seconds", "{seconds} secondes"),
+    ("{subject}: {text}", "{subject}\u{a0}: {text}"),
+    ("{target} is already traced in another tab", "{target} est déjà tracé dans un autre onglet"),
 ];

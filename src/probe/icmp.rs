@@ -1,7 +1,7 @@
 //! ICMP echo with a chosen TTL (hop limit) through the Windows ICMP API — `IcmpSendEcho` for IPv4,
 //! `Icmp6SendEcho2` for IPv6; needs no admin rights.
 //!
-//! This is the only module that talks to the OS; everything above it works with [`ProbeOutcome`].
+//! Everything above it works with [`ProbeOutcome`].
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
@@ -25,6 +25,18 @@ const REPLY_BUFFER_WORDS: usize = 128;
 /// `IP_TTL_EXPIRED_TRANSIT` is also IPv6's `IP_HOP_LIMIT_EXCEEDED`.
 const IP_STATUS_RANGE: std::ops::RangeInclusive<u32> = 11000..=11050;
 
+/// Windows' "the network location cannot be reached": no route to the address (no network, or none of its family).
+const ERROR_NETWORK_UNREACHABLE: u32 = 1231;
+/// Windows' "the network location cannot be reached" for one host.
+const ERROR_HOST_UNREACHABLE: u32 = 1232;
+/// What the user is told when nothing leads to the target, whichever probe found out; translated where shown.
+pub const NO_ROUTE: &str = n!("No route to {address}: no network connection for this address");
+
+/// Whether the Windows error `code` says that no route leads to the address.
+pub fn is_no_route(code: u32) -> bool {
+    matches!(code, ERROR_NETWORK_UNREACHABLE | ERROR_HOST_UNREACHABLE)
+}
+
 /// Error of the ICMP API itself (not a lost probe).
 #[derive(Debug, thiserror::Error)]
 pub enum IcmpError {
@@ -42,6 +54,9 @@ pub enum IcmpError {
     /// The target's address family doesn't match the handle's.
     #[error("{0} doesn't match the ICMP handle's address family")]
     Family(IpAddr),
+    /// Nothing leads to the target: the network is down, or this computer has none of the target's family.
+    #[error("no route to {0}")]
+    NoRoute(IpAddr),
 }
 
 impl IcmpError {
@@ -57,6 +72,7 @@ impl IcmpError {
             Self::Family(address) => {
                 Message::new(n!("{address} doesn't match the ICMP handle's address family")).with("address", address)
             }
+            Self::NoRoute(address) => Message::new(NO_ROUTE).with("address", address),
         }
     }
 }
@@ -94,8 +110,8 @@ impl Pinger {
     ///
     /// # Errors
     ///
-    /// [`IcmpError::Send`] if the API fails for a reason other than the network (no answer is
-    /// [`ProbeOutcome::Lost`], not an error); [`IcmpError::Family`] for a target of the other family.
+    /// [`IcmpError::NoRoute`] if nothing leads to the target, [`IcmpError::Send`] if the API fails otherwise (no
+    /// answer is [`ProbeOutcome::Lost`], not an error); [`IcmpError::Family`] for a target of the other family.
     pub fn probe(&self, target: IpAddr, ttl: u8, timeout: Duration) -> Result<ProbeOutcome, IcmpError> {
         if target.is_ipv6() != self.ipv6 {
             return Err(IcmpError::Family(target));
@@ -105,15 +121,13 @@ impl Pinger {
         let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
 
         let started = Instant::now();
-        let replies = match target {
+        let (replies, code) = match target {
             IpAddr::V4(ip) => self.send_v4(ip, &options, &mut buffer, timeout_ms),
             IpAddr::V6(ip) => self.send_v6(ip, &options, &mut buffer, timeout_ms),
         };
         let measured = started.elapsed();
 
         if replies == 0 {
-            // SAFETY: no preconditions; reads the error of the call just made on this thread.
-            let code = unsafe { GetLastError() }.0;
             match code {
                 // Some Windows versions report a router's answer as an error but still fill the buffer.
                 IP_TTL_EXPIRED_TRANSIT => {}
@@ -123,6 +137,7 @@ impl Pinger {
                     }
                     return Ok(ProbeOutcome::Lost);
                 }
+                code if is_no_route(code) => return Err(IcmpError::NoRoute(target)),
                 code => {
                     let message = windows::core::HRESULT::from_win32(code).message().trim().to_owned();
                     return Err(IcmpError::Send { code, message });
@@ -149,13 +164,19 @@ impl Pinger {
         })
     }
 
-    /// Sends an IPv4 echo request; returns the number of replies written to `buffer`.
-    fn send_v4(&self, target: Ipv4Addr, options: &IP_OPTION_INFORMATION, buffer: &mut [u64], timeout_ms: u32) -> u32 {
+    /// Sends an IPv4 echo request; returns the number of replies written to `buffer` and the call's error code.
+    fn send_v4(
+        &self,
+        target: Ipv4Addr,
+        options: &IP_OPTION_INFORMATION,
+        buffer: &mut [u64],
+        timeout_ms: u32,
+    ) -> (u32, u32) {
         // SAFETY: the handle is an open IPv4 handle for the lifetime of `self`; payload, options and buffer are live
         // for the call and their pointers and sizes match; the buffer is 8-byte aligned and larger than one reply
-        // plus payload.
+        // plus payload. `GetLastError` has no preconditions and reads the error of the call just made.
         unsafe {
-            IcmpSendEcho(
+            let replies = IcmpSendEcho(
                 self.handle,
                 u32::from_ne_bytes(target.octets()),
                 PAYLOAD.as_ptr().cast(),
@@ -164,12 +185,20 @@ impl Pinger {
                 buffer.as_mut_ptr().cast(),
                 size_of_val(buffer) as u32,
                 timeout_ms,
-            )
+            );
+            (replies, GetLastError().0)
         }
     }
 
-    /// Sends an IPv6 echo request synchronously (no event, no APC); returns the number of replies in `buffer`.
-    fn send_v6(&self, target: Ipv6Addr, options: &IP_OPTION_INFORMATION, buffer: &mut [u64], timeout_ms: u32) -> u32 {
+    /// Sends an IPv6 echo request synchronously (no event, no APC); returns the number of replies in `buffer`
+    /// and the call's error code.
+    fn send_v6(
+        &self,
+        target: Ipv6Addr,
+        options: &IP_OPTION_INFORMATION,
+        buffer: &mut [u64],
+        timeout_ms: u32,
+    ) -> (u32, u32) {
         let source = SOCKADDR_IN6 { sin6_family: AF_INET6, ..Default::default() };
         let destination = SOCKADDR_IN6 {
             sin6_family: AF_INET6,
@@ -178,9 +207,10 @@ impl Pinger {
         };
         // SAFETY: the handle is an open IPv6 handle for the lifetime of `self`; with no event and no APC routine
         // the call is synchronous, so all pointers (locals and `buffer`) only need to live for the call; sizes
-        // match; the buffer is 8-byte aligned and larger than one reply plus payload.
+        // match; the buffer is 8-byte aligned and larger than one reply plus payload. `GetLastError` has no
+        // preconditions and reads the error of the call just made.
         unsafe {
-            Icmp6SendEcho2(
+            let replies = Icmp6SendEcho2(
                 self.handle,
                 None,
                 None,
@@ -193,7 +223,8 @@ impl Pinger {
                 buffer.as_mut_ptr().cast(),
                 size_of_val(buffer) as u32,
                 timeout_ms,
-            )
+            );
+            (replies, GetLastError().0)
         }
     }
 }

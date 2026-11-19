@@ -7,6 +7,10 @@
 //! An IPv4 raw socket receives whole packets. An IPv6 one receives only what follows the IPv6 header (Windows
 //! doesn't hand that header to raw sockets): the sender comes from `recvfrom`, the protocol from the content — an
 //! ICMPv6 error quoting our SYN, or a TCP segment from the target between the probe's ports.
+//!
+//! The listener sees our own SYN leave, too, and keeps its sequence number: an answer counts only if it echoes that
+//! number (quoted in the ICMP error, or acknowledged by the target), so neither a stranger guessing the ports nor
+//! other traffic of the target (UDP between the same ports looks like TCP to an IPv6 raw socket) passes for one.
 
 use std::collections::HashMap;
 use std::io;
@@ -24,9 +28,11 @@ use windows::Win32::Networking::WinSock::{
     SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET, SOCKET, TCP_INITIAL_RTO_DEFAULT_RTT,
     TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS, WSAIoctl,
 };
+use windows::core::HRESULT;
 
 use crate::i18n::{Message, n};
 use crate::probe::firewall::{self, AnswerWatch};
+use crate::probe::icmp;
 use crate::probe::route::ProbeOutcome;
 use crate::sync::lock;
 
@@ -95,12 +101,22 @@ impl TcpError {
             Self::Listen(error) => {
                 Message::new(n!("Cannot listen for TCP probe answers: {error}")).with("error", error)
             }
+            Self::Route(address, error) if is_no_route_error(error) => {
+                Message::new(icmp::NO_ROUTE).with("address", address)
+            }
             Self::Route(address, error) => Message::new(n!("No route to {address}: {error}"))
                 .with("address", address)
                 .with("error", error.message()),
             Self::Socket(error) => Message::new(n!("Cannot send a TCP probe: {error}")).with("error", error),
         }
     }
+}
+
+/// Whether `error` of a route lookup is Windows' "the network location cannot be reached".
+fn is_no_route_error(error: &windows::core::Error) -> bool {
+    [1231, 1232]
+        .into_iter()
+        .any(|code| icmp::is_no_route(code) && error.code() == HRESULT::from_win32(code))
 }
 
 /// Which probe an answer belongs to: the target's address, its port, and the probe's local port.
@@ -132,11 +148,41 @@ struct Listener {
     waiting: Mutex<Waiting>,
 }
 
+/// How an answer proves it is about our SYN and not made up or another protocol's: by our SYN's sequence number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Echo {
+    /// An ICMP error quotes the SYN, its sequence number included.
+    Quoted(u32),
+    /// The target's SYN-ACK or RST acknowledges the SYN: its sequence number plus one.
+    Acknowledged(u32),
+}
+
+impl Echo {
+    /// Whether this is the echo of a SYN sent with sequence number `sequence`.
+    fn of(self, sequence: u32) -> bool {
+        match self {
+            Self::Quoted(quoted) => quoted == sequence,
+            Self::Acknowledged(acknowledged) => acknowledged == sequence.wrapping_add(1),
+        }
+    }
+}
+
+/// A probe waiting for its answer.
+#[derive(Debug)]
+struct Pending {
+    /// Where the listener sends the answer.
+    sender: Sender<Answer>,
+    /// Sequence number of the probe's SYN, once the listener saw it leave. Until then (the SYN always leaves
+    /// before its answer comes, so only where outgoing packets aren't shown to the listener) answers are taken
+    /// by addresses and ports alone.
+    sequence: Option<u32>,
+}
+
 /// The probes a listener answers.
 #[derive(Debug)]
 struct Waiting {
     /// Probes waiting, by key; the thread sends each its answer.
-    probes: HashMap<Key, Sender<Answer>>,
+    probes: HashMap<Key, Pending>,
     /// Cleared when the thread ends (idle, or the interface went away); a new listener is opened then.
     open: bool,
 }
@@ -225,7 +271,7 @@ impl TcpProber {
             let mut waiting = lock(&listener.waiting);
             // It may have closed since it was looked up; then the next lookup opens a new one.
             if waiting.open {
-                waiting.probes.insert(key, sender);
+                waiting.probes.insert(key, Pending { sender, sequence: None });
                 drop(waiting);
                 return Ok(listener);
             }
@@ -265,7 +311,7 @@ impl TcpProber {
             match outcome {
                 ProbeOutcome::Reply { from, .. } if from == target => watch.target_heard(),
                 ProbeOutcome::Reply { .. } => watch.router_heard(now),
-                ProbeOutcome::Lost if target_hidden => watch.target_hidden(),
+                ProbeOutcome::Lost if target_hidden => watch.target_hidden(now),
                 ProbeOutcome::Lost => {}
             }
             (outcome == ProbeOutcome::Lost && watch.check_due(now)).then(|| watch.log_since(SystemTime::now()))
@@ -318,12 +364,20 @@ impl Listener {
             match socket.recv_from(&mut packet) {
                 Ok((length, from)) => {
                     let at = Instant::now();
-                    if let Some((key, heard)) =
-                        packet.get(..length).and_then(|packet| answer_of(packet, from.ip(), local))
-                        && let Some(sender) = lock(&self.waiting).probes.get(&key)
+                    let packet = packet.get(..length).unwrap_or_default();
+                    if let Some((local_port, target_port, sequence)) = own_syn(packet, from.ip(), local) {
+                        // A local port belongs to one socket at a time: the ports name the probe.
+                        lock(&self.waiting)
+                            .probes
+                            .iter_mut()
+                            .filter(|((_, target, source), _)| *target == target_port && *source == local_port)
+                            .for_each(|(_, probe)| probe.sequence = Some(sequence));
+                    } else if let Some((key, heard, echo)) = echoed_answer(packet, from.ip(), local)
+                        && let Some(probe) = lock(&self.waiting).probes.get(&key)
+                        && probe.sequence.is_none_or(|sequence| echo.of(sequence))
                     {
                         // The probe may have timed out meanwhile; then nobody listens.
-                        sender.send(Answer { heard, at }).ok();
+                        probe.sender.send(Answer { heard, at }).ok();
                     }
                 }
                 Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
@@ -430,11 +484,28 @@ fn local_address(target: IpAddr) -> Result<SocketAddr, TcpError> {
     }
 }
 
-/// If `packet`, received on `local` from `from`, answers a TCP probe: the probe's key and what it says. A router's
+/// If `packet`, seen on `local` from `from`, is a SYN of ours on its way out: its local port, the target's port
+/// and its sequence number. `packet` is a whole IPv4 packet, or, for IPv6, what follows the IPv6 header.
+fn own_syn(packet: &[u8], from: IpAddr, local: IpAddr) -> Option<(u16, u16, u32)> {
+    let segment = match (local, from) {
+        (IpAddr::V4(local), _) => {
+            let (protocol, source, _, payload) = ipv4(packet)?;
+            (protocol == PROTOCOL_TCP && source == local).then_some(payload)?
+        }
+        (IpAddr::V6(local), IpAddr::V6(from)) => (from == local).then_some(packet)?,
+        (IpAddr::V6(_), IpAddr::V4(_)) => return None,
+    };
+    let (local_port, target_port) = ports(segment)?;
+    let flags = *segment.get(13)?;
+    (flags & TCP_SYN != 0 && flags & TCP_ACK == 0).then_some((local_port, target_port, number_at(segment, 4)?))
+}
+
+/// If `packet`, received on `local` from `from`, answers a TCP probe: the probe's key, what it says and how it
+/// echoes the probe's SYN. A router's
 /// ICMP "TTL expired" or "unreachable" quotes the probe's IP header and ports; the target answers the SYN with
 /// SYN-ACK (port open) or RST (closed), both proof that it was reached. `packet` is a whole IPv4 packet, or, for
 /// IPv6, what follows the IPv6 header.
-fn answer_of(packet: &[u8], from: IpAddr, local: IpAddr) -> Option<(Key, Heard)> {
+fn echoed_answer(packet: &[u8], from: IpAddr, local: IpAddr) -> Option<(Key, Heard, Echo)> {
     match (local, from) {
         (IpAddr::V4(local), _) => answer_v4(packet, local),
         (IpAddr::V6(local), IpAddr::V6(from)) => answer_v6(packet, from, local),
@@ -442,8 +513,8 @@ fn answer_of(packet: &[u8], from: IpAddr, local: IpAddr) -> Option<(Key, Heard)>
     }
 }
 
-/// [`answer_of`] for a whole IPv4 `packet` received on `local`.
-fn answer_v4(packet: &[u8], local: Ipv4Addr) -> Option<(Key, Heard)> {
+/// [`echoed_answer`] for a whole IPv4 `packet` received on `local`.
+fn answer_v4(packet: &[u8], local: Ipv4Addr) -> Option<(Key, Heard, Echo)> {
     let (protocol, source, destination, payload) = ipv4(packet)?;
     if destination != local {
         return None;
@@ -460,22 +531,23 @@ fn answer_v4(packet: &[u8], local: Ipv4Addr) -> Option<(Key, Heard)> {
             }
             let (local_port, target_port) = ports(quoted)?;
             let key = (target.into(), target_port, local_port);
-            Some((key, error_heard(icmp_type == ICMP_UNREACHABLE, source.into(), key)))
+            let echo = Echo::Quoted(number_at(quoted, 4)?);
+            Some((key, error_heard(icmp_type == ICMP_UNREACHABLE, source.into(), key), echo))
         }
         PROTOCOL_TCP => target_answer(payload, source.into()),
         _ => None,
     }
 }
 
-/// [`answer_of`] for an IPv6 `payload` (what follows the IPv6 header) from `from`, received on `local`: an ICMPv6
-/// error quoting our SYN, else a TCP segment from the target.
-fn answer_v6(payload: &[u8], from: Ipv6Addr, local: Ipv6Addr) -> Option<(Key, Heard)> {
+/// [`echoed_answer`] for an IPv6 `payload` (what follows the IPv6 header) from `from`, received on `local`: an
+/// ICMPv6 error quoting our SYN, else a TCP segment from the target.
+fn answer_v6(payload: &[u8], from: Ipv6Addr, local: Ipv6Addr) -> Option<(Key, Heard, Echo)> {
     // Our own outgoing packets are seen too.
     if from == local {
         return None;
     }
     icmp6_answer(payload, local)
-        .map(|(key, unreachable)| (key, error_heard(unreachable, from.into(), key)))
+        .map(|(key, unreachable, echo)| (key, error_heard(unreachable, from.into(), key), echo))
         .or_else(|| target_answer(payload, from.into()))
 }
 
@@ -487,9 +559,9 @@ fn error_heard(unreachable: bool, from: IpAddr, key: Key) -> Heard {
     if unreachable && from != target { Heard::Lost } else { Heard::Reply(from) }
 }
 
-/// The key of the probe an ICMPv6 `message` to `local` quotes, and whether it is "unreachable" (else "time
-/// exceeded"), if it is either about our SYN.
-fn icmp6_answer(message: &[u8], local: Ipv6Addr) -> Option<(Key, bool)> {
+/// The key of the probe an ICMPv6 `message` to `local` quotes, whether it is "unreachable" (else "time
+/// exceeded") and the quoted sequence number, if it is either about our SYN.
+fn icmp6_answer(message: &[u8], local: Ipv6Addr) -> Option<(Key, bool, Echo)> {
     let icmp_type = *message.first()?;
     if icmp_type != ICMP6_TIME_EXCEEDED && icmp_type != ICMP6_UNREACHABLE {
         return None;
@@ -499,14 +571,15 @@ fn icmp6_answer(message: &[u8], local: Ipv6Addr) -> Option<(Key, bool)> {
         return None;
     }
     let target = ipv6_at(quoted, 24)?;
-    let (local_port, target_port) = ports(quoted.get(IPV6_HEADER..)?)?;
-    Some(((target.into(), target_port, local_port), icmp_type == ICMP6_UNREACHABLE))
+    let syn = quoted.get(IPV6_HEADER..)?;
+    let (local_port, target_port) = ports(syn)?;
+    Some(((target.into(), target_port, local_port), icmp_type == ICMP6_UNREACHABLE, Echo::Quoted(number_at(syn, 4)?)))
 }
 
 /// The key of the probe a TCP `segment` from `from` (the target) answers, if it is a SYN-ACK or RST. An IPv6
 /// listener doesn't see the protocol of what it gets, so the segment must also look like a TCP header: whole, with
 /// a plausible header length — another protocol's packet between the same ports is unlikely to pass.
-fn target_answer(segment: &[u8], from: IpAddr) -> Option<(Key, Heard)> {
+fn target_answer(segment: &[u8], from: IpAddr) -> Option<(Key, Heard, Echo)> {
     let (target_port, local_port) = ports(segment)?;
     let header = usize::from(*segment.get(12)? >> 4).checked_mul(4)?;
     if segment.len() < TCP_HEADER || header < TCP_HEADER {
@@ -515,13 +588,20 @@ fn target_answer(segment: &[u8], from: IpAddr) -> Option<(Key, Heard)> {
     let flags = *segment.get(13)?;
     let syn_ack = TCP_SYN | TCP_ACK;
     let answers = flags & TCP_RST != 0 || flags & syn_ack == syn_ack;
-    answers.then_some(((from, target_port, local_port), Heard::Reply(from)))
+    let echo = Echo::Acknowledged(number_at(segment, 8)?);
+    answers.then_some(((from, target_port, local_port), Heard::Reply(from), echo))
 }
 
 /// Source and destination ports at the start of a TCP header.
 fn ports(tcp: &[u8]) -> Option<(u16, u16)> {
     let port = |at: usize| -> Option<u16> { Some(u16::from_be_bytes([*tcp.get(at)?, *tcp.get(at.checked_add(1)?)?])) };
     Some((port(0)?, port(2)?))
+}
+
+/// The 32-bit number (sequence or acknowledgment) at byte `at` of a TCP header.
+fn number_at(tcp: &[u8], at: usize) -> Option<u32> {
+    let bytes: [u8; 4] = tcp.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
 }
 
 /// The IPv6 address at byte `at` of `bytes`.
@@ -566,6 +646,11 @@ mod tests {
     const TARGET6: Ipv6Addr = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
     /// An IPv6 router on the way.
     const ROUTER6: Ipv6Addr = Ipv6Addr::new(0x2a02, 0x2d8, 0, 0, 0, 0, 0, 1);
+
+    /// What a packet answers, without the echo.
+    fn answer_of(packet: &[u8], from: IpAddr, local: IpAddr) -> Option<(Key, Heard)> {
+        echoed_answer(packet, from, local).map(|(key, heard, _)| (key, heard))
+    }
 
     /// A 20-byte IPv4 header for `protocol` from `source` to `destination`, followed by `payload`.
     fn ip(protocol: u8, source: Ipv4Addr, destination: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
@@ -648,6 +733,33 @@ mod tests {
         assert_eq!(answer(&syn_ack), Some(((TARGET.into(), 443, 50_003), Heard::Reply(TARGET.into()))));
         let rst = ip(PROTOCOL_TCP, TARGET, LOCAL, &tcp(443, 50_004, 0x14));
         assert_eq!(answer(&rst), Some(((TARGET.into(), 443, 50_004), Heard::Reply(TARGET.into()))));
+    }
+
+    #[test]
+    fn an_answer_echoes_the_sequence_number_of_our_syn() {
+        // Our SYN leaves with sequence number 0x01020304; the listener sees it, on IPv4 and IPv6.
+        let mut syn = tcp(50_030, 443, TCP_SYN);
+        syn.splice(4..8, [1, 2, 3, 4]);
+        let sent = Some((50_030, 443, 0x0102_0304));
+        assert_eq!(own_syn(&ip(PROTOCOL_TCP, LOCAL, TARGET, &syn), LOCAL.into(), LOCAL.into()), sent);
+        assert_eq!(own_syn(&syn, LOCAL6.into(), LOCAL6.into()), sent);
+        // Not ours: the target's SYN-ACK, a segment from elsewhere.
+        let answer = ip(PROTOCOL_TCP, TARGET, LOCAL, &tcp(443, 50_030, 0x12));
+        assert_eq!(own_syn(&answer, TARGET.into(), LOCAL.into()), None);
+        assert_eq!(own_syn(&syn, TARGET6.into(), LOCAL6.into()), None);
+        // A router quotes it; the target acknowledges it plus one.
+        let mut quoting = icmp(ICMP_TIME_EXCEEDED, 50_030);
+        let length = quoting.len();
+        quoting.splice(length.saturating_sub(4).., [1, 2, 3, 4]);
+        let echo =
+            |packet: &[u8], from: Ipv4Addr| echoed_answer(packet, from.into(), LOCAL.into()).map(|answer| answer.2);
+        assert_eq!(echo(&quoting, ROUTER), Some(Echo::Quoted(0x0102_0304)));
+        let mut syn_ack = tcp(443, 50_030, 0x12);
+        syn_ack.splice(8..12, [1, 2, 3, 5]);
+        assert_eq!(echo(&ip(PROTOCOL_TCP, TARGET, LOCAL, &syn_ack), TARGET), Some(Echo::Acknowledged(0x0102_0305)));
+        assert!(Echo::Quoted(0x0102_0304).of(0x0102_0304) && !Echo::Quoted(7).of(0x0102_0304));
+        assert!(Echo::Acknowledged(0x0102_0305).of(0x0102_0304) && !Echo::Acknowledged(0x0102_0304).of(0x0102_0304));
+        assert!(Echo::Acknowledged(0).of(u32::MAX), "the number wraps");
     }
 
     #[test]

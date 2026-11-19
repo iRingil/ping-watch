@@ -172,12 +172,6 @@ begin
     Result := CustomMessage('StillRunning');
 end;
 
-function InitializeUninstall: Boolean;
-begin
-  Result := QuitPingWatch;
-  if not Result then
-    SuppressibleMsgBox(CustomMessage('StillRunning'), mbError, MB_OK, IDOK);
-end;
 
 function IsPortable: Boolean;
 begin
@@ -269,13 +263,39 @@ begin
     SuppressibleMsgBox(FmtMessage(CustomMessage('PrivilegedLeft'), [Task]), mbError, MB_OK, IDOK);
 end;
 
+// Removes the program's entries among the notification area icons Windows remembers (shown in Settings >
+// Personalization > Taskbar), as "Remove traces" of a portable copy does (src/traces.rs).
+procedure RemoveTrayIconEntries;
+var
+  Names: TArrayOfString;
+  I: Integer;
+  Key, Path: String;
+begin
+  if not RegGetSubkeyNames(HKEY_CURRENT_USER, 'Control Panel\NotifyIconSettings', Names) then
+    Exit;
+  for I := 0 to GetArrayLength(Names) - 1 do
+  begin
+    Key := 'Control Panel\NotifyIconSettings\' + Names[I];
+    if RegQueryStringValue(HKEY_CURRENT_USER, Key, 'ExecutablePath', Path) and
+       SameText(Path, ExpandConstant('{app}\{#AppExeName}')) then
+      RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, Key);
+  end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   UserData: String;
 begin
   if CurUninstallStep = usUninstall then
   begin
+    // Only now, after the user confirmed the removal: answering "No" leaves a running Ping Watch running.
+    if not QuitPingWatch then
+    begin
+      SuppressibleMsgBox(CustomMessage('StillRunning'), mbError, MB_OK, IDOK);
+      Abort;
+    end;
     RemovePrivileged;
+    RemoveTrayIconEntries;
     // "Start with Windows" from the settings would otherwise point at a removed program.
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#AppName}');
     // The program registers itself for notifications on first start.

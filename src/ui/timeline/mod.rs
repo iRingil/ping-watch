@@ -84,6 +84,8 @@ struct Draft {
     ts_ms: i64,
     /// Text so far.
     text: String,
+    /// Whether the text field was given the keyboard focus already (once, when the dialog opens).
+    focused: bool,
 }
 
 /// A choice from the chart's right-click menu.
@@ -222,28 +224,32 @@ impl Timeline {
         let (response, pointer) = draw_charts(ui, shown, self.period, self.compact, self.has_slider());
         let oldest_ms = shown.oldest_ms;
         let bucket_ms = shown.request.window.bucket_ms;
+        // The comment whose line is nearest a click at `at_ms`, if it is near enough to have been meant.
+        let window = shown.request.window;
+        let span_ms = window.to_ms.saturating_sub(window.from_ms).max(1);
+        #[expect(clippy::cast_precision_loss, reason = "a chart spans far less than 2^52 ms")]
+        let points_per_ms = response.rect.width() / span_ms as f32;
+        let comment_at = |at_ms: i64| {
+            shown
+                .comments
+                .iter()
+                .map(|comment| (comment.ts_ms.abs_diff(at_ms), comment))
+                .min_by_key(|(distance, _)| *distance)
+                .filter(|(distance, _)| {
+                    #[expect(clippy::cast_precision_loss, reason = "distances on a chart are small")]
+                    let points = *distance as f32 * points_per_ms;
+                    points <= COMMENT_PICK_DISTANCE
+                })
+                .map(|(_, comment)| comment.clone())
+        };
+        let clicked_at_ms = pointer.map(|point| millis_of(point.x));
         if response.secondary_clicked() {
-            self.menu_at_ms = pointer.map(|point| millis_of(point.x));
-            // The comment whose line is nearest the click, if it is near enough to have been meant.
-            let window = shown.request.window;
-            let span_ms = window.to_ms.saturating_sub(window.from_ms).max(1);
-            #[expect(clippy::cast_precision_loss, reason = "a chart spans far less than 2^52 ms")]
-            let points_per_ms = response.rect.width() / span_ms as f32;
-            self.menu_comment = self.menu_at_ms.and_then(|at_ms| {
-                shown
-                    .comments
-                    .iter()
-                    .map(|comment| (comment.ts_ms.abs_diff(at_ms), comment))
-                    .min_by_key(|(distance, _)| *distance)
-                    .filter(|(distance, _)| {
-                        #[expect(clippy::cast_precision_loss, reason = "distances on a chart are small")]
-                        let points = *distance as f32 * points_per_ms;
-                        points <= COMMENT_PICK_DISTANCE
-                    })
-                    .map(|(_, comment)| comment.clone())
-            });
+            self.menu_at_ms = clicked_at_ms;
+            self.menu_comment = clicked_at_ms.and_then(comment_at);
         }
-        if let Some(choice) = self.menu(&response) {
+        // A plain click on a comment's line opens it, so editing doesn't take the right-click menu.
+        let opened = if response.clicked() { clicked_at_ms.and_then(comment_at) } else { None };
+        if let Some(choice) = self.menu(&response).or(opened.map(MenuChoice::Edit)) {
             self.choose(choice, target_id);
         }
         if self.has_slider() {
@@ -270,7 +276,7 @@ impl Timeline {
                         .clicked()
                 {
                     let ts_ms = self.end_ms.unwrap_or(now_ms);
-                    self.draft = Some(Draft { id: None, target_id, ts_ms, text: String::new() });
+                    self.draft = Some(Draft { id: None, target_id, ts_ms, text: String::new(), focused: false });
                 }
                 egui::ComboBox::from_id_salt("timeline-period")
                     .selected_text(self.period.label(ui.language()))
@@ -394,9 +400,17 @@ impl Timeline {
         match choice {
             MenuChoice::Period(period) => self.period = period,
             MenuChoice::ResetFocus => self.end_ms = None,
-            MenuChoice::Comment(ts_ms) => self.draft = Some(Draft { id: None, target_id, ts_ms, text: String::new() }),
+            MenuChoice::Comment(ts_ms) => {
+                self.draft = Some(Draft { id: None, target_id, ts_ms, text: String::new(), focused: false })
+            }
             MenuChoice::Edit(comment) => {
-                self.draft = Some(Draft { id: Some(comment.id), target_id, ts_ms: comment.ts_ms, text: comment.text });
+                self.draft = Some(Draft {
+                    id: Some(comment.id),
+                    target_id,
+                    ts_ms: comment.ts_ms,
+                    text: comment.text,
+                    focused: false,
+                });
             }
         }
     }
@@ -429,44 +443,43 @@ impl Timeline {
         let mut change = None;
         let mut done = false;
         let title = if draft.id.is_some() { tr!(ctx, "Edit comment") } else { tr!(ctx, "Create comment") };
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.set_width(COMMENT_DIALOG_WIDTH);
-                ui.label(trf!(ui, "Comment at {time}", time = clock(draft.ts_ms, "%d.%m %H:%M:%S")));
-                let field = ui.add(
-                    TextEdit::multiline(&mut draft.text)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(tr!(ui, "What happened?")),
-                );
-                if !field.has_focus() && draft.text.is_empty() {
-                    field.request_focus();
+        // A modal: one comment at a time, and Esc or a click outside closes this dialog only.
+        let dialog = egui::Modal::new(egui::Id::unique("comment-dialog")).show(ctx, |ui| {
+            ui.set_width(COMMENT_DIALOG_WIDTH);
+            ui.label(RichText::new(title).font(theme::heading_font(17.0)));
+            ui.add_space(6.0);
+            ui.label(trf!(ui, "Comment at {time}", time = clock(draft.ts_ms, "%d.%m %H:%M:%S")));
+            let field = ui.add(
+                TextEdit::multiline(&mut draft.text)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(tr!(ui, "What happened?")),
+            );
+            if !std::mem::replace(&mut draft.focused, true) {
+                field.request_focus();
+            }
+            ui.add_space(4.0);
+            centered_row(ui, |ui| {
+                let text = draft.text.trim().to_owned();
+                if ui.add_enabled(!text.is_empty(), Button::new(tr!(ui, "Save"))).clicked() {
+                    change = Some(match draft.id {
+                        Some(id) => CommentChange::Edit { id, text },
+                        None => CommentChange::Add { target_id: draft.target_id, ts_ms: draft.ts_ms, text },
+                    });
+                    done = true;
                 }
-                ui.add_space(4.0);
-                centered_row(ui, |ui| {
-                    let text = draft.text.trim().to_owned();
-                    if ui.add_enabled(!text.is_empty(), Button::new(tr!(ui, "Save"))).clicked() {
-                        change = Some(match draft.id {
-                            Some(id) => CommentChange::Edit { id, text },
-                            None => CommentChange::Add { target_id: draft.target_id, ts_ms: draft.ts_ms, text },
-                        });
-                        done = true;
-                    }
-                    if ui.button(tr!(ui, "Cancel")).clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape))
-                    {
-                        done = true;
-                    }
-                    if let Some(id) = draft.id
-                        && ui.button(RichText::new(tr!(ui, "Delete")).color(theme::palette(ui).bad)).clicked()
-                    {
-                        change = Some(CommentChange::Delete(id));
-                        done = true;
-                    }
-                });
+                if ui.button(tr!(ui, "Cancel")).clicked() {
+                    done = true;
+                }
+                if let Some(id) = draft.id
+                    && ui.button(RichText::new(tr!(ui, "Delete")).color(theme::palette(ui).bad)).clicked()
+                {
+                    change = Some(CommentChange::Delete(id));
+                    done = true;
+                }
             });
+        });
+        done |= dialog.should_close();
         if let (Some(fetcher), Some(change)) = (&self.fetcher, change) {
             fetcher.change_comment(change);
             self.refresh_now = true;

@@ -1,4 +1,5 @@
-//! Continuous tracing of one target: one worker thread per TTL probes its hop every interval (by ICMP echo or a
+//! Continuous tracing of one target: one worker thread per TTL that may lie on the route (every TTL until the
+//! target answers, then those up to a few past it) probes its hop every interval (by ICMP echo or a
 //! TCP SYN) and records the outcome into a shared [`Route`] (the UI reads snapshots of it) and, optionally, sends it
 //! to the history. The trace can be paused and its interval changed while it runs.
 
@@ -138,8 +139,18 @@ struct Shared {
     control: Mutex<Control>,
     /// Wakes waiting workers when `control` changes.
     wake: Condvar,
-    /// Error of the latest failed probe, cleared by the next answer.
+    /// Error of the latest failed probe, cleared by the next probe that could be sent.
     last_error: Mutex<Option<Message>>,
+    /// Which TTLs have a worker, by index `ttl - 1`. Locked before `route` where both are.
+    workers: Mutex<Vec<bool>>,
+    /// Address being traced.
+    target: IpAddr,
+    /// The trace's parameters.
+    config: TraceConfig,
+    /// Where every probe outcome is also sent, if anywhere.
+    history: Option<HistorySender>,
+    /// The app's TCP prober.
+    tcp: Arc<TcpProber>,
 }
 
 impl Shared {
@@ -172,7 +183,7 @@ impl Shared {
     }
 }
 
-/// Running trace of one target, by one worker thread per TTL; stops its workers on drop.
+/// Running trace of one target, by one worker thread per TTL the route may need; stops its workers on drop.
 #[derive(Debug)]
 pub struct Tracer {
     /// State shared with the workers.
@@ -199,17 +210,15 @@ impl Tracer {
             control: Mutex::new(Control { stop: false, paused: false, interval: config.interval }),
             wake: Condvar::new(),
             last_error: Mutex::new(None),
+            workers: Mutex::new(vec![false; usize::from(config.max_ttl)]),
+            target,
+            config,
+            history,
+            tcp: Arc::clone(tcp),
         });
         // Made before spawning, so that an early error drops it and stops the workers already started.
         let tracer = Self { shared, tcp: matches!(config.probe, Probe::Tcp(_)).then(|| (Arc::clone(tcp), target)) };
-        for ttl in 1..=config.max_ttl {
-            let prober = Prober::new(config.probe, target, tcp)?;
-            let shared = Arc::clone(&tracer.shared);
-            let history = history.clone();
-            thread::Builder::new()
-                .name(format!("probe-ttl-{ttl}"))
-                .spawn(move || probe_loop(&shared, &prober, history.as_ref(), target, ttl, config))?;
-        }
+        spawn_wanted(&tracer.shared)?;
         Ok(tracer)
     }
 
@@ -218,7 +227,7 @@ impl Tracer {
         lock(&self.shared.route).snapshot(focus)
     }
 
-    /// Error of the latest failed probe (network down, ...), `None` once probes get answers again.
+    /// Error of the latest failed probe (network down, ...), `None` once probes can be sent again.
     pub fn last_error(&self) -> Option<Message> {
         lock(&self.shared.last_error).clone()
     }
@@ -252,15 +261,42 @@ impl Drop for Tracer {
     }
 }
 
-/// Worker body: probes hop `ttl` every interval until stop is requested.
-fn probe_loop(
-    shared: &Shared,
-    prober: &Prober,
-    history: Option<&HistorySender>,
-    target: IpAddr,
-    ttl: u8,
-    config: TraceConfig,
-) {
+/// Starts a worker for every TTL the route needs one for ([`RouteState::wanted`]) and has none.
+fn spawn_wanted(shared: &Arc<Shared>) -> Result<(), TraceError> {
+    let mut workers = lock(&shared.workers);
+    for ttl in 1..=shared.config.max_ttl {
+        let Some(running) = workers.get_mut(usize::from(ttl).saturating_sub(1)) else {
+            continue;
+        };
+        if *running || !lock(&shared.route).wanted(ttl) {
+            continue;
+        }
+        let prober = Prober::new(shared.config.probe, shared.target, &shared.tcp)?;
+        let worker = Arc::clone(shared);
+        thread::Builder::new()
+            .name(format!("probe-ttl-{ttl}"))
+            .spawn(move || probe_loop(&worker, &prober, ttl))?;
+        *running = true;
+    }
+    Ok(())
+}
+
+/// Ends the worker of `ttl` if the route no longer needs it (the target answers well before it): `true` if so.
+/// Decided under the workers' lock, so a route reopened meanwhile starts a new one.
+fn retire(shared: &Shared, ttl: u8) -> bool {
+    let mut workers = lock(&shared.workers);
+    if lock(&shared.route).wanted(ttl) {
+        return false;
+    }
+    if let Some(running) = workers.get_mut(usize::from(ttl).saturating_sub(1)) {
+        *running = false;
+    }
+    true
+}
+
+/// Worker body: probes hop `ttl` every interval until stop is requested or the route doesn't reach that far.
+fn probe_loop(shared: &Arc<Shared>, prober: &Prober, ttl: u8) {
+    let (target, config, history) = (shared.target, shared.config, shared.history.as_ref());
     loop {
         let started = Instant::now();
         let at_ms = unix_ms(SystemTime::now());
@@ -268,9 +304,8 @@ fn probe_loop(
         if lock(&shared.route).take_turn(ttl, at_ms, interval_ms) {
             let outcome = match prober.probe(target, ttl, config.timeout) {
                 Ok(outcome) => {
-                    if matches!(outcome, ProbeOutcome::Reply { .. }) {
-                        *lock(&shared.last_error) = None;
-                    }
+                    // It went out: whatever kept the probes from being sent is over, answered or not.
+                    *lock(&shared.last_error) = None;
                     outcome
                 }
                 Err(error) => {
@@ -291,8 +326,13 @@ fn probe_loop(
             {
                 log::debug!("history recorder is gone; samples of ttl {ttl} dropped");
             }
+            // The outcome may have made the route longer: the TTLs it now reaches get their workers back.
+            if let Err(error) = spawn_wanted(shared) {
+                log::warn!("cannot start a probe worker: {error}");
+                *lock(&shared.last_error) = Some(error.message());
+            }
         }
-        if !shared.wait_turn(started) {
+        if retire(shared, ttl) || !shared.wait_turn(started) {
             break;
         }
     }

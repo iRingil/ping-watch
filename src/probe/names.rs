@@ -3,11 +3,15 @@
 
 use std::collections::HashMap;
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use windows::Win32::NetworkManagement::Dns::{
+    DNS_QUERY_STANDARD, DNS_RECORDA, DNS_TYPE_AAAA, DnsFree, DnsFreeRecordList, DnsQuery_W,
+};
 
 use crate::sync::lock;
 
@@ -49,6 +53,10 @@ pub enum ResolveError {
     /// The text can't be a host: too long or with control characters.
     #[error("{0:?} is not a host name or address")]
     Invalid(String),
+    /// An IPv6 link-local address: it means something on one network interface only, which a target doesn't
+    /// carry, so its probes would go nowhere.
+    #[error("{0} is a link-local address")]
+    LinkLocal(IpAddr),
 }
 
 /// Whether `a` and `b` name the same host: letter case doesn't matter, in any script (not only ASCII).
@@ -59,24 +67,66 @@ pub fn same_host(a: &str, b: &str) -> bool {
 /// Resolves `host` (name or address) to its first IPv4 address, or its first IPv6 address if it has no IPv4 one.
 /// Blocks while DNS answers.
 ///
+/// A computer without IPv6 isn't told the addresses of a name that has only IPv6 ones (Windows says "no such
+/// host"); they are then asked for by family, so the trace starts and shows that nothing leads there.
+///
 /// # Errors
 ///
-/// [`ResolveError`] if `host` can't be a host name, can't be resolved or has no address.
+/// [`ResolveError`] if `host` can't be a host name, can't be resolved, has no address or is link-local.
 pub fn resolve(host: &str) -> Result<IpAddr, ResolveError> {
     if !is_plausible_host(host) {
         return Err(ResolveError::Invalid(host.to_owned()));
     }
-    let addresses: Vec<IpAddr> = (host, 0)
-        .to_socket_addrs()
-        .map_err(|source| ResolveError::Lookup { host: host.to_owned(), source })?
-        .map(|address| address.ip())
-        .collect();
-    addresses
+    let addresses: Vec<IpAddr> = match (host, 0).to_socket_addrs() {
+        Ok(addresses) => addresses.map(|address| address.ip()).collect(),
+        Err(source) => {
+            let addresses = ipv6_addresses(host);
+            if addresses.is_empty() {
+                return Err(ResolveError::Lookup { host: host.to_owned(), source });
+            }
+            addresses
+        }
+    };
+    let address = addresses
         .iter()
         .find(|ip| ip.is_ipv4())
         .or_else(|| addresses.first())
         .copied()
-        .ok_or_else(|| ResolveError::NoAddress(host.to_owned()))
+        .ok_or_else(|| ResolveError::NoAddress(host.to_owned()))?;
+    if is_link_local(address) { Err(ResolveError::LinkLocal(address)) } else { Ok(address) }
+}
+
+/// The IPv6 addresses of `host` as DNS itself has them (its AAAA records), whatever addresses this computer has;
+/// none if it has none or the query fails.
+fn ipv6_addresses(host: &str) -> Vec<IpAddr> {
+    let mut records: *mut DNS_RECORDA = std::ptr::null_mut();
+    let name = windows::core::HSTRING::from(host);
+    // SAFETY: `name` is a NUL-terminated string that lives across the call; `records` receives the list Windows
+    // allocates, null if there is none.
+    let status = unsafe { DnsQuery_W(&name, DNS_TYPE_AAAA, DNS_QUERY_STANDARD, None, &raw mut records, None) };
+    let mut addresses = Vec::new();
+    if status.is_ok() {
+        let mut next = records;
+        // SAFETY: the list's records are valid until freed below, each linked to the next or null.
+        while let Some(record) = unsafe { next.as_ref() } {
+            if record.wType == DNS_TYPE_AAAA.0 {
+                // SAFETY: a record of this type holds the AAAA variant of the data; its bytes are plain integers.
+                let octets = unsafe { record.Data.AAAA.Ip6Address.IP6Byte };
+                addresses.push(IpAddr::V6(Ipv6Addr::from(octets)));
+            }
+            next = record.pNext;
+        }
+    }
+    if !records.is_null() {
+        // SAFETY: the list came from `DnsQuery_W` and is freed once, after its last use.
+        unsafe { DnsFree(Some(records.cast_const().cast()), DnsFreeRecordList) };
+    }
+    addresses
+}
+
+/// Whether `address` is an IPv6 link-local one (`fe80::/10`).
+fn is_link_local(address: IpAddr) -> bool {
+    matches!(address, IpAddr::V6(ip) if ip.segments().first().is_some_and(|first| first & 0xffc0 == 0xfe80))
 }
 
 /// Whether `host` can be a host name or address at all: not empty, at most [`MAX_HOST_LENGTH`] bytes, no control
@@ -147,6 +197,8 @@ impl NameCache {
         if let Err(error) = spawned {
             log::warn!("cannot start reverse lookup of {ip}: {error}");
             self.running.fetch_sub(1, Ordering::Relaxed);
+            // Not left as running forever: asked again later, like a lookup that failed.
+            lock(&self.names).insert(ip, Lookup::Failed(Instant::now()));
         }
     }
 }
@@ -204,5 +256,18 @@ mod tests {
         assert!(matches!(resolve(""), Err(ResolveError::Invalid(_))));
         assert!(is_plausible_host(&"a".repeat(MAX_HOST_LENGTH)));
         assert!(is_plausible_host("dns.google"));
+    }
+}
+
+/// Asks real DNS; run by hand: `cargo test -- --ignored names::live`.
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs DNS; meant for a computer without IPv6, which Windows doesn't tell such a name's addresses"]
+    fn a_name_with_only_ipv6_addresses_resolves() {
+        let resolved = resolve("ipv6.google.com");
+        assert!(matches!(resolved, Ok(IpAddr::V6(_))), "{resolved:?}");
     }
 }

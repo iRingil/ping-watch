@@ -6,12 +6,16 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::route_watch::{Path, RouteNote, RouteWatch};
+use super::route_watch::{Path, RouteNote, RouteWatch, stable_checks};
 use super::rules::{Condition, Rule};
 use crate::probe::names::same_host;
 
 /// Fewest probes in the window before loss or latency is judged (a couple of probes say nothing).
 const MIN_PROBES: u64 = 3;
+/// Fewest probes in the window before "no answer" is judged: one lost probe is not a target that is down.
+const MIN_SILENT_PROBES: u64 = 2;
+/// A condition is judged over at least this many probe intervals, however short its own window is.
+const MIN_INTERVALS: u32 = 3;
 /// Share of a condition's window the trace must already cover before the condition is judged.
 const MIN_COVERAGE: f64 = 0.95;
 /// Share of the threshold a loss or latency must fall below for the alert to count as calm.
@@ -46,10 +50,12 @@ impl WindowStats {
 
 /// Where the engine gets its measurements: the running traces. A trait so the tests can feed made-up numbers.
 pub trait Observe {
-    /// The traced targets (hosts as entered); paused or not yet resolved ones are left out.
+    /// The traced targets (hosts as entered), paused ones included; not yet resolved ones are left out.
     fn hosts(&self) -> Vec<String>;
-    /// The target's own probes over the last `window`, `None` if it isn't traced.
+    /// The target's own probes over the last `window`, `None` if it isn't traced or is paused.
     fn window(&self, host: &str, window: Duration) -> Option<WindowStats>;
+    /// Time between the probes of the target's hops.
+    fn interval(&self, host: &str) -> Duration;
     /// The answering hops of the target's route.
     fn path(&self, host: &str) -> Path;
 }
@@ -129,6 +135,8 @@ impl Engine {
         for rule in rules.iter().filter(|rule| rule.enabled) {
             for host in hosts.iter().filter(|host| rule.targets.contains(host)) {
                 if let Some(window) = rule.condition.window() {
+                    // A window shorter than a few probes would judge by one of them.
+                    let window = window.max(observe.interval(host).saturating_mul(MIN_INTERVALS));
                     checked.insert((rule.id, host.clone()));
                     let stats = observe.window(host, window);
                     self.judge(rule, host, window, stats, now_ms, &mut events);
@@ -185,11 +193,10 @@ impl Engine {
                 Level::of(average, ms)
             }
             Condition::Unreachable { after } => {
-                if stats.received == 0 {
-                    Level::Bad(after.as_secs_f64())
-                } else {
-                    Level::Calm
+                if stats.sent < MIN_SILENT_PROBES {
+                    return;
                 }
+                if stats.received == 0 { Level::Bad(after.as_secs_f64()) } else { Level::Calm }
             }
             Condition::RouteChanged => return,
         };
@@ -226,7 +233,8 @@ impl Engine {
     fn check_routes(&mut self, rules: &[Rule], hosts: &[String], observe: &dyn Observe, events: &mut Vec<Event>) {
         self.routes.retain(|host, _| hosts.contains(host));
         for host in hosts {
-            let change = self.routes.entry(host.clone()).or_default().check(observe.path(host));
+            let hold = stable_checks(observe.interval(host));
+            let change = self.routes.entry(host.clone()).or_default().check(observe.path(host), hold);
             let Some(note) = change.map(|change| change.note()) else {
                 continue;
             };
@@ -295,6 +303,9 @@ mod tests {
         }
         fn window(&self, host: &str, _window: Duration) -> Option<WindowStats> {
             self.hosts.borrow().iter().find(|(known, _, _)| known == host).map(|(_, stats, _)| *stats)
+        }
+        fn interval(&self, _host: &str) -> Duration {
+            Duration::from_secs(1)
         }
         fn path(&self, host: &str) -> Path {
             self.hosts
@@ -404,6 +415,12 @@ mod tests {
             path(1),
         );
         assert!(engine.check(&rules, &fake, 1_000).is_empty(), "paused: no probes");
+        fake.set(
+            "a",
+            WindowStats { sent: 1, received: 0, average_ms: None, covered: Duration::from_secs(60) },
+            path(1),
+        );
+        assert!(engine.check(&rules, &fake, 2_000).is_empty(), "one lost probe is not a silent target");
     }
 
     #[test]

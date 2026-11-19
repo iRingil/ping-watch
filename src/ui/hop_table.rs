@@ -17,7 +17,7 @@ use crate::ui::columns::{self, ColumnWidths};
 use crate::ui::latency_bars::{self, Zones};
 
 /// Height of a table row.
-const ROW_HEIGHT: f32 = 22.0;
+const ROW_HEIGHT: f32 = 24.0;
 /// Share of the table width given to the latency bars (pane 2) by default; the Name column takes what is left.
 const LATENCY_SHARE: f32 = 0.3;
 /// Narrowest the latency bars get.
@@ -134,8 +134,14 @@ pub fn show(
         // Default widths: the latency bars get their share, Name gets whatever the other shown columns leave.
         let available = ui.available_width();
         let latency_width = (available * LATENCY_SHARE).max(LATENCY_MIN_WIDTH);
-        let mut defaults = vec![HOP_WIDTH, NUMBER_WIDTH, IP_WIDTH, 0.0];
-        defaults.extend([NUMBER_WIDTH; HEADERS.len() - 4]);
+        let language = ui.language();
+        let number = |index: usize| {
+            HEADERS
+                .get(index)
+                .map_or(NUMBER_WIDTH, |(title, ..)| number_width(ui, language.translate(title), NUMBER_WIDTH))
+        };
+        let mut defaults = vec![HOP_WIDTH, number(1), IP_WIDTH, 0.0];
+        defaults.extend((4..HEADERS.len()).map(number));
         let others: f32 = defaults
             .iter()
             .enumerate()
@@ -149,7 +155,7 @@ pub fn show(
         let language = ui.language();
         let builder = TableBuilder::new(ui)
             .striped(true)
-            .sense(Sense::click())
+            .sense(Sense::CLICK)
             .cell_layout(Layout::left_to_right(Align::Center));
         let mut header_widths = Vec::new();
         columns
@@ -319,6 +325,14 @@ fn round_trip_row(row: &mut TableRow<'_, '_>, shown: &[bool], stats: &HopStats, 
             cell(ui, true, RichText::new(focus).small().color(theme::palette(ui).ink_muted));
         }
     });
+}
+
+/// Default width of a numeric column titled `title`: `least`, or more where the title (a translation may
+/// be longer) wouldn't fit.
+pub fn number_width(ui: &Ui, title: &str, least: f32) -> f32 {
+    let font = TextStyle::Body.resolve(ui.style());
+    let text = ui.painter().layout_no_wrap(title.to_owned(), font, theme::palette(ui).ink_muted);
+    least.max((text.size().x + HEADER_INSET * 2.0 + 2.0).ceil())
 }
 
 /// One header cell: the first paints the header band across the whole row of width `row_width` (cells clip

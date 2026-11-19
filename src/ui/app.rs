@@ -388,7 +388,8 @@ impl PingWatchApp {
                 }
                 if rule.notify {
                     let measured = rule.condition.measured(*value, language);
-                    toast = Some((format!("{host}: {measured}"), rule.condition.describe(language)));
+                    let title = trf!(language, "{subject}: {text}", subject = host, text = measured);
+                    toast = Some((title, rule.condition.describe(language)));
                 }
             }
             Event::Ended { rule_id, host, started_ms, worst, recovered } => {
@@ -823,25 +824,36 @@ impl PingWatchApp {
         };
     }
 
-    /// Keeps one tab per traced address: when a tab starts tracing an address another tab already traces, it is
-    /// closed and the earlier tab is shown instead.
+    /// Keeps one tab per traced address: when a tab starts tracing an address another tab already traces, the tab
+    /// that got the address later (the new one, wherever it stands in the row) is closed, the other is shown
+    /// instead, and the status bar says so.
     fn merge_duplicate_traces(&mut self) {
         let targets: Vec<Option<IpAddr>> = self.tabs.iter().map(Tab::target).collect();
-        let duplicate = targets.iter().enumerate().find_map(|(later, target)| {
+        let duplicate = targets.iter().enumerate().find_map(|(right, target)| {
             let target = (*target)?;
-            let earlier = targets.iter().take(later).position(|other| *other == Some(target))?;
-            Some((earlier, later))
+            let left = targets.iter().take(right).position(|other| *other == Some(target))?;
+            Some((left, right))
         });
-        if let Some((earlier, later)) = duplicate {
-            log::info!("{} is already traced in another tab", self.tabs.get(later).map(Tab::title).unwrap_or_default());
-            self.tabs.remove(later);
-            // A target added on the overview page leaves that page shown.
-            self.page = match self.page {
-                Page::Target(shown) if shown == later => Page::Target(earlier),
-                Page::Target(shown) if shown > later => Page::Target(shown.saturating_sub(1)),
-                page => page,
-            };
-        }
+        let Some((left, right)) = duplicate else {
+            return;
+        };
+        let since = |index: usize| self.tabs.get(index).and_then(Tab::traced_since);
+        let (kept, closed) = if since(left) > since(right) { (right, left) } else { (left, right) };
+        let title = self.tabs.get(closed).map(Tab::title).unwrap_or_default();
+        log::info!("{title} is already traced in another tab");
+        self.notice = Some(Notice::done(trf!(
+            self.settings.language,
+            "{target} is already traced in another tab",
+            target = title
+        )));
+        self.tabs.remove(closed);
+        let after_removal = |index: usize| if index > closed { index.saturating_sub(1) } else { index };
+        // A target added on the overview page leaves that page shown.
+        self.page = match self.page {
+            Page::Target(shown) if shown == closed => Page::Target(after_removal(kept)),
+            Page::Target(shown) => Page::Target(after_removal(shown)),
+            Page::AllTargets => Page::AllTargets,
+        };
     }
 
     /// Tab bar: All targets (always in place), the target tabs with close buttons, and "+". When the target tabs
@@ -1131,7 +1143,14 @@ fn tab_widget(ui: &mut Ui, open: bool, title: &str, closable: bool, alert: bool)
         painter.hline(inner, rect.bottom() - 3.0, Stroke::new(2.0, theme::palette(ui).signal));
     }
     let text_pos = egui::pos2(rect.left() + TAB_PADDING, rect.center().y - galley.size().y / 2.0);
+    let text_right = text_pos.x + galley.size().x;
     painter.galley(text_pos, galley, text_color);
+    if alert {
+        // After the title: a ring with a filled center, so it reads as a mark without its color too.
+        let center = egui::pos2(text_right + ALERT_DOT_WIDTH / 2.0, rect.center().y);
+        painter.circle_filled(center, 2.5, theme::palette(ui).bad);
+        painter.circle_stroke(center, 5.0, Stroke::new(1.5, theme::palette(ui).bad));
+    }
     icons::focus_ring(ui, &response, rect.shrink(2.0));
 
     let mut close_clicked = false;
@@ -1253,7 +1272,7 @@ impl PingWatchApp {
                 [] => {}
                 [(title, problem)] => {
                     ui.separator();
-                    status_problem(ui, &format!("{title}: {problem}"));
+                    status_problem(ui, &trf!(ui, "{subject}: {text}", subject = title, text = problem));
                 }
                 more => {
                     ui.separator();
@@ -1447,6 +1466,22 @@ fn status_problem(ui: &mut Ui, message: &str) {
     ui.colored_label(theme::palette(ui).bad, message);
 }
 
+/// What the tabs need from the app `$app` while they are polled or drawn. Built from its fields in place: a
+/// method would borrow the whole app, and the tabs are borrowed mutably beside this.
+macro_rules! tab_context {
+    ($app:expr) => {
+        tab::Context {
+            names: &$app.names,
+            reader: $app.reader.as_ref(),
+            history_path: $app.history_path.as_deref(),
+            targets: $app.targets.as_ref(),
+            settings: &$app.settings,
+            rights: $app.rights,
+            tcp: &$app.tcp,
+        }
+    };
+}
+
 /// The action of a pressed keyboard shortcut, if any (consumed so widgets don't see it).
 fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
     let shortcuts = [
@@ -1463,7 +1498,8 @@ fn shortcut_action(ctx: &egui::Context) -> Option<Action> {
 }
 
 impl eframe::App for PingWatchApp {
-    /// Handles the tray icon and keeps the window state; runs even while the window is minimized or hidden.
+    /// Handles the tray icon, keeps the window state, moves the tabs on and checks the alerts; runs even while the
+    /// window is minimized or hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.applied_theme != Some(self.settings.theme) {
             self.settings.theme.apply(ctx);
@@ -1491,6 +1527,15 @@ impl eframe::App for PingWatchApp {
         self.prune_history();
         self.take_snapshot_results();
         self.ask_rights_and_restart(ctx);
+        let context = tab_context!(self);
+        for tab in &mut self.tabs {
+            tab.poll(context);
+        }
+        // Tabs that resolved are checked before anything borrows them for drawing.
+        self.merge_duplicate_traces();
+        // A minimized window draws nothing, and nothing would wake this again: the alerts, the tabs still
+        // resolving and the pruning go on at this pace.
+        ctx.request_repaint_after(REFRESH);
         // eframe shows the window after its first frame whatever the viewport says, so it is hidden from here; not
         // without a tray icon, as nothing could bring it back then.
         if !std::mem::replace(&mut self.started, true) && self.started_in_tray && self.tray.is_some() {
@@ -1519,11 +1564,12 @@ impl eframe::App for PingWatchApp {
         if std::mem::take(&mut self.start_minimized) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
-        if let Some(action) = shortcut_action(ui.ctx()) {
+        // Not under a dialog: its backdrop hides the tab a shortcut would restart or close.
+        if ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
+            && let Some(action) = shortcut_action(ui.ctx())
+        {
             self.apply(action);
         }
-        // Tabs that resolved last frame are checked before anything borrows them for drawing.
-        self.merge_duplicate_traces();
         let bar_frame =
             Frame::new()
                 .fill(theme::palette(ui).bar)
@@ -1541,18 +1587,7 @@ impl eframe::App for PingWatchApp {
         {
             self.allow_in_firewall();
         }
-        let context = tab::Context {
-            names: &self.names,
-            reader: self.reader.as_ref(),
-            history_path: self.history_path.as_deref(),
-            targets: self.targets.as_ref(),
-            settings: &self.settings,
-            rights: self.rights,
-            tcp: &self.tcp,
-        };
-        for tab in &mut self.tabs {
-            tab.poll(context);
-        }
+        let context = tab_context!(self);
         let action = match self.page {
             Page::AllTargets => {
                 let request = page(ui, |ui| {
@@ -1607,7 +1642,7 @@ impl eframe::App for PingWatchApp {
     }
 }
 
-/// The tabs as the alert engine sees them: the targets that trace and aren't paused.
+/// The tabs as the alert engine sees them: the targets that trace.
 struct Watched<'a>(&'a [Tab]);
 
 impl Observe for Watched<'_> {
@@ -1617,6 +1652,10 @@ impl Observe for Watched<'_> {
 
     fn window(&self, host: &str, window: Duration) -> Option<WindowStats> {
         self.0.iter().find(|tab| tab.host() == host).and_then(|tab| tab.window_stats(window))
+    }
+
+    fn interval(&self, host: &str) -> Duration {
+        self.0.iter().find(|tab| tab.host() == host).map_or(Duration::from_secs(1), Tab::interval)
     }
 
     fn path(&self, host: &str) -> Vec<(u8, IpAddr)> {

@@ -139,6 +139,7 @@ all programs because Windows doesn't apply a program's rule to these messages.
 | ...with administrator rights, when turned on       | the task `Ping Watch (<user>)` in Task Scheduler             | the same                                      |
 | Firewall rules for TCP probes, when you allow them | group "Ping Watch" in Windows Firewall                       | the same                                      |
 | Name and icon of the app's notifications           | `HKCU\Software\Classes\AppUserModelId\iRingil.PingWatch`     | the same                                      |
+| The icon file those notifications show             | `%LOCALAPPDATA%\Ping Watch\notification-icon.png`            | `userdata\notification-icon.png`              |
 
 The history keeps the last seven days by default (Settings → Tracing → Keep history for). A portable copy is a folder
 with `portable.txt` next to `PingWatch.exe`: delete that file, and the copy keeps its data in the user profile

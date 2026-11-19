@@ -254,7 +254,7 @@ pub struct Split {
 pub fn split_button(ui: &mut Ui, icon: Icon, icon_color: Color32, tooltip: &str) -> Split {
     let height = ui.spacing().interact_size.y;
     let main_width = height + 6.0;
-    let menu_width = height * 0.75;
+    let menu_width = (height * 0.75).max(24.0);
     let (rect, _) = ui.allocate_exact_size(vec2(main_width + menu_width, height), Sense::hover());
     let main_rect = Rect::from_min_size(rect.min, vec2(main_width, height));
     let menu_rect = Rect::from_min_max(pos2(main_rect.right(), rect.top()), rect.max);
@@ -287,14 +287,18 @@ pub fn lit_color(ui: &Ui, lit: bool) -> Color32 {
     if lit { theme::palette(ui).ink } else { theme::palette(ui).ink_muted }
 }
 
-/// Outlines `rect` in the signal color while `response` has the keyboard focus, so painted buttons show where Tab
-/// has got to (egui's own widgets do that themselves).
+/// Outlines `rect` while `response` has the keyboard focus, so painted buttons show where Tab has got to (egui's
+/// own widgets do that themselves): a ring in the signal color with a thin line of the color drawn on signal
+/// fills inside it, so it also shows on a signal-colored button.
 pub fn focus_ring(ui: &Ui, response: &Response, rect: Rect) {
     if response.has_focus() {
+        let palette = theme::palette(ui);
+        ui.painter()
+            .rect_stroke(rect, CornerRadius::same(3), Stroke::new(2.0, palette.signal), StrokeKind::Inside);
         ui.painter().rect_stroke(
-            rect,
-            CornerRadius::same(3),
-            Stroke::new(2.0, theme::palette(ui).signal),
+            rect.shrink(2.0),
+            CornerRadius::same(2),
+            Stroke::new(1.0, palette.on_signal),
             StrokeKind::Inside,
         );
     }

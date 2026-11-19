@@ -195,6 +195,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Later tabs", "Pestañas siguientes"),
     ("License", "Licencia"),
     ("Light", "Claro"),
+    ("Link-local addresses (fe80::…) can't be traced", "Las direcciones de enlace local (fe80::…) no se pueden trazar"),
     ("Loading history…", "Cargando historial…"),
     ("Look up by reverse DNS", "Resolver por DNS inverso"),
     ("Loss", "Pérdidas"),
@@ -218,6 +219,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("No answer for {value} s", "Sin respuesta durante {value} s"),
     ("No releases are published yet.", "Aún no hay versiones publicadas."),
     ("No response", "Sin respuesta"),
+    (
+        "No route to {address}: no network connection for this address",
+        "No hay ruta a {address}: no hay conexión de red para esta dirección",
+    ),
     ("No route to {address}: {error}", "No hay ruta a {address}: {error}"),
     (
         "No rules. Add one to be told when a target slows down or drops packets.",
@@ -335,6 +340,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ),
     ("The comment wasn't saved: {error}", "El comentario no se guardó: {error}"),
     (
+        "The history isn't being saved: the database is busy or the disk is full",
+        "El historial no se guarda: la base de datos está ocupada o el disco está lleno",
+    ),
+    (
         "The history period applies at once: older probes, comments and alert journal entries are deleted.",
         "El período de conservación se aplica en el acto: se eliminan las mediciones, los comentarios y las entradas del registro de alertas más antiguos.",
     ),
@@ -451,4 +460,6 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("{n} second|{n} seconds", "{n} segundo|{n} segundos"),
     ("{n} target|{n} targets", "{n} destino|{n} destinos"),
     ("{seconds} seconds", "{seconds} segundos"),
+    ("{subject}: {text}", "{subject}: {text}"),
+    ("{target} is already traced in another tab", "{target} ya se está trazando en otra pestaña"),
 ];

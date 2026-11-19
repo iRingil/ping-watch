@@ -195,6 +195,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Later tabs", "Следующие вкладки"),
     ("License", "Лицензия"),
     ("Light", "Светлая"),
+    ("Link-local addresses (fe80::…) can't be traced", "Локальные адреса канала (fe80::…) не трассируются"),
     ("Loading history…", "Загрузка истории…"),
     ("Look up by reverse DNS", "Определять через обратный DNS"),
     ("Loss", "Потери"),
@@ -218,6 +219,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("No answer for {value} s", "Нет ответа {value} с"),
     ("No releases are published yet.", "Релизов пока нет."),
     ("No response", "Нет ответа"),
+    (
+        "No route to {address}: no network connection for this address",
+        "Нет маршрута к {address}: нет сетевого подключения для этого адреса",
+    ),
     ("No route to {address}: {error}", "Нет маршрута к {address}: {error}"),
     (
         "No rules. Add one to be told when a target slows down or drops packets.",
@@ -338,8 +343,12 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ),
     ("The comment wasn't saved: {error}", "Комментарий не сохранён: {error}"),
     (
+        "The history isn't being saved: the database is busy or the disk is full",
+        "История не сохраняется: база данных занята или диск заполнен",
+    ),
+    (
         "The history period applies at once: older probes, comments and alert journal entries are deleted.",
-        "Срок хранения действует сразу: более старые замеры, комментарии и записи журнала оповещений удаляются.",
+        "Срок хранения действует сразу: более старые запросы, комментарии и записи журнала оповещений удаляются.",
     ),
     ("The journal couldn't be read: {error}", "Не удалось прочитать журнал: {error}"),
     ("The journal wasn't cleared: {error}", "Журнал не очищен: {error}"),
@@ -448,4 +457,6 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("{n} second|{n} seconds", "{n} с|{n} с|{n} с"),
     ("{n} target|{n} targets", "{n} цель|{n} цели|{n} целей"),
     ("{seconds} seconds", "{seconds} с"),
+    ("{subject}: {text}", "{subject}: {text}"),
+    ("{target} is already traced in another tab", "{target} уже трассируется в другой вкладке"),
 ];

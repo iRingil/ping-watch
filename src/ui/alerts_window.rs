@@ -207,7 +207,11 @@ impl AlertsWindow {
             });
             close
         });
-        if modal.inner || modal.should_close() {
+        // Esc or a click outside while a rule is being written only cancels that rule, not the whole window.
+        let dismissed = modal.should_close();
+        if dismissed && !modal.inner && self.draft.is_some() {
+            self.draft = None;
+        } else if modal.inner || dismissed {
             self.open = false;
             self.draft = None;
             self.confirm_delete = None;
@@ -346,7 +350,12 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
             }
             ConditionKind::Latency => {
                 ui.weak(tr!(ui, "is above"));
-                ui.add(egui::DragValue::new(&mut draft.ms).range(10.0..=5_000.0).speed(1.0).suffix(" ms"));
+                ui.add(
+                    egui::DragValue::new(&mut draft.ms)
+                        .range(10.0..=5_000.0)
+                        .speed(1.0)
+                        .suffix(format!(" {}", tr!(ui, "ms"))),
+                );
                 ui.end_row();
                 ui.weak(tr!(ui, "over the last"));
                 period_choice(ui, "alert-window", &mut draft.window, &WINDOWS);
@@ -424,11 +433,9 @@ fn rule_form(ui: &mut Ui, draft: &mut Draft, hosts: &[String]) -> FormAnswer {
     centered_row(ui, |ui| {
         let palette = theme::palette(ui);
         let save = egui::Button::new(RichText::new(tr!(ui, "Save")).color(palette.on_signal)).fill(palette.signal);
-        if ui
-            .add_enabled(can_save, save)
-            .on_disabled_hover_text(tr!(ui, "Choose at least one target"))
-            .clicked()
-        {
+        let save = ui.add_enabled(can_save, save).on_disabled_hover_text(tr!(ui, "Choose at least one target"));
+        icons::focus_ring(ui, &save, save.rect);
+        if save.clicked() {
             answer = FormAnswer::Save;
         }
         if ui.button(tr!(ui, "Cancel")).clicked() {

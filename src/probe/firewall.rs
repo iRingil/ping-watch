@@ -91,6 +91,9 @@ pub struct AnswerWatch {
     dropped_at: Option<Instant>,
     /// Probes in a row that the target answered (the connection was made) while the listener heard nothing.
     target_hidden: u8,
+    /// When the latest of them was. Old ones stop counting: a target that went down makes no connections, so
+    /// nothing else would ever tell that its answers aren't hidden anymore.
+    hidden_at: Option<Instant>,
 }
 
 impl AnswerWatch {
@@ -108,11 +111,13 @@ impl AnswerWatch {
     /// The listener heard the target's answer.
     pub fn target_heard(&mut self) {
         self.target_hidden = 0;
+        self.hidden_at = None;
     }
 
-    /// The target answered a probe, but the listener didn't hear it.
-    pub fn target_hidden(&mut self) {
+    /// The target answered a probe at `now`, but the listener didn't hear it.
+    pub fn target_hidden(&mut self, now: Instant) {
         self.target_hidden = self.target_hidden.saturating_add(1);
+        self.hidden_at = Some(now);
     }
 
     /// Whether the log of dropped packets is to be read now, after a lost probe: answers are missing (no router
@@ -120,7 +125,7 @@ impl AnswerWatch {
     pub fn check_due(&mut self, now: Instant) -> bool {
         let silent = self.router_heard.is_none_or(|at| now.saturating_duration_since(at) >= HOPS_SILENT);
         let rested = self.checked.is_none_or(|at| now.saturating_duration_since(at) >= CHECK_EVERY);
-        let due = (silent || self.target_is_hidden()) && rested;
+        let due = (silent || self.target_is_hidden(now)) && rested;
         if due {
             self.checked = Some(now);
         }
@@ -145,12 +150,13 @@ impl AnswerWatch {
     /// Whether answers are kept from Ping Watch as of `now`, by whichever firewall.
     pub fn blocked(&self, now: Instant) -> bool {
         let dropped = self.dropped_at.is_some_and(|at| now.saturating_duration_since(at) < EVIDENCE_KEPT);
-        dropped || self.target_is_hidden()
+        dropped || self.target_is_hidden(now)
     }
 
-    /// Whether the target's answers have stayed hidden long enough to count.
-    fn target_is_hidden(&self) -> bool {
+    /// Whether the target's answers have stayed hidden long enough to count, and did so lately as of `now`.
+    fn target_is_hidden(&self, now: Instant) -> bool {
         self.target_hidden >= HIDDEN_ANSWERS
+            && self.hidden_at.is_some_and(|at| now.saturating_duration_since(at) < EVIDENCE_KEPT)
     }
 }
 
@@ -489,7 +495,7 @@ mod tests {
         assert!(watch.check_due(after(16)), "the routers went silent");
         // The target's hidden answers ask for a reading even while routers answer.
         watch.router_heard(after(30));
-        (0..HIDDEN_ANSWERS).for_each(|_| watch.target_hidden());
+        (0..HIDDEN_ANSWERS).for_each(|_| watch.target_hidden(after(30)));
         assert!(watch.check_due(after(31)));
     }
 
@@ -515,13 +521,18 @@ mod tests {
     fn a_hidden_target_answer_counts_after_a_few_in_a_row() {
         let now = Instant::now();
         let mut watch = AnswerWatch::default();
-        watch.target_hidden();
-        watch.target_hidden();
+        watch.target_hidden(now);
+        watch.target_hidden(now);
         assert!(!watch.blocked(now), "may be a busy listener");
-        watch.target_hidden();
+        watch.target_hidden(now);
         assert!(watch.blocked(now));
+        // A target that went down connects no more: the evidence gets old.
+        let later = now.checked_add(EVIDENCE_KEPT).unwrap_or(now);
+        assert!(!watch.blocked(later));
+        watch.target_hidden(later);
+        assert!(watch.blocked(later));
         watch.target_heard();
-        assert!(!watch.blocked(now));
+        assert!(!watch.blocked(later));
     }
 
     #[test]
@@ -543,18 +554,13 @@ mod live {
     use super::*;
 
     #[test]
-    #[ignore = "needs administrator rights and the filtering engine; prints what it finds"]
+    #[ignore = "needs administrator rights and Windows Firewall on: without it Windows keeps no log of dropped packets"]
     fn the_log_and_the_firewall_state_can_be_read() {
         let engine = Engine::open().expect("the filtering engine opens");
         let layer = engine.layer_id(&FWPM_LAYER_INBOUND_ICMP_ERROR_V4).expect("the ICMP error layer is known");
         let drops = engine.drops().expect("the log is read");
         let at_layer: Vec<&Dropped> = drops.iter().filter(|dropped| dropped.layer == layer).collect();
-        println!(
-            "layer {layer}; {} drops, {} of ICMP errors; last: {:?}",
-            drops.len(),
-            at_layer.len(),
-            at_layer.last()
-        );
-        println!("Windows Firewall on: {:?}", windows_firewall_on());
+        assert!(at_layer.len() <= drops.len());
+        assert!(matches!(windows_firewall_on(), Ok(true)), "this test is for a computer with Windows Firewall on");
     }
 }
