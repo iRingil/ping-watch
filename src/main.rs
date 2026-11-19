@@ -71,6 +71,7 @@ fn main() -> anyhow::Result<()> {
     // An instance started to replace this one with administrator rights waits until the old one is gone.
     let mut hosts = elevation::wait_for_replaced(std::env::args().skip(1).collect());
     let in_tray = ui::tray::take_start_option(&mut hosts);
+    let add_rules = elevation::take_rules_option(&mut hosts);
     // A second start shows the running window instead (its hosts, if any, are not opened).
     let first_instance = match ui::single_instance::claim() {
         ui::single_instance::Claim::First(first) => Some(first),
@@ -141,7 +142,7 @@ fn main() -> anyhow::Result<()> {
             }) {
                 log::warn!("cannot handle Ctrl+C: {error}");
             }
-            Ok(Box::new(PingWatchApp::new(hosts, in_tray, tray, window_store, saved_window, quit)))
+            Ok(Box::new(PingWatchApp::new(hosts, in_tray, add_rules, tray, window_store, saved_window, quit)))
         }),
     )
     // `eframe::Error` isn't `Send + Sync`, so it can't go into `anyhow` directly.

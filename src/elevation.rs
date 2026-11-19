@@ -18,6 +18,9 @@ use windows::core::{HSTRING, w};
 
 /// Command-line option of a restarted instance: the process id of the instance it replaces.
 pub const AFTER_OPTION: &str = "--after";
+/// Command-line option of an instance restarted for TCP probes: at start it adds the Windows Firewall rules that let
+/// their answers in (the user said yes to both at once).
+pub const RULES_OPTION: &str = "--firewall-rules";
 /// How long a restarted instance waits for the old one to close before going on anyway.
 const AFTER_WAIT: Duration = Duration::from_secs(15);
 /// `ShellExecuteW` results above this mean success.
@@ -106,9 +109,9 @@ fn token_information<T>(token: HANDLE, class: TOKEN_INFORMATION_CLASS, value: &m
 }
 
 /// Starts Ping Watch again with administrator rights (Windows shows its UAC prompt); the new instance waits for
-/// this one to close, hidden to the tray if `in_tray`. Returns `false` if it didn't start (the user said no, or it
-/// failed).
-pub fn restart_elevated(in_tray: bool) -> bool {
+/// this one to close, hidden to the tray if `in_tray`, and with `add_rules` adds the Windows Firewall rules for TCP
+/// probes. Returns `false` if it didn't start (the user said no, or it failed).
+pub fn restart_elevated(in_tray: bool, add_rules: bool) -> bool {
     let Ok(exe) = std::env::current_exe() else {
         log::warn!("cannot find the program to restart");
         return false;
@@ -117,6 +120,9 @@ pub fn restart_elevated(in_tray: bool) -> bool {
     let mut parameters = format!("{AFTER_OPTION} {}", unsafe { GetCurrentProcessId() });
     if in_tray {
         parameters = format!("{parameters} {}", crate::ui::tray::START_OPTION);
+    }
+    if add_rules {
+        parameters = format!("{parameters} {RULES_OPTION}");
     }
     let parameters = HSTRING::from(parameters);
     let file = HSTRING::from(exe.as_os_str());
@@ -127,6 +133,13 @@ pub fn restart_elevated(in_tray: bool) -> bool {
         log::info!("the restart with administrator rights didn't happen ({})", result.0 as isize);
     }
     started
+}
+
+/// Takes [`RULES_OPTION`] out of `args`; returns whether it was there.
+pub fn take_rules_option(args: &mut Vec<String>) -> bool {
+    let count = args.len();
+    args.retain(|arg| arg != RULES_OPTION);
+    args.len() != count
 }
 
 /// In a restarted instance (`--after <pid>` in `args`), waits for the instance it replaces to close, so it can
@@ -172,5 +185,13 @@ mod tests {
         assert_eq!(wait_for_replaced(args(&["--after", "4294967295", "1.1.1.1"])), args(&["1.1.1.1"]));
         assert_eq!(wait_for_replaced(args(&["dns.google"])), args(&["dns.google"]));
         assert_eq!(wait_for_replaced(args(&["--after"])), args(&[]));
+    }
+
+    #[test]
+    fn the_rules_option_is_taken_out() {
+        let mut args = vec!["1.1.1.1".to_owned(), RULES_OPTION.to_owned()];
+        assert!(take_rules_option(&mut args));
+        assert_eq!(args, ["1.1.1.1"]);
+        assert!(!take_rules_option(&mut args));
     }
 }

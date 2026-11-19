@@ -8,7 +8,6 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::i18n::{Message, n};
-use crate::probe::firewall::Blocker;
 use crate::probe::icmp::{IcmpError, Pinger};
 use crate::probe::route::{MAX_TTL, ProbeOutcome, Route, RouteState, millis};
 use crate::probe::tcp::TcpProber;
@@ -224,9 +223,9 @@ impl Tracer {
         lock(&self.shared.last_error).clone()
     }
 
-    /// Who keeps the answers to this trace's TCP probes from Ping Watch, if a firewall on this computer does.
-    pub fn blocker(&self) -> Option<Blocker> {
-        self.tcp.as_ref().and_then(|(prober, target)| prober.blocker(*target))
+    /// Whether a firewall on this computer keeps the answers to this trace's TCP probes from Ping Watch.
+    pub fn answers_blocked(&self) -> bool {
+        self.tcp.as_ref().is_some_and(|(prober, target)| prober.answers_blocked(*target))
     }
 
     /// Pauses or resumes probing; statistics are kept.

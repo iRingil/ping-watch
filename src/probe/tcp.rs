@@ -26,7 +26,7 @@ use windows::Win32::Networking::WinSock::{
 };
 
 use crate::i18n::{Message, n};
-use crate::probe::firewall::{self, AnswerWatch, Blocker};
+use crate::probe::firewall::{self, AnswerWatch};
 use crate::probe::route::ProbeOutcome;
 use crate::sync::lock;
 
@@ -243,9 +243,9 @@ impl TcpProber {
         Ok(listener)
     }
 
-    /// Who keeps the answers to the probes of `target` from Ping Watch, if a firewall on this computer does.
-    pub fn blocker(&self, target: IpAddr) -> Option<Blocker> {
-        lock(&self.watches).get(&target).and_then(|watch| watch.blocker(Instant::now()))
+    /// Whether a firewall on this computer keeps the answers to the probes of `target` from Ping Watch.
+    pub fn answers_blocked(&self, target: IpAddr) -> bool {
+        lock(&self.watches).get(&target).is_some_and(|watch| watch.blocked(Instant::now()))
     }
 
     /// Forgets what the probes showed so far: firewall rules were just added, the next probes tell anew.
@@ -278,19 +278,7 @@ impl TcpProber {
             log::debug!("cannot read the log of dropped packets: {error}");
             false
         });
-        let blocked = {
-            let mut watches = lock(&self.watches);
-            let watch = watches.entry(target).or_default();
-            watch.log_read(dropped, now);
-            watch.blocked(now)
-        };
-        if blocked {
-            let windows = firewall::windows_firewall_on().unwrap_or_else(|error| {
-                log::debug!("cannot ask Windows Firewall whether it is on: {error}");
-                false
-            });
-            lock(&self.watches).entry(target).or_default().set_windows(windows);
-        }
+        lock(&self.watches).entry(target).or_default().log_read(dropped, now);
     }
 }
 

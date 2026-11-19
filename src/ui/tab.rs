@@ -15,7 +15,7 @@ use eframe::egui::{
 use crate::alerts::WindowStats;
 use crate::elevation::Rights;
 use crate::i18n::{Lang, Language, n, tr, trf};
-use crate::probe::firewall::Blocker;
+use crate::probe::firewall;
 use crate::probe::names::same_host;
 use crate::probe::names::{NameCache, ResolveError, resolve};
 use crate::probe::route::{self, Hop, Route};
@@ -72,6 +72,8 @@ pub enum Action {
     Close,
     /// Start Ping Watch again with administrator rights (for TCP probes).
     RestartElevated,
+    /// TCP probes were chosen for this tab without the administrator rights they need: ask about a restart.
+    AskTcp,
 }
 
 /// Resources the tabs share, owned by the app.
@@ -507,6 +509,20 @@ impl Tab {
         }
     }
 
+    /// Makes TCP (its usual port) the probe of this tab's target and stores it at once: Ping Watch is about to
+    /// restart with administrator rights, and the new instance traces the target by what is stored.
+    pub fn switch_to_tcp(&mut self, targets: Option<&TargetList>) {
+        self.probe = Probe::Tcp(Probe::DEFAULT_TCP_PORT);
+        let settings =
+            TraceSettings { interval: self.interval, focus: self.focus, period: self.chart_period, probe: self.probe };
+        if let Some(targets) = targets
+            && !self.host.is_empty()
+            && let Err(error) = targets.save_settings(&self.host, settings)
+        {
+            log::warn!("cannot save the settings of {}: {error}", self.host);
+        }
+    }
+
     /// Traces again when the probe chosen differs from the one the trace uses (keeping a pause), unless its port is
     /// still being edited; also when a tab waiting for administrator rights is switched to ICMP.
     fn follow_probe(&mut self) {
@@ -640,18 +656,16 @@ impl Tab {
                 .tracer
                 .last_error()
                 .map(|error| error.show(self.language))
-                .or_else(|| self.blocker().map(|blocker| self.language.translate(blocker.message()).to_owned()))
+                .or_else(|| self.answers_blocked().then(|| self.language.translate(firewall::BLOCKED).to_owned()))
                 .or_else(|| self.warning.clone()),
             State::Editing(None) | State::Resolving(_) | State::NeedsRights(_) => self.warning.clone(),
         }
     }
 
-    /// Who keeps the answers to this tab's TCP probes from Ping Watch, when that is the problem shown.
-    pub fn blocker(&self) -> Option<Blocker> {
-        match &self.state {
-            State::Running(session) if session.tracer.last_error().is_none() => session.tracer.blocker(),
-            State::Running(_) | State::Editing(_) | State::Resolving(_) | State::NeedsRights(_) => None,
-        }
+    /// Whether a firewall keeping the answers to this tab's TCP probes away is the problem shown.
+    pub fn answers_blocked(&self) -> bool {
+        matches!(&self.state, State::Running(session)
+            if session.tracer.last_error().is_none() && session.tracer.answers_blocked())
     }
 
     /// Host as entered, empty for a tab without a target.
@@ -935,8 +949,8 @@ impl Tab {
             ui.weak(tr!(ui, "Probe"));
             let choice = probe_choice(ui, &mut self.probe, rights);
             self.probe_editing = choice.editing;
-            if choice.restart_elevated {
-                action = Some(Action::RestartElevated);
+            if choice.tcp_asked {
+                action = Some(Action::AskTcp);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), latency_bars::legend);
         });
@@ -1117,22 +1131,22 @@ pub fn focus_choice(ui: &mut Ui, focus: &mut Focus) {
 pub struct ProbeChoice {
     /// The port is being edited (dragged or typed): apply it once that ends.
     pub editing: bool,
-    /// Asked to restart Ping Watch with administrator rights.
-    pub restart_elevated: bool,
+    /// TCP was chosen without the administrator rights it needs; `probe` stays as it was.
+    pub tcp_asked: bool,
 }
 
 /// Combo box choosing ICMP or TCP probes for `probe`, and the port of a TCP probe. Without administrator rights
-/// TCP can't be chosen; the list then offers to restart Ping Watch with them, in an administrator's account
-/// ([`Rights::CanElevate`]), or says an administrator's account is needed.
+/// (`rights`) choosing TCP changes nothing and is reported instead: the app asks about a restart with them.
 pub fn probe_choice(ui: &mut Ui, probe: &mut Probe, rights: Rights) -> ProbeChoice {
     let mut choice = ProbeChoice::default();
     let elevated = rights.elevated();
+    let mut chosen = *probe;
     let label = match *probe {
         Probe::Icmp => "ICMP",
         Probe::Tcp(_) => "TCP",
     };
     egui::ComboBox::from_id_salt("probe").selected_text(label).width(70.0).show_ui(ui, |ui| {
-        ui.selectable_value(probe, Probe::Icmp, "ICMP")
+        ui.selectable_value(&mut chosen, Probe::Icmp, "ICMP")
             .on_hover_text(tr!(ui, "Ping (ICMP echo), as tracert: works without administrator rights"));
         let tcp = match *probe {
             Probe::Tcp(port) => Probe::Tcp(port),
@@ -1142,22 +1156,13 @@ pub fn probe_choice(ui: &mut Ui, probe: &mut Probe, rights: Rights) -> ProbeChoi
             ui,
             "A TCP SYN to a port, as a connection starts: passes firewalls that drop ping and reaches servers that ignore it. An open port completes the connection, which Ping Watch resets at once: the server may log it"
         );
-        ui.add_enabled_ui(elevated, |ui| ui.selectable_value(probe, tcp, "TCP").on_hover_text(hint));
-        match rights {
-            Rights::Elevated => {}
-            Rights::CanElevate => {
-                ui.separator();
-                ui.weak(tr!(ui, "TCP probes need administrator rights."));
-                if ui.button(tr!(ui, "Restart as administrator")).clicked() {
-                    choice.restart_elevated = true;
-                }
-            }
-            Rights::Standard => {
-                ui.separator();
-                ui.weak(tr!(ui, "TCP probes need an administrator account."));
-            }
-        }
+        ui.selectable_value(&mut chosen, tcp, "TCP").on_hover_text(hint);
     });
+    if matches!(chosen, Probe::Tcp(_)) && !elevated {
+        choice.tcp_asked = chosen != *probe;
+    } else {
+        *probe = chosen;
+    }
     if let Probe::Tcp(port) = probe {
         let response = ui
             .add_enabled(elevated, egui::DragValue::new(port).range(1..=u16::MAX).speed(1.0))

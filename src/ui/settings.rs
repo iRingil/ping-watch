@@ -163,7 +163,7 @@ impl SettingsWindow {
         if !self.open {
             return false;
         }
-        let mut restart_elevated = false;
+        let mut tcp_asked = false;
         if self.logo.is_none() {
             self.logo = load_logo(ctx);
         }
@@ -185,7 +185,7 @@ impl SettingsWindow {
                 ui.spacing_mut().combo_width = COMBO_WIDTH;
                 match self.page {
                     Page::General => self.general(ui, settings),
-                    Page::Tracing => restart_elevated = tracing(ui, settings, rights),
+                    Page::Tracing => tcp_asked = tracing(ui, settings, rights),
                     Page::Appearance => appearance(ui, settings),
                     Page::Columns => columns(ui, tables),
                     Page::Language => language(ui, settings),
@@ -197,7 +197,7 @@ impl SettingsWindow {
         if modal.inner || modal.should_close() {
             self.open = false;
         }
-        restart_elevated
+        tcp_asked
     }
 
     /// General: what the close button does, starting with Windows.
@@ -232,11 +232,11 @@ impl SettingsWindow {
 }
 
 /// Tracing: what new targets start with (TCP probes only with administrator rights, `rights`), the probe timeout,
-/// the hop limit (how many hops are shown) and names, the history retention. Returns whether the user asked to
-/// restart with administrator rights.
+/// the hop limit (how many hops are shown) and names, the history retention. Returns whether TCP probes were
+/// chosen without those rights (the choice stays as it was).
 fn tracing(ui: &mut Ui, settings: &mut AppSettings, rights: Rights) -> bool {
     let language = ui.language();
-    let mut restart_elevated = false;
+    let mut tcp_asked = false;
     settings_grid(ui, "settings-tracing", |ui| {
         ui.weak(tr!(ui, "New targets: interval"));
         tab::interval_choice(ui, &mut settings.defaults.interval);
@@ -255,7 +255,7 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings, rights: Rights) -> bool {
         ui.end_row();
         ui.weak(tr!(ui, "New targets: probe"));
         ui.horizontal(|ui| {
-            restart_elevated = tab::probe_choice(ui, &mut settings.defaults.probe, rights).restart_elevated;
+            tcp_asked = tab::probe_choice(ui, &mut settings.defaults.probe, rights).tcp_asked;
         });
         ui.end_row();
         ui.weak(tr!(ui, "Wait for an answer"));
@@ -299,7 +299,7 @@ fn tracing(ui: &mut Ui, settings: &mut AppSettings, rights: Rights) -> bool {
         ui,
         "Targets you traced before keep their own interval, focus, period and probe. The wait for an answer applies to traces started from now on."
     ));
-    restart_elevated
+    tcp_asked
 }
 
 /// Appearance: the theme (follow Windows, dark or light) and the latency zones.

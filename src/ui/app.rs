@@ -14,9 +14,10 @@ use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Se
 use crate::alerts::{Engine, Event, Observe, Rule, WindowStats};
 use crate::elevation::Rights;
 use crate::i18n::{self, Lang, Language, tr, trf, trn};
-use crate::probe::firewall::{self, Blocker};
+use crate::probe::firewall::{self, Allowed};
 use crate::probe::names::NameCache;
 use crate::probe::tcp::TcpProber;
+use crate::probe::tracer::Probe;
 use crate::snapshot::{self, Snapshot};
 use crate::store::alerts::AlertStore;
 use crate::store::history::{self, Store};
@@ -112,6 +113,24 @@ impl Notice {
     }
 }
 
+/// What TCP probes were chosen for without the administrator rights they need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TcpFor {
+    /// The tab of this host.
+    Tab(String),
+    /// New targets (Settings).
+    NewTargets,
+}
+
+/// The question about a restart with administrator rights, open after TCP probes were chosen without them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TcpAsk {
+    /// What gets TCP probes on yes.
+    whom: TcpFor,
+    /// Whether Windows Firewall is on: then the restarted Ping Watch adds its rules by itself.
+    firewall_on: bool,
+}
+
 /// The file a snapshot was saved to, or why it wasn't.
 type SnapshotResult = Result<PathBuf, String>;
 
@@ -184,6 +203,11 @@ pub struct PingWatchApp {
     alerts_window: AlertsWindow,
     /// Host of the tab whose reset waits for the user's yes (it deletes the target's history).
     reset_asked: Option<String>,
+    /// The open question about a restart for TCP probes.
+    tcp_asked: Option<TcpAsk>,
+    /// How adding the Windows Firewall rules for TCP probes went (or why it didn't), while the window telling it
+    /// is open.
+    firewall_note: Option<Result<Allowed, String>>,
     /// The Ping Watch administrator rights, checked once at start (TCP probes need them).
     rights: Rights,
     /// The restart with administrator rights was offered by itself (a TCP target without them): once per run.
@@ -218,6 +242,7 @@ impl PingWatchApp {
     pub fn new(
         hosts: Vec<String>,
         in_tray: bool,
+        add_rules: bool,
         tray: Option<Tray>,
         window_store: Option<WindowStore>,
         saved_window: Option<WindowState>,
@@ -313,6 +338,8 @@ impl PingWatchApp {
             notifier,
             alerts_window: AlertsWindow::default(),
             reset_asked: None,
+            firewall_note: None,
+            tcp_asked: None,
             rights: crate::elevation::rights(),
             rights_asked: false,
             restarting: false,
@@ -321,7 +348,7 @@ impl PingWatchApp {
             update_check: None,
             update_retry_at: None,
             update_available: false,
-            notice: None,
+            notice: add_rules.then(|| added_rules_notice(settings.language)).flatten(),
             notified: HashMap::new(),
             pruned: None,
             snapshot_results: mpsc::channel(),
@@ -626,13 +653,97 @@ impl PingWatchApp {
                 }
             }
             Action::RestartElevated => self.restart_elevated(false),
+            Action::AskTcp => {
+                if let Some(host) = self.active_tab().map(|tab| tab.host().to_owned()) {
+                    self.ask_tcp(TcpFor::Tab(host));
+                }
+            }
         }
+    }
+
+    /// Opens the question about a restart with administrator rights: TCP probes were chosen for `whom` without
+    /// them.
+    fn ask_tcp(&mut self, whom: TcpFor) {
+        let firewall_on = firewall::windows_firewall_on().unwrap_or_else(|error| {
+            log::debug!("cannot ask Windows Firewall whether it is on: {error}");
+            false
+        });
+        self.tcp_asked = Some(TcpAsk { whom, firewall_on });
+    }
+
+    /// Says what TCP probes need ([`Self::tcp_asked`]) and asks whether to restart with administrator rights; on
+    /// yes, and once the restart is on its way, TCP becomes the probe asked for and this instance quits. In an
+    /// account without those rights it only says so.
+    fn tcp_dialog(&mut self, ctx: &egui::Context) {
+        let Some(ask) = self.tcp_asked.clone() else {
+            return;
+        };
+        let can_elevate = self.rights == Rights::CanElevate;
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::unique("tcp-rights")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.label(RichText::new(tr!(ui, "TCP probes")).font(theme::heading_font(17.0)));
+            ui.add_space(6.0);
+            ui.label(tr!(ui, "TCP probes need administrator rights and these firewall rules:"));
+            firewall_rule_list(ui);
+            ui.add_space(6.0);
+            ui.label(if !can_elevate {
+                tr!(
+                    ui,
+                    "This account has no administrator rights: sign in to an administrator's account to trace by TCP."
+                )
+            } else if ask.firewall_on {
+                tr!(ui, "Restart Ping Watch as administrator and add the rules to Windows Firewall?")
+            } else {
+                tr!(
+                    ui,
+                    "Restart Ping Watch as administrator? Windows Firewall is off: the rules are yours to add to your firewall."
+                )
+            });
+            ui.add_space(6.0);
+            settings::centered_row(ui, |ui| {
+                if can_elevate {
+                    if ui.button(tr!(ui, "Yes")).clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button(tr!(ui, "No")).clicked() {
+                        answer = Some(false);
+                    }
+                } else if ui.button(tr!(ui, "OK")).clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if modal.should_close() {
+            answer = answer.or(Some(false));
+        }
+        let Some(yes) = answer else {
+            return;
+        };
+        self.tcp_asked = None;
+        // Said no to in the UAC prompt, everything stays as it was, the probe too.
+        if !yes || !crate::elevation::restart_elevated(false, ask.firewall_on) {
+            return;
+        }
+        match ask.whom {
+            // Found by host: tabs may have moved meanwhile (one tab per address).
+            TcpFor::Tab(host) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.host() == host) {
+                    tab.switch_to_tcp(self.targets.as_ref());
+                }
+            }
+            TcpFor::NewTargets => {
+                self.settings.defaults.probe = Probe::Tcp(Probe::DEFAULT_TCP_PORT);
+                self.save_settings();
+            }
+        }
+        self.restarting = true;
     }
 
     /// Starts Ping Watch again with administrator rights (after the UAC prompt), hidden to the tray if `in_tray`,
     /// and quits this one, which saves the tabs for the new one to restore. Nothing happens if the user says no.
     fn restart_elevated(&mut self, in_tray: bool) {
-        if crate::elevation::restart_elevated(in_tray) {
+        if crate::elevation::restart_elevated(in_tray, false) {
             self.restarting = true;
         }
     }
@@ -1154,19 +1265,80 @@ impl PingWatchApp {
         .inner
     }
 
-    /// Adds the Windows Firewall rules that let the answers to TCP probes in, and says how it went.
+    /// Adds the Windows Firewall rules that let the answers to TCP probes in; [`Self::firewall_dialog`] then says
+    /// how it went.
     fn allow_in_firewall(&mut self) {
-        let language = self.settings.language;
-        self.notice = Some(match firewall::allow_answers() {
-            Ok(()) => {
-                self.tcp.rules_added();
-                Notice::done(tr!(language, "Windows Firewall rules added").to_owned())
+        let outcome = firewall::allow_answers();
+        match &outcome {
+            // The probes tell anew whether answers still go missing.
+            Ok(Allowed::Added) => self.tcp.rules_added(),
+            Ok(Allowed::FirewallOff) => {}
+            Err(error) => log::warn!("cannot add the Windows Firewall rules: {error}"),
+        }
+        self.firewall_note = Some(outcome.map_err(|error| error.to_string()));
+    }
+
+    /// Tells how adding the Windows Firewall rules went ([`Self::firewall_note`]) and which rules another firewall
+    /// needs, as only its user can add them.
+    fn firewall_dialog(&mut self, ctx: &egui::Context) {
+        let Some(note) = &self.firewall_note else {
+            return;
+        };
+        let mut closed = false;
+        let modal = egui::Modal::new(egui::Id::unique("firewall-rules")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.label(RichText::new(tr!(ui, "Firewall rules")).font(theme::heading_font(17.0)));
+            ui.add_space(6.0);
+            match note {
+                Ok(Allowed::Added) => {
+                    ui.label(tr!(ui, "The rules that let the answers in were added to Windows Firewall."));
+                }
+                Ok(Allowed::FirewallOff) => {
+                    ui.label(tr!(ui, "Windows Firewall is off, so nothing was added to it."));
+                }
+                Err(error) => {
+                    let text = trf!(ui, "The rules weren't added to Windows Firewall: {error}", error = error);
+                    ui.label(RichText::new(text).color(theme::palette(ui).bad));
+                }
             }
-            Err(error) => {
-                log::warn!("cannot add the Windows Firewall rules: {error}");
-                Notice::problem(trf!(language, "Cannot add the Windows Firewall rules: {error}", error = error))
-            }
+            ui.add_space(6.0);
+            ui.label(tr!(ui, "If another firewall is in use, add these rules to it by hand:"));
+            firewall_rule_list(ui);
+            ui.add_space(6.0);
+            settings::centered_row(ui, |ui| closed = ui.button(tr!(ui, "OK")).clicked());
         });
+        if closed || modal.should_close() {
+            self.firewall_note = None;
+        }
+    }
+}
+
+/// In an instance restarted for TCP probes: adds the Windows Firewall rules that let their answers in, as the user
+/// agreed before the restart. Returns what to tell if that failed; done or pointless (that firewall is off), there
+/// is nothing to tell.
+fn added_rules_notice(language: Language) -> Option<Notice> {
+    match firewall::allow_answers() {
+        Ok(outcome) => {
+            log::info!("Windows Firewall rules for TCP probes: {outcome:?}");
+            None
+        }
+        Err(error) => {
+            log::warn!("cannot add the Windows Firewall rules: {error}");
+            Some(Notice::problem(trf!(language, "The rules weren't added to Windows Firewall: {error}", error = error)))
+        }
+    }
+}
+
+/// The firewall rules that let the answers to TCP probes in, one per line, for the user to read (and to add by
+/// hand to a firewall Ping Watch can't change).
+fn firewall_rule_list(ui: &mut Ui) {
+    let program = std::env::current_exe().map_or_else(|_| "Ping Watch".to_owned(), |path| path.display().to_string());
+    for rule in [
+        tr!(ui, "Incoming ICMPv4, types 3 and 11, for all programs").to_owned(),
+        tr!(ui, "Incoming ICMPv6, types 1 and 3, for all programs").to_owned(),
+        trf!(ui, "Incoming TCP for {program}", program = program),
+    ] {
+        ui.label(format!("\u{2022} {rule}"));
     }
 }
 
@@ -1176,7 +1348,7 @@ impl PingWatchApp {
 fn tab_status(ui: &mut Ui, tab: &Tab) -> bool {
     if let Some(problem) = tab.problem() {
         status_problem(ui, &problem);
-        return tab.blocker() == Some(Blocker::WindowsFirewall)
+        return tab.answers_blocked()
             && ui
                 .add(Button::new(tr!(ui, "Allow")).small())
                 .on_hover_text(tr!(
@@ -1395,9 +1567,11 @@ impl eframe::App for PingWatchApp {
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
         let tables = settings::Tables { hops: &mut self.hop_columns, all_targets: self.all_targets.columns_mut() };
         if self.settings_window.show(ui.ctx(), &mut self.settings, tables, data_folder, self.rights) {
-            self.restart_elevated(false);
+            self.ask_tcp(TcpFor::NewTargets);
         }
+        self.tcp_dialog(ui.ctx());
         self.reset_dialog(ui.ctx());
+        self.firewall_dialog(ui.ctx());
         let hosts: Vec<String> =
             self.tabs.iter().map(Tab::host).filter(|host| !host.is_empty()).map(str::to_owned).collect();
         if self.alerts_window.show(ui.ctx(), self.alert_store.as_ref(), &self.alert_rules, &hosts) {

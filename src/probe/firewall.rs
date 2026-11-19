@@ -4,8 +4,8 @@
 //!
 //! What is done about it, only once probes do go unanswered: [`AnswerWatch`] keeps, per target, what the probes
 //! show; the filtering platform's log of dropped packets ([`hop_answers_dropped`]) proves that the hops' answers
-//! were dropped on this computer; [`windows_firewall_on`] tells whether Windows Firewall is the one to change;
-//! [`allow_answers`] adds the rules that let the answers in, when the user asks for them.
+//! were dropped on this computer; [`allow_answers`] adds the rules that let the answers in to Windows Firewall,
+//! when the user asks for them.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStrExt as _;
@@ -75,24 +75,9 @@ const RULES: [Rule; 3] = [
     },
 ];
 
-/// Who keeps the answers to TCP probes from Ping Watch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Blocker {
-    /// Windows Firewall, which is on: [`allow_answers`] helps.
-    WindowsFirewall,
-    /// Another firewall on this computer; its rules are the user's to change.
-    Other,
-}
-
-impl Blocker {
-    /// The problem as shown to the user, translated where it is shown.
-    pub fn message(self) -> &'static str {
-        match self {
-            Self::WindowsFirewall => n!("Windows Firewall blocks the answers to TCP probes"),
-            Self::Other => n!("A firewall on this computer blocks the answers to TCP probes"),
-        }
-    }
-}
+/// The problem as shown to the user, translated where it is shown; the text doesn't name a firewall, as which one
+/// blocks isn't known.
+pub const BLOCKED: &str = n!("A firewall may be blocking the answers to TCP probes");
 
 /// What the TCP probes of one target show about a firewall on this computer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -107,8 +92,6 @@ pub struct AnswerWatch {
     dropped_at: Option<Instant>,
     /// Probes in a row that the target answered (the connection was made) while the listener heard nothing.
     target_hidden: u8,
-    /// Whether Windows Firewall was on when a problem was last found.
-    windows: bool,
 }
 
 impl AnswerWatch {
@@ -160,20 +143,10 @@ impl AnswerWatch {
         }
     }
 
-    /// Whether answers are kept from Ping Watch as of `now`, by whoever.
+    /// Whether answers are kept from Ping Watch as of `now`, by whichever firewall.
     pub fn blocked(&self, now: Instant) -> bool {
         let dropped = self.dropped_at.is_some_and(|at| now.saturating_duration_since(at) < EVIDENCE_KEPT);
         dropped || self.target_is_hidden()
-    }
-
-    /// Notes whether Windows Firewall is on, asked when a problem is found.
-    pub fn set_windows(&mut self, on: bool) {
-        self.windows = on;
-    }
-
-    /// Who keeps answers from Ping Watch as of `now`, if anyone.
-    pub fn blocker(&self, now: Instant) -> Option<Blocker> {
-        self.blocked(now).then_some(if self.windows { Blocker::WindowsFirewall } else { Blocker::Other })
     }
 
     /// Whether the target's answers have stayed hidden long enough to count.
@@ -366,14 +339,8 @@ fn policy() -> windows::core::Result<INetFwPolicy2> {
     unsafe { CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER) }
 }
 
-/// Whether Windows Firewall is on for a network profile in use now.
-///
-/// # Errors
-///
-/// Windows' error if the firewall can't be asked (its service is off or removed).
-pub fn windows_firewall_on() -> windows::core::Result<bool> {
-    let _com = Com::init();
-    let policy = policy()?;
+/// Whether Windows Firewall is on for a network profile in use now, by its `policy`.
+fn firewall_on(policy: &INetFwPolicy2) -> windows::core::Result<bool> {
     // SAFETY: a method call on a live COM object.
     let active = unsafe { policy.CurrentProfileTypes() }?;
     for profile in [NET_FW_PROFILE2_DOMAIN, NET_FW_PROFILE2_PRIVATE, NET_FW_PROFILE2_PUBLIC] {
@@ -383,6 +350,16 @@ pub fn windows_firewall_on() -> windows::core::Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// Whether Windows Firewall is on for a network profile in use now; needs no administrator rights.
+///
+/// # Errors
+///
+/// Windows' error if the firewall can't be asked (its service is off or removed).
+pub fn windows_firewall_on() -> windows::core::Result<bool> {
+    let _com = Com::init();
+    firewall_on(&policy()?)
 }
 
 /// A Windows Firewall rule of Ping Watch: incoming, allowing, on every network profile.
@@ -412,20 +389,33 @@ pub enum AllowError {
     Windows(#[from] windows::core::Error),
 }
 
-/// Adds the Windows Firewall rules that let the answers to TCP probes in, replacing those of an earlier run (a
-/// portable copy may have moved): the routers' ICMP errors for every program, incoming TCP for Ping Watch. Needs
-/// administrator rights.
+/// What [`allow_answers`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Allowed {
+    /// The rules are in Windows Firewall.
+    Added,
+    /// Windows Firewall is off: rules in it would change nothing, so none were added.
+    FirewallOff,
+}
+
+/// Adds the Windows Firewall rules that let the answers to TCP probes in, if that firewall is on, replacing those
+/// of an earlier run (a portable copy may have moved): the routers' ICMP errors for every program, incoming TCP
+/// for Ping Watch. Needs administrator rights.
 ///
 /// # Errors
 ///
-/// [`AllowError`] if Windows Firewall refuses (no rights, its service is off).
-pub fn allow_answers() -> Result<(), AllowError> {
+/// [`AllowError`] if Windows Firewall refuses or can't be reached (no rights, its service is off).
+pub fn allow_answers() -> Result<Allowed, AllowError> {
     let program = std::env::current_exe()?;
     let _com = Com::init();
+    let policy = policy()?;
+    if !firewall_on(&policy)? {
+        return Ok(Allowed::FirewallOff);
+    }
     // SAFETY: a method call on a live COM object.
-    let rules = unsafe { policy()?.Rules() }?;
+    let rules = unsafe { policy.Rules() }?;
     RULES.iter().try_for_each(|rule| rule.add(&rules, &program))?;
-    Ok(())
+    Ok(Allowed::Added)
 }
 
 impl Rule {
@@ -507,11 +497,9 @@ mod tests {
         let after = |seconds| start.checked_add(Duration::from_secs(seconds)).unwrap_or(start);
         let mut watch = AnswerWatch::default();
         watch.log_read(false, start);
-        assert_eq!(watch.blocker(start), None);
+        assert!(!watch.blocked(start));
         watch.log_read(true, start);
-        assert_eq!(watch.blocker(after(1)), Some(Blocker::Other));
-        watch.set_windows(true);
-        assert_eq!(watch.blocker(after(60)), Some(Blocker::WindowsFirewall));
+        assert!(watch.blocked(after(60)));
         // A reading without drops doesn't clear it (probes may be far apart); time and a router's answer do.
         watch.log_read(false, after(61));
         assert!(watch.blocked(after(62)));
