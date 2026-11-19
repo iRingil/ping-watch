@@ -178,7 +178,7 @@ The history, the settings and the list of targets stay on this PC, in the file l
 ## How releases are built
 
 Every release is built from this repository by [GitHub Actions](.github/workflows/build.yml) and published by the
-[Release workflow](.github/workflows/release.yml) from the files of a tested build. The app's network use is described
+[Release workflow](.github/workflows/release.yml) from the files of a tested build, after a scan by VirusTotal (the release notes link to its reports). The app's network use is described
 in [Privacy](#privacy).
 
 ## Building from source

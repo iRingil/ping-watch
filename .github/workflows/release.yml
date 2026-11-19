@@ -75,6 +75,45 @@ jobs:
           done
           sha256sum "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip" > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      # The files are scanned before they are published. A detection by Microsoft's engine stops the release: Defender
+      # would remove the program from the users' computers. What the other engines say only goes to the log (they
+      # give false alarms on unsigned programs). The release notes link to the reports.
+      - name: Scan the files with VirusTotal
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$VT_API_KEY" ]; then echo "::error::The secret VT_API_KEY is not set"; exit 1; fi
+          api=https://www.virustotal.com/api/v3
+          # The free API takes 4 requests a minute: a wait follows every request.
+          vt() { curl -sS --fail-with-body --retry 3 --retry-delay 30 -H "x-apikey: $VT_API_KEY" "$@"; sleep 20; }
+          links=()
+          blocked=0
+          for file in "PingWatch-$VERSION-setup.exe" "PingWatch-$VERSION-portable.zip"; do
+            id=$(vt -F "file=@dist/$file" "$api/files" | jq -r '.data.id // empty')
+            if [ -z "$id" ]; then echo "::error::VirusTotal didn't take $file"; exit 1; fi
+            status=
+            for _ in $(seq 30); do
+              vt "$api/analyses/$id" > analysis.json
+              status=$(jq -r .data.attributes.status analysis.json)
+              if [ "$status" = completed ]; then break; fi
+            done
+            if [ "$status" != completed ]; then
+              echo "::error::VirusTotal hasn't finished with $file in 10 minutes: run Release again"; exit 1
+            fi
+            echo "$file: $(jq -c .data.attributes.stats analysis.json)"
+            jq -r '.data.attributes.results | to_entries[]
+              | select(.value.category == "malicious" or .value.category == "suspicious")
+              | "  \(.key): \(.value.result)"' analysis.json
+            verdict=$(jq -r '.data.attributes.results.Microsoft.category // "none"' analysis.json)
+            if [ "$verdict" = malicious ] || [ "$verdict" = suspicious ]; then
+              echo "::error::Microsoft's engine detects $file"; blocked=1
+            fi
+            case "$file" in *-setup.exe) label=installer ;; *) label="portable zip" ;; esac
+            links+=("[$label](https://www.virustotal.com/gui/file/$(sha256sum "dist/$file" | cut -d ' ' -f 1))")
+          done
+          if [ "$blocked" = 1 ]; then exit 1; fi
+          echo "**VirusTotal reports:** ${links[0]} · ${links[1]}" > virustotal.md
       # The texts come from main as it is now: a fix to them needs no new build.
       - name: Write the release notes
         env:
@@ -83,7 +122,7 @@ jobs:
           PREVIOUS: ${{ steps.version.outputs.previous }}
         run: |
           git show origin/main:.github/release-notes/header.md | sed "s/{version}/$VERSION/g" > notes.md
-          echo >> notes.md
+          { echo; cat virustotal.md; echo; } >> notes.md
           if git cat-file -e "origin/main:.github/release-notes/$VERSION.md" 2> /dev/null; then
             git show "origin/main:.github/release-notes/$VERSION.md" >> notes.md
           elif [ -n "$PREVIOUS" ]; then
