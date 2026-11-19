@@ -24,12 +24,11 @@ use windows::Win32::NetworkManagement::WindowsFirewall::{
     INetFwPolicy2, INetFwRule, INetFwRules, NET_FW_ACTION_ALLOW, NET_FW_PROFILE2_ALL, NET_FW_PROFILE2_DOMAIN,
     NET_FW_PROFILE2_PRIVATE, NET_FW_PROFILE2_PUBLIC, NET_FW_RULE_DIR_IN, NetFwPolicy2, NetFwRule,
 };
-use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 use windows::core::{BSTR, GUID, PCWSTR};
 
+use crate::com::Com;
 use crate::i18n::n;
 
 /// Hop answers count as missing once no router has answered a target's probes for this long.
@@ -304,32 +303,6 @@ fn dropped(event: &FWPM_NET_EVENT0) -> Option<Dropped> {
         remote,
         layer: drop.layerId,
     })
-}
-
-/// Keeps COM initialized for this thread as long as the value lives.
-#[derive(Debug)]
-struct Com {
-    /// Whether this value initialized COM, and so uninitializes it.
-    initialized: bool,
-}
-
-impl Com {
-    /// Initializes COM for this thread, unless the thread has it already in another mode (the window's thread):
-    /// then that one is used.
-    fn init() -> Self {
-        // SAFETY: plain initialization of COM for the calling thread, paired with `CoUninitialize` on drop.
-        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        Self { initialized: result.is_ok() }
-    }
-}
-
-impl Drop for Com {
-    fn drop(&mut self) {
-        if self.initialized {
-            // SAFETY: pairs with the successful `CoInitializeEx` of `init` on this thread.
-            unsafe { CoUninitialize() };
-        }
-    }
 }
 
 /// Windows Firewall's policy object.

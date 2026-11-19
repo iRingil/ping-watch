@@ -128,6 +128,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Focus: all", "Enfoque: todo"),
     ("Follows the Windows app theme", "Sigue el tema de aplicaciones de Windows"),
     ("Font", "Fuente"),
+    (
+        "For TCP probes. Windows asks for the rights once; from then on Task Scheduler starts Ping Watch with them at sign-in",
+        "Para las sondas TCP. Windows pide los derechos una vez; después el Programador de tareas inicia Ping Watch con ellos al iniciar sesión",
+    ),
     ("General", "General"),
     ("GitHub couldn't be reached: {error}", "No se pudo contactar con GitHub: {error}"),
     ("GitHub's answer couldn't be read: {error}", "No se pudo leer la respuesta de GitHub: {error}"),
@@ -386,6 +390,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ),
     ("Windows sign-in", "Al iniciar sesión en Windows"),
     ("With a Windows notification", "Con una notificación de Windows"),
+    ("With administrator rights", "Con derechos de administrador"),
     ("Worst", "Peor"),
     ("Yes", "Sí"),
     ("You have the latest version.", "Tiene la última versión."),

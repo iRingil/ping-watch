@@ -1,6 +1,7 @@
 //! Administrator rights: whether Ping Watch runs with them or could get them (checked once at start, no prompt),
 //! and restarting it with them through the UAC prompt. TCP probes need them; everything else works without.
 
+use std::path::Path;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
@@ -9,12 +10,13 @@ use windows::Win32::Security::{
     TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevationType, TokenElevationTypeLimited, WinBuiltinAdministratorsSid,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, INFINITE, OpenProcess, OpenProcessToken,
+    PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecuteW};
+use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 use windows::core::BOOL;
-use windows::core::{HSTRING, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 /// Command-line option of a restarted instance: the process id of the instance it replaces.
 pub const AFTER_OPTION: &str = "--after";
@@ -133,6 +135,41 @@ pub fn restart_elevated(in_tray: bool, add_rules: bool) -> bool {
         log::info!("the restart with administrator rights didn't happen ({})", result.0 as isize);
     }
     started
+}
+
+/// Runs `program` with `parameters` with administrator rights (Windows shows its UAC prompt), without a window, and
+/// waits for it to end. Returns whether it ran and ended with success; `false` also if the user said no.
+pub fn run_elevated(program: &Path, parameters: &str) -> bool {
+    let file = HSTRING::from(program.as_os_str());
+    let parameters = HSTRING::from(parameters);
+    let mut execution = SHELLEXECUTEINFOW {
+        cbSize: u32::try_from(size_of::<SHELLEXECUTEINFOW>()).unwrap_or(u32::MAX),
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..SHELLEXECUTEINFOW::default()
+    };
+    // SAFETY: the structure has its size set and holds NUL-terminated strings that live across the call.
+    if let Err(error) = unsafe { ShellExecuteExW(&raw mut execution) } {
+        log::info!("{} wasn't run with administrator rights: {error}", program.display());
+        return false;
+    }
+    let process = execution.hProcess;
+    if process.is_invalid() {
+        return false;
+    }
+    let mut code = 1_u32;
+    // SAFETY: `process` is the handle the call above returned (asked for by `SEE_MASK_NOCLOSEPROCESS`).
+    unsafe { WaitForSingleObject(process, INFINITE) };
+    // SAFETY: `process` is still open; `code` is a writable `u32`.
+    let read = unsafe { GetExitCodeProcess(process, &raw mut code) };
+    // SAFETY: `process` was opened by the call above and isn't used after this.
+    if let Err(error) = unsafe { CloseHandle(process) } {
+        log::debug!("cannot close the process handle: {error}");
+    }
+    read.is_ok() && code == 0
 }
 
 /// Takes [`RULES_OPTION`] out of `args`; returns whether it was there.

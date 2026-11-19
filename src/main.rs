@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod alerts;
+mod com;
 mod elevation;
 mod i18n;
 mod probe;
@@ -68,8 +69,13 @@ fn load_dlls_from_system32() {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     load_dlls_from_system32();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Started only to make or remove the sign-in task, with the administrator rights that takes: no window.
+    if let Some(on) = store::autostart::take_task_option(&mut args) {
+        return store::autostart::set_task(on).map_err(|error| anyhow!("the sign-in task wasn't changed: {error}"));
+    }
     // An instance started to replace this one with administrator rights waits until the old one is gone.
-    let mut hosts = elevation::wait_for_replaced(std::env::args().skip(1).collect());
+    let mut hosts = elevation::wait_for_replaced(args);
     let in_tray = ui::tray::take_start_option(&mut hosts);
     let add_rules = elevation::take_rules_option(&mut hosts);
     // A second start shows the running window instead (its hosts, if any, are not opened).

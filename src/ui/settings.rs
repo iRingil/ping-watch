@@ -9,7 +9,7 @@ use eframe::egui::{self, Align, DragValue, Grid, Layout, RichText, Ui};
 use crate::APP_NAME;
 use crate::elevation::Rights;
 use crate::i18n::{Lang, Language, Message, n, tr, trf, trn};
-use crate::store::autostart;
+use crate::store::autostart::{self, Autostart, AutostartError};
 use crate::store::settings::{AppSettings, MAX_HOPS, RETENTIONS, TIMEOUTS};
 use crate::ui::columns::ColumnWidths;
 use crate::ui::icons::{self, Icon};
@@ -96,8 +96,8 @@ pub struct SettingsWindow {
     open: bool,
     /// Page shown.
     page: Page,
-    /// Whether Windows starts the app, read from the registry when the window opens.
-    autostart: bool,
+    /// How Windows starts the app at sign-in, read when the window opens.
+    autostart: Autostart,
     /// Why reading or changing autostart failed.
     autostart_error: Option<Message>,
     /// The app logo for the About page, loaded on first show.
@@ -137,9 +137,9 @@ impl SettingsWindow {
     /// Shows the window (on the page it was left on).
     pub fn open(&mut self) {
         self.open = true;
-        match autostart::is_enabled() {
-            Ok(enabled) => {
-                self.autostart = enabled;
+        match autostart::state() {
+            Ok(state) => {
+                self.autostart = state;
                 self.autostart_error = None;
             }
             Err(error) => {
@@ -184,7 +184,7 @@ impl SettingsWindow {
                 ui.set_min_height(PAGE_HEIGHT);
                 ui.spacing_mut().combo_width = COMBO_WIDTH;
                 match self.page {
-                    Page::General => self.general(ui, settings),
+                    Page::General => self.general(ui, settings, rights),
                     Page::Tracing => tcp_asked = tracing(ui, settings, rights),
                     Page::Appearance => appearance(ui, settings),
                     Page::Columns => columns(ui, tables),
@@ -200,8 +200,22 @@ impl SettingsWindow {
         tcp_asked
     }
 
-    /// General: what the close button does, starting with Windows.
-    fn general(&mut self, ui: &mut Ui, settings: &mut AppSettings) {
+    /// Makes `wanted` the way Windows starts the app (`elevated`: this instance has administrator rights), then
+    /// reads back what is really set: the user may have said no to the rights that the sign-in task takes.
+    fn set_autostart(&mut self, wanted: Autostart, elevated: bool) {
+        let changed = autostart::set(wanted, elevated);
+        self.autostart = autostart::state().unwrap_or(self.autostart);
+        self.autostart_error = match changed {
+            Ok(()) | Err(AutostartError::Declined) => None,
+            Err(error) => {
+                Some(Message::new(n!("Starting with Windows couldn't be changed: {error}")).with("error", error))
+            }
+        };
+    }
+
+    /// General: what the close button does, starting with Windows — with administrator rights, if the user wants
+    /// (not offered in an account without them, `rights`).
+    fn general(&mut self, ui: &mut Ui, settings: &mut AppSettings, rights: Rights) {
         settings_grid(ui, "settings-general", |ui| {
             let label = tr!(ui, "Close button");
             label_first_row(ui, label, 2, ui.spacing().interact_size.y);
@@ -214,12 +228,33 @@ impl SettingsWindow {
             let hint = tr!(ui, "Once a day, in the background; Ping Watch tells you when one is out");
             ui.checkbox(&mut settings.check_updates, tr!(ui, "Check for a new version")).on_hover_text(hint);
             ui.end_row();
-            ui.weak(tr!(ui, "Windows sign-in"));
+            let label = tr!(ui, "Windows sign-in");
+            label_first_row(ui, label, 2, ui.spacing().interact_size.y);
             ui.vertical(|ui| {
-                if ui.checkbox(&mut self.autostart, tr!(ui, "Start Ping Watch")).changed() {
-                    self.autostart_error = autostart::set_enabled(self.autostart).err().map(|error| {
-                        Message::new(n!("Starting with Windows couldn't be changed: {error}")).with("error", error)
-                    });
+                let mut start = self.autostart != Autostart::Off;
+                let mut with_rights = self.autostart == Autostart::Task;
+                let mut wanted = None;
+                if ui.checkbox(&mut start, tr!(ui, "Start Ping Watch")).changed() {
+                    wanted = Some(if start { Autostart::Registry } else { Autostart::Off });
+                }
+                let hint = tr!(
+                    ui,
+                    "For TCP probes. Windows asks for the rights once; from then on Task Scheduler starts Ping Watch with them at sign-in"
+                );
+                let offered = start && rights != Rights::Standard;
+                // Indented under the box above: it is a way of starting, not a setting of its own.
+                let rights_changed = ui
+                    .horizontal(|ui| {
+                        ui.add_space(ui.spacing().indent);
+                        let rights_box = egui::Checkbox::new(&mut with_rights, tr!(ui, "With administrator rights"));
+                        ui.add_enabled(offered, rights_box).on_hover_text(hint).on_disabled_hover_text(hint).changed()
+                    })
+                    .inner;
+                if rights_changed {
+                    wanted = Some(if with_rights { Autostart::Task } else { Autostart::Registry });
+                }
+                if let Some(wanted) = wanted {
+                    self.set_autostart(wanted, rights.elevated());
                 }
                 if let Some(error) = &self.autostart_error {
                     let text = error.show(&*ui);
