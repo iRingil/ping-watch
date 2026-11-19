@@ -1265,6 +1265,27 @@ impl PingWatchApp {
         .inner
     }
 
+    /// Removes what this portable copy left in Windows outside its folder and quits (for good, whatever the close
+    /// button is set to), so nothing is written again; says why if it couldn't. A "no" to the administrator rights
+    /// it may take changes nothing.
+    fn remove_traces(&mut self, ctx: &egui::Context) {
+        match crate::traces::remove(self.rights.elevated()) {
+            Ok(()) => {
+                self.quit.store(true, Ordering::Relaxed);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(crate::traces::TracesError::Declined) => {}
+            Err(error) => {
+                log::warn!("cannot remove the traces: {error}");
+                self.notice = Some(Notice::problem(trf!(
+                    self.settings.language,
+                    "The traces weren't removed: {error}",
+                    error = error
+                )));
+            }
+        }
+    }
+
     /// Adds the Windows Firewall rules that let the answers to TCP probes in; [`Self::firewall_dialog`] then says
     /// how it went.
     fn allow_in_firewall(&mut self) {
@@ -1566,8 +1587,12 @@ impl eframe::App for PingWatchApp {
         }
         let data_folder = self.history_path.as_deref().and_then(std::path::Path::parent);
         let tables = settings::Tables { hops: &mut self.hop_columns, all_targets: self.all_targets.columns_mut() };
-        if self.settings_window.show(ui.ctx(), &mut self.settings, tables, data_folder, self.rights) {
+        let asked = self.settings_window.show(ui.ctx(), &mut self.settings, tables, data_folder, self.rights);
+        if asked.tcp {
             self.ask_tcp(TcpFor::NewTargets);
+        }
+        if asked.remove_traces {
+            self.remove_traces(ui.ctx());
         }
         self.tcp_dialog(ui.ctx());
         self.reset_dialog(ui.ctx());

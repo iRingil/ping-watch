@@ -68,35 +68,35 @@ en.ModeNormal=Normal: for this Windows user, with a Start menu shortcut and an u
 en.ModePortable=Portable: into any folder (a USB stick, for example); settings and history stay in that folder
 en.DeleteUserData=Delete the settings and the history of {#AppName} as well?
 en.StillRunning={#AppName} is still running and couldn't be closed. Quit it (its icon in the notification area → Exit), then run this again.
-en.SignInTaskLeft=The task that starts {#AppName} with administrator rights at sign-in is still in Task Scheduler: “%1”. Delete it there by hand.
+en.PrivilegedLeft=Something {#AppName} set up with administrator rights is still there: its sign-in task “%1” in Task Scheduler, or its rules in Windows Firewall. Remove them there by hand.
 ru.ModeCaption=Тип установки
 ru.ModeDescription=Как установить {#AppName}?
 ru.ModeNormal=Обычная: для этого пользователя Windows, с ярлыком в меню «Пуск» и деинсталлятором
 ru.ModePortable=Портативная: в любую папку (например, на флешку); настройки и история остаются в этой папке
 ru.DeleteUserData=Удалить также настройки и историю {#AppName}?
 ru.StillRunning={#AppName} всё ещё работает, и закрыть его не удалось. Закройте его (значок в области уведомлений → «Выход») и запустите это снова.
-ru.SignInTaskLeft=Задача, которая запускает {#AppName} с правами администратора при входе в систему, осталась в Планировщике заданий: «%1». Удалите её там вручную.
+ru.PrivilegedLeft=Кое-что из того, что {#AppName} настроил с правами администратора, осталось: задача входа «%1» в Планировщике заданий или его правила в брандмауэре Windows. Удалите их там вручную.
 de.ModeCaption=Installationsart
 de.ModeDescription=Wie soll {#AppName} installiert werden?
 de.ModeNormal=Normal: für diesen Windows-Benutzer, mit Startmenü-Verknüpfung und Deinstallationsprogramm
 de.ModePortable=Portabel: in einen beliebigen Ordner (z. B. einen USB-Stick); Einstellungen und Verlauf bleiben dort
 de.DeleteUserData=Auch die Einstellungen und den Verlauf von {#AppName} löschen?
 de.StillRunning={#AppName} läuft noch und konnte nicht geschlossen werden. Beenden Sie es (Symbol im Infobereich → Beenden) und starten Sie dies dann erneut.
-de.SignInTaskLeft=Die Aufgabe, die {#AppName} bei der Anmeldung mit Administratorrechten startet, ist noch in der Aufgabenplanung: „%1“. Löschen Sie sie dort von Hand.
+de.PrivilegedLeft=Etwas, das {#AppName} mit Administratorrechten eingerichtet hat, ist noch da: die Anmeldeaufgabe „%1“ in der Aufgabenplanung oder seine Regeln in der Windows-Firewall. Entfernen Sie sie dort von Hand.
 fr.ModeCaption=Type d’installation
 fr.ModeDescription=Comment installer {#AppName} ?
 fr.ModeNormal=Normale : pour cet utilisateur Windows, avec un raccourci dans le menu Démarrer et un programme de désinstallation
 fr.ModePortable=Portable : dans n’importe quel dossier (une clé USB, par exemple) ; réglages et historique restent dans ce dossier
 fr.DeleteUserData=Supprimer aussi les réglages et l’historique de {#AppName} ?
 fr.StillRunning={#AppName} est toujours en cours d’exécution et n’a pas pu être fermé. Quittez-le (son icône dans la zone de notification → Quitter), puis relancez ceci.
-fr.SignInTaskLeft=La tâche qui lance {#AppName} avec des droits d’administrateur à l’ouverture de session est toujours dans le Planificateur de tâches : « %1 ». Supprimez-la à la main.
+fr.PrivilegedLeft=Une partie de ce que {#AppName} a mis en place avec des droits d’administrateur est toujours là : sa tâche d’ouverture de session « %1 » dans le Planificateur de tâches, ou ses règles dans le pare-feu Windows. Supprimez-les à la main.
 es.ModeCaption=Tipo de instalación
 es.ModeDescription=¿Cómo instalar {#AppName}?
 es.ModeNormal=Normal: para este usuario de Windows, con acceso directo en el menú Inicio y desinstalador
 es.ModePortable=Portátil: en cualquier carpeta (una memoria USB, por ejemplo); la configuración y el historial se quedan en ella
 es.DeleteUserData=¿Eliminar también la configuración y el historial de {#AppName}?
 es.StillRunning={#AppName} sigue en ejecución y no se pudo cerrar. Ciérrelo (su icono en el área de notificación → Salir) y vuelva a ejecutar esto.
-es.SignInTaskLeft=La tarea que inicia {#AppName} con derechos de administrador al iniciar sesión sigue en el Programador de tareas: «%1». Elimínela allí a mano.
+es.PrivilegedLeft=Algo de lo que {#AppName} configuró con derechos de administrador sigue ahí: su tarea de inicio de sesión «%1» en el Programador de tareas o sus reglas en el Firewall de Windows. Elimínelas allí a mano.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; Check: not IsPortable
@@ -227,21 +227,46 @@ begin
   end;
 end;
 
-// Removes the Task Scheduler task with which the program starts itself with administrator rights at sign-in
-// (src/store/autostart.rs), if the user turned that on: left behind, it would run whatever is put where the program
-// was, with those rights. Removing it needs them, so the program is run with them to do it (Windows asks: UAC);
-// said no to, the user is told the task is still there.
-procedure RemoveSignInTask;
+// Whether Windows Firewall holds any of the rules the program adds for its TCP probes (src/probe/firewall.rs).
+function FirewallRulesExist: Boolean;
+var
+  Policy, Rules: Variant;
+  Names: array [0..2] of String;
+  I: Integer;
+begin
+  Result := False;
+  Names[0] := '{#AppName} - Hop answers (ICMPv4-In)';
+  Names[1] := '{#AppName} - Hop answers (ICMPv6-In)';
+  Names[2] := '{#AppName} - Target answers (TCP-In)';
+  try
+    Policy := CreateOleObject('HNetCfg.FwPolicy2');
+    Rules := Policy.Rules;
+  except
+    Exit;
+  end;
+  for I := 0 to 2 do
+    try
+      Rules.Item(Names[I]);
+      Result := True;
+    except
+    end;
+end;
+
+// Removes what the program set up with administrator rights, if the user had it do so: the Task Scheduler task that
+// starts it with them at sign-in (src/store/autostart.rs) and its Windows Firewall rules. Left behind, the task and
+// the rule for the program's path would serve whatever is put where the program was. Removing them needs the same
+// rights, so the program is run with them to do it (Windows asks: UAC); said no to, the user is told what is left.
+procedure RemovePrivileged;
 var
   Task: String;
   Code: Integer;
 begin
   Task := '{#AppName} (' + GetUserNameString + ')';
-  if not TaskExists(Task) then
+  if not (TaskExists(Task) or FirewallRulesExist) then
     Exit;
-  ShellExec('runas', ExpandConstant('{app}\{#AppExeName}'), '--sign-in-task off', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  if TaskExists(Task) then
-    SuppressibleMsgBox(FmtMessage(CustomMessage('SignInTaskLeft'), [Task]), mbError, MB_OK, IDOK);
+  ShellExec('runas', ExpandConstant('{app}\{#AppExeName}'), '--remove-traces', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if TaskExists(Task) or FirewallRulesExist then
+    SuppressibleMsgBox(FmtMessage(CustomMessage('PrivilegedLeft'), [Task]), mbError, MB_OK, IDOK);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -250,7 +275,7 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
-    RemoveSignInTask;
+    RemovePrivileged;
     // "Start with Windows" from the settings would otherwise point at a removed program.
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#AppName}');
     // The program registers itself for notifications on first start.

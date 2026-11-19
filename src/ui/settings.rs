@@ -100,10 +100,21 @@ pub struct SettingsWindow {
     autostart: Autostart,
     /// Why reading or changing autostart failed.
     autostart_error: Option<Message>,
+    /// Whether this is a portable copy, read when the window opens.
+    portable: bool,
     /// The app logo for the About page, loaded on first show.
     logo: Option<egui::TextureHandle>,
     /// The update check: running, or its last result.
     update: UpdateState,
+}
+
+/// What the user asked for in the Settings window that the app carries out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Asked {
+    /// TCP probes were chosen for new targets without the administrator rights they need.
+    pub tcp: bool,
+    /// To remove this portable copy's traces from Windows and quit.
+    pub remove_traces: bool,
 }
 
 /// Where the update check is.
@@ -127,6 +138,7 @@ impl std::fmt::Debug for SettingsWindow {
             .field("page", &self.page)
             .field("autostart", &self.autostart)
             .field("autostart_error", &self.autostart_error)
+            .field("portable", &self.portable)
             .field("logo", &self.logo.is_some())
             .field("update", &self.update)
             .finish()
@@ -137,6 +149,7 @@ impl SettingsWindow {
     /// Shows the window (on the page it was left on).
     pub fn open(&mut self) {
         self.open = true;
+        self.portable = crate::store::history::is_portable();
         match autostart::state() {
             Ok(state) => {
                 self.autostart = state;
@@ -150,8 +163,7 @@ impl SettingsWindow {
     }
 
     /// Draws the window if it is open; `settings` are changed in place. `data_folder` is where the history lives;
-    /// `rights` tell whether TCP probes can be chosen. Returns whether the user asked to restart Ping Watch with
-    /// administrator rights.
+    /// `rights` tell whether TCP probes can be chosen. Returns what the user asked for that the app carries out.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -159,11 +171,11 @@ impl SettingsWindow {
         tables: Tables<'_>,
         data_folder: Option<&Path>,
         rights: Rights,
-    ) -> bool {
+    ) -> Asked {
+        let mut asked = Asked::default();
         if !self.open {
-            return false;
+            return asked;
         }
-        let mut tcp_asked = false;
         if self.logo.is_none() {
             self.logo = load_logo(ctx);
         }
@@ -184,8 +196,8 @@ impl SettingsWindow {
                 ui.set_min_height(PAGE_HEIGHT);
                 ui.spacing_mut().combo_width = COMBO_WIDTH;
                 match self.page {
-                    Page::General => self.general(ui, settings, rights),
-                    Page::Tracing => tcp_asked = tracing(ui, settings, rights),
+                    Page::General => asked.remove_traces = self.general(ui, settings, rights),
+                    Page::Tracing => asked.tcp = tracing(ui, settings, rights),
                     Page::Appearance => appearance(ui, settings),
                     Page::Columns => columns(ui, tables),
                     Page::Language => language(ui, settings),
@@ -197,7 +209,7 @@ impl SettingsWindow {
         if modal.inner || modal.should_close() {
             self.open = false;
         }
-        tcp_asked
+        asked
     }
 
     /// Makes `wanted` the way Windows starts the app (`elevated`: this instance has administrator rights), then
@@ -214,8 +226,10 @@ impl SettingsWindow {
     }
 
     /// General: what the close button does, starting with Windows — with administrator rights, if the user wants
-    /// (not offered in an account without them, `rights`).
-    fn general(&mut self, ui: &mut Ui, settings: &mut AppSettings, rights: Rights) {
+    /// (not offered in an account without them, `rights`) — and, in a portable copy, removing its traces from
+    /// Windows. Returns whether that was asked for.
+    fn general(&mut self, ui: &mut Ui, settings: &mut AppSettings, rights: Rights) -> bool {
+        let mut remove_traces = false;
         settings_grid(ui, "settings-general", |ui| {
             let label = tr!(ui, "Close button");
             label_first_row(ui, label, 2, ui.spacing().interact_size.y);
@@ -262,7 +276,17 @@ impl SettingsWindow {
                 }
             });
             ui.end_row();
+            if self.portable {
+                let hint = tr!(
+                    ui,
+                    "Before deleting this copy: removes what it left in Windows (autostart, firewall rules, its notification settings) and quits. Its folder stays, with the settings and the history"
+                );
+                ui.weak(tr!(ui, "Portable copy")).on_hover_text(hint);
+                remove_traces = ui.button(tr!(ui, "Remove traces and quit")).on_hover_text(hint).clicked();
+                ui.end_row();
+            }
         });
+        remove_traces
     }
 }
 

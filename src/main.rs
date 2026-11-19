@@ -14,6 +14,7 @@ mod probe;
 mod snapshot;
 mod store;
 mod sync;
+mod traces;
 mod ui;
 mod update;
 
@@ -73,6 +74,10 @@ fn main() -> anyhow::Result<()> {
     // Started only to make or remove the sign-in task, with the administrator rights that takes: no window.
     if let Some(on) = store::autostart::take_task_option(&mut args) {
         return store::autostart::set_task(on).map_err(|error| anyhow!("the sign-in task wasn't changed: {error}"));
+    }
+    // Started only to remove the task and the firewall rules of a portable copy, likewise.
+    if traces::take_option(&mut args) {
+        return traces::remove_privileged().map_err(|error| anyhow!("the traces weren't removed: {error}"));
     }
     // An instance started to replace this one with administrator rights waits until the old one is gone.
     let mut hosts = elevation::wait_for_replaced(args);

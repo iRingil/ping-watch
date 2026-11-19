@@ -126,6 +126,14 @@ pub const PORTABLE_MARKER: &str = "portable.txt";
 /// Folder of a portable copy's data, next to the executable.
 const PORTABLE_DATA: &str = "userdata";
 
+/// Whether this is a portable copy: [`PORTABLE_MARKER`] lies beside the executable.
+pub fn is_portable() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(PORTABLE_MARKER)))
+        .is_some_and(|marker| marker.is_file())
+}
+
 /// Default database location: `userdata\history.sqlite` next to the executable of a portable copy (one with
 /// [`PORTABLE_MARKER`] beside it), otherwise `%LOCALAPPDATA%\Ping Watch\history.sqlite`.
 ///

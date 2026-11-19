@@ -74,12 +74,13 @@ stands out at once. It keeps the history, so you can look back at what happened 
   many are hidden, then the last hops. Tracing itself always goes up to 40 hops.
 - **ICMP or TCP.** Hops are probed with pings, or, for a server that ignores pings or a network whose firewall drops
   them, with TCP connection requests to a port of your choice (443 by default), over IPv4 and IPv6. TCP needs no
-  packet driver, only administrator rights: without them it is greyed out, with a button that restarts Ping Watch as
-  administrator. The whole app then runs as administrator. A target traced by TCP before asks for these rights as
-  soon as Ping Watch starts without them; said no to, it stays stopped (never traced by ICMP in its place) and its
-  tab and All targets tell why. In a Windows account without administrator rights, TCP isn't available. An open port
-  answers with a full connection, which Ping Watch resets at once: a server may log these connections, and strict
-  rules (fail2ban and the like) may count them as attempts.
+  packet driver, only administrator rights and a few firewall rules: choosing TCP without the rights asks whether to
+  restart Ping Watch as administrator, and the restarted app adds the rules to Windows Firewall by itself (see
+  [TCP probes and firewalls](#tcp-probes-and-firewalls)). The whole app then runs as administrator. A target traced
+  by TCP before asks for these rights as soon as Ping Watch starts without them; said no to, it stays stopped (never
+  traced by ICMP in its place) and its tab and All targets tell why. In a Windows account without administrator
+  rights, TCP isn't available. An open port answers with a full connection, which Ping Watch resets at once: a
+  server may log these connections, and strict rules (fail2ban and the like) may count them as attempts.
 - **History.** Every probe is stored on this PC. Tick hops in the table (or double-click their rows) to chart their
   latency, jitter and loss one under another, over the last minute to the last seven days; a slider goes back in
   time, and comments can be pinned to a moment; a change of probe is marked on the chart by itself. Reset and
@@ -113,24 +114,46 @@ The app is not code-signed yet, so Windows SmartScreen may warn about it: click 
 sure the file is the one GitHub built, compare its SHA-256 with `SHA256SUMS.txt` of the release, or check its build
 provenance with `gh attestation verify PingWatch-<version>-setup.exe -R iRingil/ping-watch`.
 
+### TCP probes and firewalls
+
+The answers to TCP probes come to Ping Watch as unasked-for incoming traffic, which a firewall on the PC drops
+without a rule: the hops then show no response (their answers are ICMP errors), or the target does too. Ping Watch
+notices and says "A firewall may be blocking the answers to TCP probes" in the status bar, with an **Allow** button.
+The rules that let the answers in:
+
+- incoming ICMPv4, types 3 (destination unreachable) and 11 (time exceeded), for all programs;
+- incoming ICMPv6, types 1 (destination unreachable) and 3 (time exceeded), for all programs;
+- incoming TCP for `PingWatch.exe`.
+
+**Allow** adds them to Windows Firewall, if that is the one in use (group "Ping Watch" in Windows Defender Firewall
+with Advanced Security), as does the restart as administrator that choosing TCP offers. Another firewall needs the
+same rules added by hand; the window that Allow opens lists them with the program's path. The ICMP rules are for
+all programs because Windows doesn't apply a program's rule to these messages.
+
 ### Where the app keeps its files
 
 |                                                    | Normal installation                                          | Portable copy                                 |
 |----------------------------------------------------|--------------------------------------------------------------|-----------------------------------------------|
 | Probe history, settings, targets, window and tabs  | `%LOCALAPPDATA%\Ping Watch\history.sqlite`                   | `userdata\history.sqlite` in the app's folder |
 | Start with Windows, when turned on in the settings | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`         | the same                                      |
+| ...with administrator rights, when turned on       | the task `Ping Watch (<user>)` in Task Scheduler             | the same                                      |
+| Firewall rules for TCP probes, when you allow them | group "Ping Watch" in Windows Firewall                       | the same                                      |
 | Name and icon of the app's notifications           | `HKCU\Software\Classes\AppUserModelId\iRingil.PingWatch`     | the same                                      |
 
 The history keeps the last seven days by default (Settings → Tracing → Keep history for). A portable copy is a folder
 with `portable.txt` next to `PingWatch.exe`: delete that file, and the copy keeps its data in the user profile
 instead.
 
-A portable copy writes the same two registry entries as a normal installation, both for the current user only:
-starting with Windows is a value under `Run` (not a shortcut in the Startup folder), and Windows shows notifications
-under the app's name and icon only when they are registered under `AppUserModelId`. To remove a portable copy, turn
-off "Start with Windows" in the settings, delete the folder and, if you like, the `AppUserModelId\iRingil.PingWatch`
-key. Uninstalling a normal installation removes both entries and asks whether to delete the history and the settings
-as well.
+A portable copy leaves the same things in Windows as a normal installation. Starting with Windows is a value under
+`Run` for the current user (not a shortcut in the Startup folder) or, with "With administrator rights" ticked, a
+Task Scheduler task that starts the app with them at sign-in, so that Windows asks for them once and not every
+time. Windows shows notifications under the app's name and icon only when they are registered under
+`AppUserModelId`. The firewall rules are there only if you had them added.
+
+To remove a portable copy, click **Remove traces and quit** in Settings → General, then delete the folder. It
+removes all of the above and the app's entry among the notification area icons; where the task or the firewall
+rules exist, Windows asks for administrator rights. Uninstalling a normal installation does the same and asks
+whether to delete the history and the settings as well.
 
 ## Privacy
 

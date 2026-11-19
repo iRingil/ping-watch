@@ -407,6 +407,7 @@ impl AllTargets {
                     "{n} TCP target is stopped: it needs administrator rights|{n} TCP targets are stopped: they need administrator rights"
                 );
                 ui.label(RichText::new(text).color(theme::palette(ui).bad));
+                ui.add_space(8.0);
                 if rights == Rights::CanElevate && ui.button(tr!(ui, "Restart as administrator")).clicked() {
                     request = Some(Request::RestartElevated);
                 }

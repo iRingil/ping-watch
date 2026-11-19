@@ -184,8 +184,17 @@ fn root_folder(service: &ITaskService) -> windows::core::Result<ITaskFolder> {
     unsafe { service.GetFolder(&BSTR::from(r"\")) }
 }
 
+/// Removes the `Run` value, if it is there.
+///
+/// # Errors
+///
+/// [`AutostartError`] if the registry refuses.
+pub fn remove_run_value() -> Result<(), AutostartError> {
+    set_run_value(false)
+}
+
 /// Whether the task exists (as far as this instance can see it).
-fn task_exists() -> bool {
+pub fn task_exists() -> bool {
     let _com = Com::init();
     // SAFETY: a method call on a live COM object with a string that lives across the call.
     service()

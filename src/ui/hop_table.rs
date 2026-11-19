@@ -106,6 +106,7 @@ pub struct Clicks {
 /// shown, those after the first hop beyond it are folded into one row. Hop names come from `names`, the `selected` hop is
 /// highlighted, the `charted` hops have their checkbox ticked, `focus` labels the period under the bars. The
 /// columns can be dragged wider or narrower and hidden from the header's right-click menu; `columns` keeps them.
+/// With `blocked` (a firewall on this computer may keep the answers to TCP probes away) the silent hops say so.
 #[expect(clippy::too_many_arguments, reason = "the table's inputs, all needed every frame")]
 pub fn show(
     ui: &mut Ui,
@@ -115,6 +116,7 @@ pub fn show(
     selected: Option<u8>,
     charted: &[u8],
     focus: Option<&str>,
+    blocked: bool,
     columns: &mut ColumnWidths,
 ) -> Clicks {
     let (head, tail) = route.map_or((&[][..], &[][..]), |route| route.shown(limit));
@@ -180,7 +182,7 @@ pub fn show(
                     body.row(ROW_HEIGHT, |mut row| {
                         row.set_selected(selected == Some(hop.ttl));
                         let mut ticked = charted.contains(&hop.ttl);
-                        averages.extend(hop_row(&mut row, &shown, hop, names, scale_ms, &mut ticked));
+                        averages.extend(hop_row(&mut row, &shown, hop, names, scale_ms, blocked, &mut ticked));
                         let response = row.response();
                         if ticked != charted.contains(&hop.ttl) || response.double_clicked() {
                             clicks.charted = Some(hop.ttl);
@@ -204,14 +206,15 @@ pub fn show(
     clicks
 }
 
-/// Fills in the row of one hop (the `shown` columns), with its chart checkbox `ticked`; returns the position of
-/// its average latency marker, if drawn.
+/// Fills in the row of one hop (the `shown` columns), with its chart checkbox `ticked`; a silent hop says a
+/// firewall may be why if `blocked`. Returns the position of its average latency marker, if drawn.
 fn hop_row(
     row: &mut TableRow<'_, '_>,
     shown: &[bool],
     hop: &Hop,
     names: &NameCache,
     scale_ms: f64,
+    blocked: bool,
     ticked: &mut bool,
 ) -> Option<Pos2> {
     columns::cell(row, shown, 0, |ui| {
@@ -237,7 +240,10 @@ fn hop_row(
         }
         None => {
             columns::cell(row, shown, 2, |ui| cell(ui, false, "*"));
-            columns::cell(row, shown, NAME_COLUMN, |ui| cell(ui, false, tr!(ui, "No response")));
+            columns::cell(row, shown, NAME_COLUMN, |ui| {
+                let silent = if blocked { tr!(ui, "Blocked by a firewall?") } else { tr!(ui, "No response") };
+                cell(ui, false, silent)
+            });
         }
     }
     stat_cols(row, shown, &hop.stats, false);

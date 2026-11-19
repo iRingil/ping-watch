@@ -12,7 +12,7 @@ use crate::APP_NAME;
 /// The app's AppUserModelID.
 const APP_ID: &str = "iRingil.PingWatch";
 /// Registry key of the registration.
-const REGISTRATION_KEY: &str = r"Software\Classes\AppUserModelId\iRingil.PingWatch";
+pub const REGISTRATION_KEY: &str = r"Software\Classes\AppUserModelId\iRingil.PingWatch";
 
 /// Shows notifications under the app's name.
 #[derive(Debug, Clone)]

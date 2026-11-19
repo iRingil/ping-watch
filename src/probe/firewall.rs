@@ -391,6 +391,35 @@ pub fn allow_answers() -> Result<Allowed, AllowError> {
     Ok(Allowed::Added)
 }
 
+/// Whether Windows Firewall holds any of the rules of Ping Watch; needs no administrator rights.
+pub fn rules_exist() -> bool {
+    let _com = Com::init();
+    // SAFETY: method calls on live COM objects with strings that live across each call.
+    policy()
+        .and_then(|policy| unsafe { policy.Rules() })
+        .is_ok_and(|rules| RULES.iter().any(|rule| unsafe { rules.Item(&BSTR::from(rule.name)) }.is_ok()))
+}
+
+/// Removes the rules of Ping Watch from Windows Firewall, those that are there. Needs administrator rights.
+///
+/// # Errors
+///
+/// Windows' error if Windows Firewall refuses (no rights) or can't be reached.
+pub fn remove_rules() -> windows::core::Result<()> {
+    let _com = Com::init();
+    // SAFETY: a method call on a live COM object.
+    let rules = unsafe { policy()?.Rules() }?;
+    for rule in RULES {
+        let name = BSTR::from(rule.name);
+        // SAFETY: method calls on a live COM object with a string that lives across each call.
+        if unsafe { rules.Item(&name) }.is_ok() {
+            // SAFETY: as above.
+            unsafe { rules.Remove(&name) }?;
+        }
+    }
+    Ok(())
+}
+
 impl Rule {
     /// Puts the rule into `rules`, in place of one of the same name; `program` is the executable of Ping Watch.
     fn add(&self, rules: &INetFwRules, program: &Path) -> windows::core::Result<()> {

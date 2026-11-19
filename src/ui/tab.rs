@@ -693,7 +693,8 @@ impl Tab {
         let State::Running(session) = &self.state else {
             return None;
         };
-        if session.tracer.is_paused() {
+        // Answers kept away by a firewall on this computer aren't the target's losses: no alerts on them.
+        if session.tracer.is_paused() || session.tracer.answers_blocked() {
             return None;
         }
         let now_ms = history::unix_ms(SystemTime::now());
@@ -801,7 +802,7 @@ impl Tab {
             State::Editing(Some(error)) => error.clone(),
             State::Editing(None) => tr!(self.language, "no target").to_owned(),
             State::Resolving(_) => tr!(self.language, "resolving…").to_owned(),
-            State::NeedsRights(_) => tr!(self.language, "needs admin rights").to_owned(),
+            State::NeedsRights(_) => tr!(self.language, "no rights").to_owned(),
             State::Running(session) => {
                 let state = if session.tracer.is_paused() {
                     tr!(self.language, "paused")
@@ -892,6 +893,7 @@ impl Tab {
             .map(|route| self.charts.iter().filter_map(|chart| chart_ttl(chart.hop, route)).collect())
             .unwrap_or_default();
         let needs_rights = self.needs_rights();
+        let blocked = self.answers_blocked();
         pane(ui, table_rect, Margin::same(1), |ui| {
             if needs_rights {
                 if needs_rights_notice(ui, context.rights) {
@@ -900,8 +902,17 @@ impl Tab {
                 return;
             }
             let focus = route.as_ref().and_then(focus_range).map(|range| trf!(ui, "Focus {range}", range = range));
-            let clicks =
-                hop_table::show(ui, route.as_ref(), limit, context.names, ttl, &charted, focus.as_deref(), columns);
+            let clicks = hop_table::show(
+                ui,
+                route.as_ref(),
+                limit,
+                context.names,
+                ttl,
+                &charted,
+                focus.as_deref(),
+                blocked,
+                columns,
+            );
             if let Some(selected) = clicks.selected {
                 self.selected_ttl = Some(selected);
             }
@@ -1188,7 +1199,7 @@ pub fn needs_rights_notice(ui: &mut Ui, rights: Rights) -> bool {
         } else {
             ui.label(tr!(ui, "The trace is stopped. Restart Ping Watch as administrator, or choose ICMP above."));
             ui.add_space(8.0);
-            restart = icons::button(ui, Icon::Play, Style::Primary, tr!(ui, "Restart as administrator")).clicked();
+            restart = ui.button(tr!(ui, "Restart as administrator")).clicked();
         }
     });
     restart
