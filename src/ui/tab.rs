@@ -15,6 +15,7 @@ use eframe::egui::{
 use crate::alerts::WindowStats;
 use crate::elevation::Rights;
 use crate::i18n::{Lang, Language, n, tr, trf};
+use crate::probe::firewall::Blocker;
 use crate::probe::names::same_host;
 use crate::probe::names::{NameCache, ResolveError, resolve};
 use crate::probe::route::{self, Hop, Route};
@@ -629,15 +630,27 @@ impl Tab {
         Some(session.tracer.snapshot(focus.range(visible, now_ms)))
     }
 
-    /// Problem to show in the status bar, if any: a failed start, a probing failure (network down) — which matters
-    /// more than the history warning — or the history warning.
+    /// Problem to show in the status bar, if any: a failed start, a probing failure (network down), a firewall on
+    /// this computer keeping the answers to TCP probes away — which matter more than the history warning — or the
+    /// history warning.
     pub fn problem(&self) -> Option<String> {
         match &self.state {
             State::Editing(Some(error)) => Some(error.clone()),
-            State::Running(session) => {
-                session.tracer.last_error().map(|error| error.show(self.language)).or_else(|| self.warning.clone())
-            }
+            State::Running(session) => session
+                .tracer
+                .last_error()
+                .map(|error| error.show(self.language))
+                .or_else(|| self.blocker().map(|blocker| self.language.translate(blocker.message()).to_owned()))
+                .or_else(|| self.warning.clone()),
             State::Editing(None) | State::Resolving(_) | State::NeedsRights(_) => self.warning.clone(),
+        }
+    }
+
+    /// Who keeps the answers to this tab's TCP probes from Ping Watch, when that is the problem shown.
+    pub fn blocker(&self) -> Option<Blocker> {
+        match &self.state {
+            State::Running(session) if session.tracer.last_error().is_none() => session.tracer.blocker(),
+            State::Running(_) | State::Editing(_) | State::Resolving(_) | State::NeedsRights(_) => None,
         }
     }
 

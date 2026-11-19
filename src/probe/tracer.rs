@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::i18n::{Message, n};
+use crate::probe::firewall::Blocker;
 use crate::probe::icmp::{IcmpError, Pinger};
 use crate::probe::route::{MAX_TTL, ProbeOutcome, Route, RouteState, millis};
 use crate::probe::tcp::TcpProber;
@@ -177,6 +178,8 @@ impl Shared {
 pub struct Tracer {
     /// State shared with the workers.
     shared: Arc<Shared>,
+    /// For a trace by TCP probes: the app's prober and the target, to ask about a firewall on this computer.
+    tcp: Option<(Arc<TcpProber>, IpAddr)>,
 }
 
 impl Tracer {
@@ -199,7 +202,7 @@ impl Tracer {
             last_error: Mutex::new(None),
         });
         // Made before spawning, so that an early error drops it and stops the workers already started.
-        let tracer = Self { shared };
+        let tracer = Self { shared, tcp: matches!(config.probe, Probe::Tcp(_)).then(|| (Arc::clone(tcp), target)) };
         for ttl in 1..=config.max_ttl {
             let prober = Prober::new(config.probe, target, tcp)?;
             let shared = Arc::clone(&tracer.shared);
@@ -219,6 +222,11 @@ impl Tracer {
     /// Error of the latest failed probe (network down, ...), `None` once probes get answers again.
     pub fn last_error(&self) -> Option<Message> {
         lock(&self.shared.last_error).clone()
+    }
+
+    /// Who keeps the answers to this trace's TCP probes from Ping Watch, if a firewall on this computer does.
+    pub fn blocker(&self) -> Option<Blocker> {
+        self.tcp.as_ref().and_then(|(prober, target)| prober.blocker(*target))
     }
 
     /// Pauses or resumes probing; statistics are kept.

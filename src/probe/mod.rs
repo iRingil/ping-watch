@@ -1,5 +1,6 @@
 //! The network side: ICMP and TCP probes, the tracer with its per-hop statistics, and name resolution.
 
+pub mod firewall;
 pub mod icmp;
 pub mod names;
 pub mod route;

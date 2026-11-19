@@ -15,7 +15,7 @@ use std::os::windows::io::AsRawSocket as _;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use windows::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
@@ -26,6 +26,7 @@ use windows::Win32::Networking::WinSock::{
 };
 
 use crate::i18n::{Message, n};
+use crate::probe::firewall::{self, AnswerWatch, Blocker};
 use crate::probe::route::ProbeOutcome;
 use crate::sync::lock;
 
@@ -145,6 +146,8 @@ struct Waiting {
 pub struct TcpProber {
     /// Listeners by local address (one per network interface and address family in use).
     listeners: Mutex<HashMap<IpAddr, Arc<Listener>>>,
+    /// What the probes of each target show about a firewall on this computer keeping their answers away.
+    watches: Mutex<HashMap<IpAddr, AnswerWatch>>,
 }
 
 impl TcpProber {
@@ -184,6 +187,9 @@ impl TcpProber {
         let (sender, receiver) = mpsc::channel();
         let listener = self.register(local, key, sender)?;
         let sent = Instant::now();
+        // Set if the probe is lost although Windows made the connection: the target's SYN-ACK came, and something
+        // on this computer kept it from the listener.
+        let mut target_hidden = false;
         let outcome = match socket.connect(&SocketAddr::new(target, port).into()) {
             // Non-blocking: the SYN is on its way.
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => match receiver.recv_timeout(timeout) {
@@ -194,7 +200,10 @@ impl TcpProber {
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => match socket.take_error() {
                     // A firewall on this computer refused the connection: no SYN left at all.
                     Ok(Some(error)) if error.raw_os_error() == Some(WSAEACCES) => Err(TcpError::Blocked),
-                    _ => Ok(ProbeOutcome::Lost),
+                    _ => {
+                        target_hidden = socket.peer_addr().is_ok();
+                        Ok(ProbeOutcome::Lost)
+                    }
                 },
             },
             // A local network reaches it at once; the SYN-ACK came before the call returned.
@@ -202,6 +211,9 @@ impl TcpProber {
             Err(error) => Err(TcpError::Socket(error)),
         };
         lock(&listener.waiting).probes.remove(&key);
+        if let Ok(outcome) = &outcome {
+            self.watch_answers(target, *outcome, target_hidden);
+        }
         outcome
     }
 
@@ -229,6 +241,56 @@ impl TcpProber {
         let listener = Listener::open(local)?;
         listeners.insert(local.ip(), Arc::clone(&listener));
         Ok(listener)
+    }
+
+    /// Who keeps the answers to the probes of `target` from Ping Watch, if a firewall on this computer does.
+    pub fn blocker(&self, target: IpAddr) -> Option<Blocker> {
+        lock(&self.watches).get(&target).and_then(|watch| watch.blocker(Instant::now()))
+    }
+
+    /// Forgets what the probes showed so far: firewall rules were just added, the next probes tell anew.
+    pub fn rules_added(&self) {
+        let now = SystemTime::now();
+        lock(&self.watches).values_mut().for_each(|watch| *watch = AnswerWatch::after_rules(now));
+    }
+
+    /// Takes the `outcome` of a probe of `target` into what is known about a firewall on this computer;
+    /// `target_hidden` if the probe was lost although its connection was made (the target answered). While
+    /// answers are missing, a lost probe also has the log of dropped packets read, now and then.
+    fn watch_answers(&self, target: IpAddr, outcome: ProbeOutcome, target_hidden: bool) {
+        let now = Instant::now();
+        let since = {
+            let mut watches = lock(&self.watches);
+            let watch = watches.entry(target).or_default();
+            match outcome {
+                ProbeOutcome::Reply { from, .. } if from == target => watch.target_heard(),
+                ProbeOutcome::Reply { .. } => watch.router_heard(now),
+                ProbeOutcome::Lost if target_hidden => watch.target_hidden(),
+                ProbeOutcome::Lost => {}
+            }
+            (outcome == ProbeOutcome::Lost && watch.check_due(now)).then(|| watch.log_since(SystemTime::now()))
+        };
+        let Some(since) = since else {
+            return;
+        };
+        // Read without the lock: other probes go on meanwhile.
+        let dropped = firewall::hop_answers_dropped(target, since).unwrap_or_else(|error| {
+            log::debug!("cannot read the log of dropped packets: {error}");
+            false
+        });
+        let blocked = {
+            let mut watches = lock(&self.watches);
+            let watch = watches.entry(target).or_default();
+            watch.log_read(dropped, now);
+            watch.blocked(now)
+        };
+        if blocked {
+            let windows = firewall::windows_firewall_on().unwrap_or_else(|error| {
+                log::debug!("cannot ask Windows Firewall whether it is on: {error}");
+                false
+            });
+            lock(&self.watches).entry(target).or_default().set_windows(windows);
+        }
     }
 }
 

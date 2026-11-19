@@ -29,6 +29,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
         "A firewall on this computer blocks Ping Watch's TCP connections",
         "Eine Firewall auf diesem Computer blockiert die TCP-Verbindungen von Ping Watch",
     ),
+    (
+        "A firewall on this computer blocks the answers to TCP probes",
+        "Eine Firewall auf diesem Computer blockiert die Antworten auf TCP-Messungen",
+    ),
     ("A new version is available: see About", "Eine neue Version ist verfügbar: siehe Info"),
     ("A snapshot needs a running trace", "Für einen Schnappschuss muss eine Messung laufen"),
     ("About", "Info"),
@@ -37,6 +41,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Address", "Adresse"),
     ("Address of the target", "Adresse des Ziels"),
     ("Address that answered", "Adresse, die geantwortet hat"),
+    (
+        "Adds Windows Firewall rules that let the answers in: the routers' ICMP errors for all programs, incoming TCP for Ping Watch",
+        "Fügt Windows-Firewall-Regeln hinzu, die die Antworten durchlassen: ICMP-Fehler der Router für alle Programme, eingehendes TCP für Ping Watch",
+    ),
     ("Alert: {measured} (rule: {rule})", "Alarm: {measured} (Regel: {rule})"),
     ("Alerts", "Alarme"),
     ("Alerts in this period", "Alarme in diesem Zeitraum"),
@@ -47,6 +55,7 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Alerts: {n} is on now|Alerts: {n} are on now", "Alarme: {n} ist gerade aktiv|Alarme: {n} sind gerade aktiv"),
     ("All", "Alles"),
     ("All targets", "Alle Ziele"),
+    ("Allow", "Zulassen"),
     ("Also when it's over", "Auch wenn es vorbei ist"),
     ("Also with a right click on a table's header.", "Auch per Rechtsklick auf den Tabellenkopf."),
     ("Appearance", "Darstellung"),
@@ -59,6 +68,10 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Avg", "Mittl."),
     ("Back to normal after {lasted} (worst: {worst})", "Wieder normal nach {lasted} (schlechtester Wert: {worst})"),
     ("Cancel", "Abbrechen"),
+    (
+        "Cannot add the Windows Firewall rules: {error}",
+        "Die Windows-Firewall-Regeln lassen sich nicht hinzufügen: {error}",
+    ),
     (
         "Cannot listen for TCP probe answers: {error}",
         "Antworten auf TCP-Messungen können nicht empfangen werden: {error}",
@@ -350,6 +363,11 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("What", "Ereignis"),
     ("What happened?", "Was ist passiert?"),
     ("When", "Wenn"),
+    (
+        "Windows Firewall blocks the answers to TCP probes",
+        "Die Windows-Firewall blockiert die Antworten auf TCP-Messungen",
+    ),
+    ("Windows Firewall rules added", "Windows-Firewall-Regeln hinzugefügt"),
     ("Windows sign-in", "Windows-Anmeldung"),
     ("With a Windows notification", "Mit einer Windows-Benachrichtigung"),
     ("Worst", "Schlechtester"),

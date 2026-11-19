@@ -14,6 +14,7 @@ use eframe::egui::{self, Button, CornerRadius, Frame, Margin, Rect, RichText, Se
 use crate::alerts::{Engine, Event, Observe, Rule, WindowStats};
 use crate::elevation::Rights;
 use crate::i18n::{self, Lang, Language, tr, trf, trn};
+use crate::probe::firewall::{self, Blocker};
 use crate::probe::names::NameCache;
 use crate::probe::tcp::TcpProber;
 use crate::snapshot::{self, Snapshot};
@@ -1106,8 +1107,9 @@ impl PingWatchApp {
 
     /// Status bar. On a target tab: its problem in red (network down, history off, unknown host) or its key
     /// numbers. On All targets: the same for the selected row; with no row selected, the number of targets and the
-    /// problems — the message if there is one, the count if there are more.
-    fn status_bar(&self, ui: &mut Ui) {
+    /// problems — the message if there is one, the count if there are more. Returns whether the Windows Firewall
+    /// rules for TCP probes were asked for (the button beside that problem).
+    fn status_bar(&self, ui: &mut Ui) -> bool {
         ui.horizontal(|ui| {
             // The outcome of what the user just did comes first, for a few seconds.
             if let Some(notice) = self.notice.as_ref().filter(|notice| notice.at.elapsed() < NOTICE_SHOWN) {
@@ -1116,7 +1118,7 @@ impl PingWatchApp {
                 } else {
                     ui.colored_label(theme::palette(ui).ink, &notice.text);
                 }
-                return;
+                return false;
             }
             let tab = match self.page {
                 Page::Target(index) => self.tabs.get(index),
@@ -1126,8 +1128,7 @@ impl PingWatchApp {
                     .and_then(|selected| self.tabs.iter().find(|tab| tab.title() == selected)),
             };
             if let Some(tab) = tab {
-                tab_status(ui, tab);
-                return;
+                return tab_status(ui, tab);
             }
             let active = self.alert_engine.active_count();
             if active > 0 {
@@ -1148,20 +1149,46 @@ impl PingWatchApp {
                     status_problem(ui, &trf!(ui, "Errors {count}", count = more.len()));
                 }
             }
+            false
+        })
+        .inner
+    }
+
+    /// Adds the Windows Firewall rules that let the answers to TCP probes in, and says how it went.
+    fn allow_in_firewall(&mut self) {
+        let language = self.settings.language;
+        self.notice = Some(match firewall::allow_answers() {
+            Ok(()) => {
+                self.tcp.rules_added();
+                Notice::done(tr!(language, "Windows Firewall rules added").to_owned())
+            }
+            Err(error) => {
+                log::warn!("cannot add the Windows Firewall rules: {error}");
+                Notice::problem(trf!(language, "Cannot add the Windows Firewall rules: {error}", error = error))
+            }
         });
     }
 }
 
-/// Status of one target: its problem in red, or target, average, loss, hops and whether it's paused.
-fn tab_status(ui: &mut Ui, tab: &Tab) {
+/// Status of one target: its problem in red, or target, average, loss, hops and whether it's paused. Windows
+/// Firewall keeping the answers to TCP probes away comes with a button for the rules that let them in; returns
+/// whether it was clicked.
+fn tab_status(ui: &mut Ui, tab: &Tab) -> bool {
     if let Some(problem) = tab.problem() {
         status_problem(ui, &problem);
-        return;
+        return tab.blocker() == Some(Blocker::WindowsFirewall)
+            && ui
+                .add(Button::new(tr!(ui, "Allow")).small())
+                .on_hover_text(tr!(
+                    ui,
+                    "Adds Windows Firewall rules that let the answers in: the routers' ICMP errors for all programs, incoming TCP for Ping Watch"
+                ))
+                .clicked();
     }
     let overview = tab.overview();
     let Some(label) = tab.label() else {
         ui.weak(&overview.status);
-        return;
+        return false;
     };
     status_segment(ui, tr!(ui, "Target"), label);
     let stats = overview.target_hop.as_ref().map(|hop| &hop.stats);
@@ -1187,6 +1214,7 @@ fn tab_status(ui: &mut Ui, tab: &Tab) {
         ui.separator();
         ui.colored_label(theme::palette(ui).warn, tr!(ui, "Paused"));
     }
+    false
 }
 
 /// The open page under the tab bar: a box continuing the open tab down to the status bar (its sides and bottom
@@ -1312,10 +1340,14 @@ impl eframe::App for PingWatchApp {
             .show_separator_line(false)
             .show(ui, |ui| self.tab_bar(ui));
         let status_frame = Frame::new().fill(theme::palette(ui).bar).inner_margin(Margin::symmetric(12, 5));
-        egui::Panel::bottom("status-bar")
+        if egui::Panel::bottom("status-bar")
             .frame(status_frame)
             .resizable(false)
-            .show(ui, |ui| self.status_bar(ui));
+            .show(ui, |ui| self.status_bar(ui))
+            .inner
+        {
+            self.allow_in_firewall();
+        }
         let context = tab::Context {
             names: &self.names,
             reader: self.reader.as_ref(),
