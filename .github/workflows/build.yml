@@ -29,7 +29,7 @@ jobs:
           toolchain: 1.99.1
           components: rustfmt, clippy
       - name: Install cargo-audit
-        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-audit@0.23.0
       - name: cargo audit
@@ -42,7 +42,7 @@ jobs:
         run: cargo test --locked
       # Writes the third-party license notices shipped with the app (build.cmd runs it).
       - name: Install cargo-about
-        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-about@0.9.3
       # Inno Setup 7 is not on Chocolatey and not on the runner image: the official release, pinned and checked.
