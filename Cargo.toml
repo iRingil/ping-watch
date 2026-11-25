@@ -1,6 +1,6 @@
 [package]
 name = "ping-watch"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2024"
 license = "PolyForm-Noncommercial-1.0.0"
 # Not on crates.io; also keeps the app itself out of the third-party notices (about.toml).
