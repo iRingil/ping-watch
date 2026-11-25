@@ -52,6 +52,19 @@ fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
     }
 }
 
+/// Renderer setup: Direct3D 12 only, unless `WGPU_BACKEND` names others. The default set includes Vulkan, and
+/// merely listing Vulkan adapters loads every installed Vulkan driver; the legacy Intel one for older integrated
+/// GPUs (`igvk64.dll`, 31.0.101.2xxx) crashes the process there before the window opens. Direct3D 12 is present
+/// on every Windows 10 and 11, with the WARP software renderer where no GPU supports it.
+fn renderer_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12);
+    eframe::egui_wgpu::WgpuConfiguration {
+        wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
+}
+
 /// Has the DLLs loaded later (by Windows' own libraries, on demand) come from System32 only, not from the
 /// program's folder, which any program of the user may write to while Ping Watch may run as administrator. The
 /// DLLs the executable imports get the same rule from the linker (`build.rs`).
@@ -112,7 +125,11 @@ fn main() -> anyhow::Result<()> {
             .with_inner_size([state.width.max(MIN_WINDOW_SIZE[0]), state.height.max(MIN_WINDOW_SIZE[1])])
             .with_maximized(state.maximized);
     }
-    let options = eframe::NativeOptions { viewport: window_icon(viewport), ..Default::default() };
+    let options = eframe::NativeOptions {
+        viewport: window_icon(viewport),
+        wgpu_options: renderer_options(),
+        ..Default::default()
+    };
     eframe::run_native(
         APP_NAME,
         options,
