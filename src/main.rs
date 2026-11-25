@@ -56,9 +56,13 @@ fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
 /// merely listing Vulkan adapters loads every installed Vulkan driver; the legacy Intel one for older integrated
 /// GPUs (`igvk64.dll`, 31.0.101.2xxx) crashes the process there before the window opens. Direct3D 12 is present
 /// on every Windows 10 and 11, with the WARP software renderer where no GPU supports it.
+/// No power preference (unless `WGPU_POWER_PREF` sets one): the GPU comes in the order Windows gives, which follows
+/// the user's choice in Settings → Display → Graphics; egui's default, high performance, would always take the
+/// discrete GPU of a laptop.
 fn renderer_options() -> eframe::egui_wgpu::WgpuConfiguration {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12);
+    setup.power_preference = eframe::wgpu::PowerPreference::from_env().unwrap_or(eframe::wgpu::PowerPreference::None);
     eframe::egui_wgpu::WgpuConfiguration {
         wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(setup),
         ..Default::default()
