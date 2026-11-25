@@ -429,7 +429,8 @@ impl AllTargets {
         request
     }
 
-    /// The charts of the ticked targets, one under another in table order, all over the page's period. They share
+    /// The charts of the ticked targets, one under another in table order, all over the page's period (chosen on the
+    /// first one). They share
     /// the pane's height equally; once that would make them shorter than [`CHART_MIN_HEIGHT`], the pane scrolls.
     fn charts(&mut self, ui: &mut Ui, tabs: &mut [Tab], history_path: Option<&Path>) {
         let count = tabs.iter().filter(|tab| tab.is_charted()).count();
@@ -440,6 +441,8 @@ impl AllTargets {
             ((ui.available_height() - gap * (count - 1.0)) / count).max(CHART_MIN_HEIGHT)
         };
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            // The period choice goes to the first chart drawn; those of stopped traces show only their title.
+            let mut controls = true;
             for (index, tab) in tabs.iter_mut().enumerate().filter(|(_, tab)| tab.is_charted()) {
                 let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
                 let mut child = ui.new_child(
@@ -449,7 +452,9 @@ impl AllTargets {
                         .id_salt(("chart", index)),
                 );
                 child.set_clip_rect(rect.intersect(ui.clip_rect()));
-                tab.chart(&mut child, history_path, &mut self.settings.trace.period);
+                if tab.chart(&mut child, history_path, &mut self.settings.trace.period, controls) {
+                    controls = false;
+                }
             }
         });
     }

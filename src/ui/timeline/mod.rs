@@ -132,6 +132,9 @@ pub struct Timeline {
     compact: bool,
     /// No slider under the chart: another chart of the same stack, further down, has it.
     slider_hidden: bool,
+    /// No period choice, shown range or reset button in the header: the first chart of the stack has them, and they
+    /// apply to every chart in it.
+    controls_hidden: bool,
 }
 
 impl Timeline {
@@ -163,6 +166,12 @@ impl Timeline {
     /// Leaves out the slider (`hidden`), for a chart that isn't the last of its stack.
     pub fn set_slider_hidden(&mut self, hidden: bool) {
         self.slider_hidden = hidden;
+    }
+
+    /// Leaves out the period choice, the shown range and the reset button (`hidden`), for a chart that isn't the
+    /// first of its stack.
+    pub fn set_controls_hidden(&mut self, hidden: bool) {
+        self.controls_hidden = hidden;
     }
 
     /// Time range the chart shows, Unix ms.
@@ -263,7 +272,7 @@ impl Timeline {
         !self.compact && !self.slider_hidden
     }
 
-    /// Title, period and the shown range; with `commentable` (the target id), a button to comment the moment at the
+    /// Title, period and the shown range (the latter two not with `controls_hidden`); with `commentable` (the target id), a button to comment the moment at the
     /// right end of the chart (the right-click menu does it for any moment, but only with the mouse).
     fn header(&mut self, ui: &mut Ui, title: &str, now_ms: i64, commentable: Option<i64>) {
         ui.horizontal(|ui| {
@@ -277,6 +286,9 @@ impl Timeline {
                 {
                     let ts_ms = self.end_ms.unwrap_or(now_ms);
                     self.draft = Some(Draft { id: None, target_id, ts_ms, text: String::new(), focused: false });
+                }
+                if self.controls_hidden {
+                    return;
                 }
                 egui::ComboBox::from_id_salt("timeline-period")
                     .selected_text(self.period.label(ui.language()))

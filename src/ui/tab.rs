@@ -311,26 +311,30 @@ impl Tab {
     }
 
     /// Draws the target's chart for the overview page (the target hop over `period`, which the chart's own
-    /// controls may change).
-    pub fn chart(&mut self, ui: &mut Ui, history_path: Option<&Path>, period: &mut Period) {
+    /// controls may change; only with `controls`, as the first chart of the page has them). Returns whether the
+    /// chart itself was drawn (the trace runs), not just its title.
+    pub fn chart(&mut self, ui: &mut Ui, history_path: Option<&Path>, period: &mut Period, controls: bool) -> bool {
         let route = self.route();
         let title = self.label().unwrap_or_else(|| self.title());
         let Some(chart) = &mut self.chart else {
-            return;
+            return false;
         };
         chart.set_period(*period);
+        chart.set_controls_hidden(!controls);
         // A paused trace's chart stands still here too.
         chart.set_end_ms(self.chart_end_ms);
         match (&self.state, route.as_ref().and_then(|route| route.hops().last())) {
             (State::Running(session), Some(_)) => {
                 chart.show(ui, history_path, session.target_id, HopKey::Target, &title, self.interval);
+                *period = chart.period();
+                true
             }
             _ => {
                 ui.label(RichText::new(title).font(theme::heading_font(15.0)));
                 ui.weak(tr!(ui, "The chart appears once the trace runs."));
+                false
             }
         }
-        *period = chart.period();
     }
 
     /// Stores the running trace's interval, focus, timeline period and probe for its target whenever they changed.
@@ -641,6 +645,7 @@ impl Tab {
                 chart.timeline.set_period(self.chart_period);
                 chart.timeline.set_end_ms(self.chart_end_ms);
                 chart.timeline.set_slider_hidden(position != last);
+                chart.timeline.set_controls_hidden(position != 0);
                 let height = if position == last { height + slider } else { height };
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
                 let mut child = ui.new_child(
