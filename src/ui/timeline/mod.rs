@@ -590,6 +590,16 @@ fn draw_charts(
     // Leave exactly the slider's row: taking more than the panel has would grow the panel every frame.
     let slider_row = if slider { slider_height(ui) } else { 0.0 };
     let height = (ui.available_height() - slider_row).max(60.0);
+    // The user's comments, then the alerts' marks (worded in the language shown, from the journal), by time.
+    let alert_marks = shown.alerts.iter().flat_map(|entry| entry.marks(language));
+    let mut marks: Vec<(i64, String)> = shown
+        .comments
+        .iter()
+        .map(|comment| (comment.ts_ms, comment.text.clone()))
+        .chain(alert_marks)
+        .filter(|(ts_ms, _)| (window.from_ms..=window.to_ms).contains(ts_ms))
+        .collect();
+    marks.sort_by_key(|(ts_ms, _)| *ts_ms);
     let response = base("timeline", scale, height)
         .x_axis_formatter(move |mark, _| {
             if series::axis_label_fits(mark.value, from_s, to_s) {
@@ -631,19 +641,116 @@ fn draw_charts(
                 })
                 .collect();
             plot.bar_chart(BarChart::new(tr!(language, "Packet loss"), bars).color(palette.loss));
-            // The user's comments, then the alerts' marks (worded in the language shown, from the journal).
-            let alert_marks = shown.alerts.iter().flat_map(|entry| entry.marks(language));
-            let marks = shown.comments.iter().map(|comment| (comment.ts_ms, comment.text.clone())).chain(alert_marks);
-            for (ts_ms, text) in marks.filter(|(ts_ms, _)| (window.from_ms..=window.to_ms).contains(ts_ms)) {
-                let x = seconds(ts_ms);
-                plot.vline(VLine::new(&text, x).color(palette.comment).style(LineStyle::dashed_dense()));
-                plot.add(
-                    Text::new("", PlotPoint::new(x, scale), &text).anchor(Align2::LEFT_TOP).color(palette.comment),
+            // Their labels are laid out and drawn over the plot afterward, apart from each other.
+            for (ts_ms, _) in &marks {
+                plot.vline(
+                    VLine::new("", seconds(*ts_ms))
+                        .color(palette.comment)
+                        .style(LineStyle::dashed_dense())
+                        .allow_hover(false),
                 );
             }
             plot.pointer_coordinate()
         });
-    (response.response, response.inner)
+    let transform = response.transform;
+    let x_of = |ts_ms: i64| transform.position_from_point_x(seconds(ts_ms));
+    let labels =
+        draw_mark_labels(ui, response.response.rect, tr!(language, "Latency (ms)"), &marks, x_of, palette.comment);
+    let chart = mark_tooltip(response.response, &marks, &labels, x_of);
+    (chart, response.inner)
+}
+
+/// Space between a mark's line and its label, and between two labels of a row, in points.
+const LABEL_GAP: f32 = 4.0;
+/// Narrowest mark label written, in points; a narrower one is left out (its line and tooltip stay).
+const MIN_LABEL_WIDTH: f32 = 28.0;
+/// Widest mark label, in points: a route change fits whole, a long comment is cut short (full text on hover).
+const MAX_LABEL_WIDTH: f32 = 400.0;
+
+/// Draws the labels of `marks` (time, text; sorted by time) at the top of the chart `rect` (titled `title` at its
+/// top left), in rows, cut short when too long or left out where they would run into each other; `x_of` places a
+/// time on screen. Returns where each label written lies (`None` for those left out).
+fn draw_mark_labels(
+    ui: &Ui,
+    rect: egui::Rect,
+    title: &str,
+    marks: &[(i64, String)],
+    x_of: impl Fn(i64) -> f32,
+    color: Color32,
+) -> Vec<Option<egui::Rect>> {
+    // The plot's own texts (the title) are in the small style.
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let painter = ui.painter_at(rect);
+    let title_width = painter.layout_no_wrap(title.to_owned(), font.clone(), color).size().x;
+    // One row each: a comment's line breaks would push it into the rows below.
+    let texts: Vec<String> =
+        marks.iter().map(|(_, text)| text.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    let galleys: Vec<_> = texts.iter().map(|text| painter.layout_no_wrap(text.clone(), font.clone(), color)).collect();
+    let lefts: Vec<(f32, f32)> = marks
+        .iter()
+        .zip(&galleys)
+        .map(|((ts_ms, _), galley)| (x_of(*ts_ms) + LABEL_GAP, galley.size().x))
+        .collect();
+    let row_height = ui.text_style_height(&egui::TextStyle::Small);
+    let room = series::LabelRoom {
+        rows: series::label_rows(rect.height(), row_height),
+        title_end: rect.left() + title_width + LABEL_GAP * 2.0,
+        right: rect.right(),
+        gap: LABEL_GAP,
+        min_width: MIN_LABEL_WIDTH,
+        max_width: MAX_LABEL_WIDTH,
+    };
+    let places = series::place_labels(&lefts, room);
+    let mut rects = Vec::with_capacity(places.len());
+    for (((left, _), galley), (place, text)) in lefts.iter().zip(galleys).zip(places.iter().zip(texts)) {
+        let Some(place) = place else {
+            rects.push(None);
+            continue;
+        };
+        let galley = if place.width < galley.size().x {
+            let mut job = egui::text::LayoutJob::simple_singleline(text, font.clone(), color);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(place.width);
+            painter.layout_job(job)
+        } else {
+            galley
+        };
+        #[expect(clippy::cast_precision_loss, reason = "at most three rows")]
+        let top = rect.top() + row_height * place.row as f32;
+        let at = egui::pos2(*left, top);
+        rects.push(Some(egui::Rect::from_min_size(at, galley.size())));
+        painter.galley(at, galley, color);
+    }
+    rects
+}
+
+/// Shows the full texts of the marks whose line is near the pointer or whose label (`labels`, as drawn) is under it
+/// in a tooltip over `chart`, as labels may be cut short or left out; `x_of` places a time on screen.
+fn mark_tooltip(
+    chart: Response,
+    marks: &[(i64, String)],
+    labels: &[Option<egui::Rect>],
+    x_of: impl Fn(i64) -> f32,
+) -> Response {
+    let Some(pointer) = chart.hover_pos() else {
+        return chart;
+    };
+    let near: Vec<&(i64, String)> = marks
+        .iter()
+        .zip(labels)
+        .filter(|((ts_ms, _), label)| {
+            (x_of(*ts_ms) - pointer.x).abs() <= COMMENT_PICK_DISTANCE
+                || label.is_some_and(|label| label.contains(pointer))
+        })
+        .map(|(mark, _)| mark)
+        .collect();
+    if near.is_empty() {
+        return chart;
+    }
+    chart.on_hover_ui_at_pointer(|ui| {
+        for (ts_ms, text) in near {
+            ui.label(format!("{}  {text}", clock(*ts_ms, "%H:%M:%S")));
+        }
+    })
 }
 
 /// Adds a trace's line segments and its clipped-spike markers to `plot`.

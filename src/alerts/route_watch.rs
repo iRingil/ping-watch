@@ -2,7 +2,8 @@
 //! counts only once it has held for [`STABLE_CHECKS`] checks in a row, and for a few probes of every hop (a hop
 //! probed once a minute shows a stray answer for a minute). Some providers balance traffic over several
 //! routers, so a hop answers from two addresses in turn, each for longer than that; a route seen before (one of the
-//! last [`KNOWN_ROUTES`]) is therefore no change either. A hop that didn't answer on one of the routes compared is
+//! last [`KNOWN_ROUTES`]) is therefore no change either — unless hop 1, the gateway, differs: that is another
+//! network on this PC (cable unplugged, Wi-Fi switched), never balancing. A hop that didn't answer on one of the routes compared is
 //! not compared at all.
 
 use std::net::IpAddr;
@@ -115,6 +116,12 @@ fn differs(one: &Path, other: &Path) -> bool {
         || one.iter().any(|(ttl, address)| address_at(other, *ttl).is_some_and(|there| there != *address))
 }
 
+/// Whether hop 1, the gateway of this PC, answered on both routes from different addresses: another network (a
+/// cable unplugged, Wi-Fi switched), never load balancing.
+fn gateway_changed(one: &Path, other: &Path) -> bool {
+    address_at(one, 1).zip(address_at(other, 1)).is_some_and(|(one, other)| one != other)
+}
+
 /// Route watch of one target.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteWatch {
@@ -158,13 +165,16 @@ impl RouteWatch {
         }
         self.candidate = None;
         let before = self.stable.replace(path.clone()).unwrap_or_default();
-        if self.known.iter().any(|known| !differs(known, &path)) {
+        let known = self.known.iter().any(|known| !differs(known, &path));
+        if known && !gateway_changed(&before, &path) {
             return None;
         }
-        if self.known.len() >= KNOWN_ROUTES {
-            self.known.remove(0);
+        if !known {
+            if self.known.len() >= KNOWN_ROUTES {
+                self.known.remove(0);
+            }
+            self.known.push(path.clone());
         }
-        self.known.push(path.clone());
         Some(RouteChange { before, after: path })
     }
 }
@@ -233,6 +243,18 @@ mod tests {
         assert_eq!(hold(&mut watch, &[1, 2, 3]), None, "back to the first one");
         assert_eq!(hold(&mut watch, &[1, 5, 3]), None, "and again");
         assert!(hold(&mut watch, &[1, 7, 3]).is_some(), "a third route is new");
+    }
+
+    #[test]
+    fn a_return_to_another_gateway_is_a_change() {
+        // Cable, then mobile Wi-Fi, then the cable again: hop 1 differs each time.
+        let mut watch = RouteWatch::default();
+        watch.check(path(&[1, 2, 3]), STABLE_CHECKS);
+        assert!(hold(&mut watch, &[9, 8, 7, 3]).is_some(), "to Wi-Fi");
+        let back = hold(&mut watch, &[1, 2, 3]).expect("back to the cable is reported");
+        assert_eq!(back.note().describe(Language::English), "hop 1 10.0.0.9 \u{2192} 10.0.0.1, hops 4 \u{2192} 3");
+        assert!(hold(&mut watch, &[9, 8, 7, 3]).is_some(), "and to Wi-Fi again");
+        assert_eq!(watch.known.len(), 2, "known routes aren't added twice");
     }
 
     #[test]

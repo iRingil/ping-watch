@@ -143,6 +143,95 @@ pub fn axis_label_fits(value: f64, from: f64, to: f64) -> bool {
     value >= from + margin && value <= to - margin
 }
 
+/// Most rows of mark labels at the chart's top.
+const MAX_LABEL_ROWS: usize = 3;
+/// Share of the chart's height that mark labels may cover, so they don't hide the data.
+const LABEL_HEIGHT_SHARE: f32 = 0.4;
+
+/// Number of rows of mark labels on a chart `height` points tall with text rows `row_height` tall: at least one,
+/// at most [`MAX_LABEL_ROWS`], covering no more than [`LABEL_HEIGHT_SHARE`] of the chart.
+pub fn label_rows(height: f32, row_height: f32) -> usize {
+    if row_height <= 0.0 {
+        return 1;
+    }
+    let fitting = (height * LABEL_HEIGHT_SHARE / row_height).floor();
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to 1..=3 first")]
+    let rows = fitting.clamp(1.0, MAX_LABEL_ROWS as f32) as usize;
+    rows
+}
+
+/// Where a mark's label goes: its row from the top and the width it may take (less than its text's: cut short).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LabelPlace {
+    /// Row, 0 = the top one.
+    pub row: usize,
+    /// Width left for the text.
+    pub width: f32,
+}
+
+/// Room for mark labels at the chart's top, all in points.
+#[derive(Debug, Clone, Copy)]
+pub struct LabelRoom {
+    /// Number of rows.
+    pub rows: usize,
+    /// Where the top row is free from (right of the chart's title).
+    pub title_end: f32,
+    /// The chart's right edge.
+    pub right: f32,
+    /// Space kept between two labels of a row.
+    pub gap: f32,
+    /// Narrowest label worth writing; a narrower one is left out (its line stays).
+    pub min_width: f32,
+    /// Widest label: a longer text is cut short even with room for it.
+    pub max_width: f32,
+}
+
+/// Lays out the labels of marks `(left edge, full width)`, sorted by left edge, in `room`. A label goes to the first
+/// row free at its left edge; with none free, it takes the row whose last label started first, that label cut short
+/// to end before it, if at least `room.min_width` of the cut label stays. Otherwise, or if less than that fits
+/// before the right edge, the label is left out (`None`). No label is wider than `room.max_width`.
+pub fn place_labels(marks: &[(f32, f32)], room: LabelRoom) -> Vec<Option<LabelPlace>> {
+    let mut places: Vec<Option<LabelPlace>> = vec![None; marks.len()];
+    // Per row: where it is free from, and its last label (the title isn't one: it is never cut).
+    let mut rows: Vec<(f32, Option<usize>)> = vec![(f32::NEG_INFINITY, None); room.rows];
+    if let Some(top) = rows.first_mut() {
+        top.0 = room.title_end;
+    }
+    for (index, &(left, width)) in marks.iter().enumerate() {
+        let width = width.min(room.max_width).min(room.right - left);
+        if width < room.min_width {
+            continue;
+        }
+        let free = rows.iter().position(|&(free_from, _)| free_from <= left);
+        let cut = || {
+            rows.iter()
+                .enumerate()
+                .filter_map(|(row, &(_, last))| Some((row, last?, marks.get(last?)?.0)))
+                .filter(|&(_, _, start)| left - room.gap - start >= room.min_width)
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+        };
+        let row = match free {
+            Some(row) => row,
+            None => {
+                let Some((row, last, start)) = cut() else {
+                    continue;
+                };
+                if let Some(Some(place)) = places.get_mut(last) {
+                    place.width = left - room.gap - start;
+                }
+                row
+            }
+        };
+        if let Some(slot) = rows.get_mut(row) {
+            *slot = (left + width + room.gap, Some(index));
+        }
+        if let Some(place) = places.get_mut(index) {
+            *place = Some(LabelPlace { row, width });
+        }
+    }
+    places
+}
+
 /// Time range of a history query and its bucket size, all in Unix milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
@@ -478,6 +567,68 @@ mod tests {
         assert!(!axis_label_fits(99.0, 0.0, 100.0));
         assert!(axis_label_fits(50.0, 0.0, 100.0));
         assert!(axis_label_fits(5.0, 0.0, 100.0));
+    }
+
+    /// Room of three rows from 0 to 1000, the title ending at 100, gap 5, labels at least 20 wide.
+    fn room() -> LabelRoom {
+        LabelRoom { rows: 3, title_end: 100.0, right: 1_000.0, gap: 5.0, min_width: 20.0, max_width: 400.0 }
+    }
+
+    #[test]
+    fn label_rows_follow_the_chart_height() {
+        assert_eq!(label_rows(80.0, 14.0), 2);
+        assert_eq!(label_rows(30.0, 14.0), 1);
+        assert_eq!(label_rows(400.0, 14.0), 3);
+        assert_eq!(label_rows(80.0, 0.0), 1);
+    }
+
+    #[test]
+    fn labels_far_apart_share_the_top_row() {
+        let places = place_labels(&[(200.0, 100.0), (400.0, 100.0)], room());
+        assert_eq!(places, vec![Some(LabelPlace { row: 0, width: 100.0 }), Some(LabelPlace { row: 0, width: 100.0 })]);
+    }
+
+    #[test]
+    fn overlapping_labels_go_down_a_row() {
+        // Three events seconds apart, as an alert's start and its first marks.
+        let places = place_labels(&[(200.0, 300.0), (210.0, 300.0), (220.0, 300.0)], room());
+        let rows: Vec<_> = places.iter().map(|place| place.map(|place| place.row)).collect();
+        assert_eq!(rows, vec![Some(0), Some(1), Some(2)]);
+        assert!(places.iter().flatten().all(|place| place.width == 300.0));
+    }
+
+    #[test]
+    fn a_label_on_the_title_goes_down_a_row() {
+        let places = place_labels(&[(50.0, 100.0)], room());
+        assert_eq!(places, vec![Some(LabelPlace { row: 1, width: 100.0 })]);
+    }
+
+    #[test]
+    fn with_every_row_taken_the_earliest_label_is_cut_short() {
+        let places = place_labels(&[(200.0, 300.0), (210.0, 300.0), (220.0, 300.0), (300.0, 300.0)], room());
+        // The first label (row 0) ends before the fourth, which takes its row.
+        assert_eq!(places.first(), Some(&Some(LabelPlace { row: 0, width: 95.0 })));
+        assert_eq!(places.get(3), Some(&Some(LabelPlace { row: 0, width: 300.0 })));
+    }
+
+    #[test]
+    fn a_label_without_room_is_left_out() {
+        // The fourth starts too close to all three for any of them to keep 20 points.
+        let places = place_labels(&[(200.0, 300.0), (210.0, 300.0), (220.0, 300.0), (222.0, 300.0)], room());
+        assert_eq!(places.get(3), Some(&None));
+        assert!(places.iter().take(3).all(|place| place.is_some_and(|place| place.width == 300.0)));
+    }
+
+    #[test]
+    fn long_labels_are_cut_short() {
+        let places = place_labels(&[(200.0, 900.0), (700.0, 100.0)], room());
+        assert_eq!(places, vec![Some(LabelPlace { row: 0, width: 400.0 }), Some(LabelPlace { row: 0, width: 100.0 })]);
+    }
+
+    #[test]
+    fn labels_stop_at_the_right_edge() {
+        let places = place_labels(&[(900.0, 300.0), (990.0, 300.0)], room());
+        assert_eq!(places, vec![Some(LabelPlace { row: 0, width: 100.0 }), None]);
     }
 
     #[test]
